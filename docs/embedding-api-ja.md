@@ -54,16 +54,57 @@ if (!out.ok) {
 }
 ```
 
+実行ごとのステップ数と関数呼び出し深度は `RunOptions` で制限できます。
+値 `0` は無制限を表します。
+
+```d
+auto options = Dua.RunOptions();
+options.limits.maxSteps = 100_000;
+options.limits.maxCallDepth = 128;
+
+auto out = engine.runSafe(source, options);
+if (!out.ok)
+{
+    if (out.errorKind == Dua.RunErrorKind.stepLimit
+        || out.errorKind == Dua.RunErrorKind.callDepthLimit)
+    {
+        // 信頼できないスクリプトが実行予算を超過
+    }
+}
+```
+
+`stepsExecuted` から実際に消費した概算ステップ数を取得できます。ステップは文と式の
+実行時に加算される安全制御用の単位であり、性能測定用の安定した命令数ではありません。
+ネイティブ関数の内部処理はステップ制限の対象外です。
+
+`check(source)` はスクリプトを実行せず、基本型の宣言・代入、関数引数、
+戻り値の明白な不一致を `CheckDiagnostic[]` として返します。
+
+```d
+auto diagnostics = engine.check(source);
+foreach (diagnostic; diagnostics)
+{
+    writeln(diagnostic.line, ":", diagnostic.column, ": ", diagnostic.message);
+}
+
+auto checkedOptions = Dua.RunOptions();
+checkedOptions.typeCheck = true;
+auto checked = engine.runSafe(source, checkedOptions);
+```
+
+現在の事前検査は保守的で、動的なテーブルプロパティ、ネイティブ関数の戻り値、
+`any` は実行時の型境界検査に委ねます。
+
 ### 2.3 モジュール
 
 ```d
 engine.registerModule("game.rules", q{
-    fn bonus(x) { return x + 10; }
+    any bonus(any x) { return x + 10; }
     return { bonus = bonus };
 });
 
 auto v = engine.run(q{
-    let rules = require("game.rules");
+    auto rules = require("game.rules");
     return rules.bonus(5);
 });
 assert(v.toInt() == 15);
@@ -77,7 +118,7 @@ assert(v.toInt() == 15);
 
 ```d
 engine.registerModule("math.plus10", q{
-    export fn add10(x) { return x + 10; }
+    export any add10(any x) { return x + 10; }
 });
 
 auto v2 = engine.run(q{
@@ -102,7 +143,7 @@ Dua.Value evalOnce(string source) {
 
 // 推奨パターン: 不要な巨大値への参照を落とす
 auto e = new Dua.ScriptEngine();
-auto large = e.run("return { data = #[1,2,3,4,5] };");
+auto large = e.run("return { data = [1,2,3,4,5] };");
 // ... 利用後
 large = Dua.Value.init; // 参照を切って GC 対象化しやすくする
 ```
@@ -242,11 +283,11 @@ if (!out.ok) {
 28. ビット演算（`&`, `>>`, `<<`, `^`, `|`）。
 29. 計算キー付きテーブルリテラル（`[key] = value`）。
 30. 配列要素を持つテーブルの `foreach` 列挙。
-31. `#[...]` / `#{...}` リテラル糖衣構文。
+31. 配列・テーブルリテラル。
 32. `coroutine.create/resume/status` と `yield`。
 33. `string.trim` / `string.contains` / `string.replace`。
 34. `math.min` / `math.max` と `string.len`。
-35. 短縮ラムダ `fn x => ...` / `fn(a,b) => ...`。
+35. 短縮ラムダ `(any x) => ...` / `(any a, any b) => ...`。
 36. 戻り値なしラムダ構文 `:>` 
 37. `map` / `filter`（配列）と `table.map` / `table.filter`（テーブル）。
 38. 行コメント・ネストブロックコメントとスライス式。
@@ -258,24 +299,24 @@ if (!out.ok) {
 
 ```d
 auto n = engine.run(q{
-    let evens = [1, 2, 3, 4, 5]
-        .map(fn(x) => x * 2)
-        .filter(fn(x) => x % 4 == 0);
+    auto evens = [1, 2, 3, 4, 5]
+        .map((any x) => x * 2)
+        .filter((any x) => x % 4 == 0);
     return evens[0] + evens[1]; // 4 + 8
 });
 assert(n.toInt() == 12);
 ```
 
-`map(xs, fn)` / `filter(xs, fn)` の入れ子でも同じ結果になります。
+`map(xs, callback)` / `filter(xs, callback)` の入れ子でも同じ結果になります。
 
 **戻り値なしラムダ `:>`（副作用用途）**
 
 ```d
 auto sinkResult = engine.run(q{
-    let box = { v = 0 };
-    let sink = fn(x) :> rawset(box, "v", x * 3);
-    let out = sink(7);
-    return #[box.v, out == null];
+    auto box = { v = 0 };
+    auto sink = (any x) :> rawset(box, "v", x * 3);
+    auto out = sink(7);
+    return [box.v, out == null];
 });
 ```
 
@@ -283,13 +324,13 @@ auto sinkResult = engine.run(q{
 
 ```d
 auto co = engine.run(q{
-    let c = coroutine.create(fn() {
+    auto c = coroutine.create(() {
         coroutine.yield(10);
         return 20;
     });
-    let a = coroutine.resume(c); // 10
-    let b = coroutine.resume(c); // 20
-    return #[a, b, coroutine.status(c)];
+    auto a = coroutine.resume(c); // 10
+    auto b = coroutine.resume(c); // 20
+    return [a, b, coroutine.status(c)];
 });
 ```
 
@@ -297,9 +338,9 @@ auto co = engine.run(q{
 
 ```d
 auto ok = engine.run(q{
-    let a = pcall(fn() { return 123; });
-    let b = pcall(fn() { error("boom"); });
-    return #[a[0], b[0]];
+    auto a = pcall(() { return 123; });
+    auto b = pcall(() { error("boom"); });
+    return [a[0], b[0]];
 });
 ```
 
@@ -307,14 +348,14 @@ auto ok = engine.run(q{
 
 ```d
 engine.registerModule("counter.mod", q{
-    let n = 0;
-    export fn next() { n = n + 1; return n; }
+    auto n = 0;
+    export any next() { n = n + 1; return n; }
 });
 
 auto r = engine.run(q{
     import "counter.mod" as c1;
     import "counter.mod" as c2;
-    return #[c1.next(), c2.next()]; // #[1, 2]
+    return [c1.next(), c2.next()]; // [1, 2]
 });
 ```
 

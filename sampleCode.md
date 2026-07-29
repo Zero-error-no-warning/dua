@@ -113,8 +113,8 @@ void main() {
 #### スクリプト側（`battle.dua`）
 
 ```D
-let total = sum(damages);
-let rank = total > 20 ? "A" : "B";
+auto total = sum(damages);
+auto rank = total > 20 ? "A" : "B";
 
 return {
     name = stats.name,
@@ -177,8 +177,8 @@ void main() {
 #### スクリプト側（`main.dua`）
 
 ```D
-let rules = require("rules");
-let p = { attack = 10 };
+auto rules = require("rules");
+auto p = { attack = 10 };
 p = rules.buff(p);
 return p.attack;
 ```
@@ -186,12 +186,12 @@ return p.attack;
 #### スクリプト側（`rules.dua`）
 
 ```D
-let rules = {
-    buff = fn(player) {
+auto rules = {
+    buff = (any player) {
         player.attack = player.attack + 5;
         return player;
     },
-    nerf = fn(player) {
+    nerf = (any player) {
         player.attack = math.max(player.attack - 2, 0);
         return player;
     }
@@ -255,22 +255,22 @@ void main() {
 #### スクリプト側（`price.dua`）
 
 ```D
-fn sum(head, tail...) {
-    let total = head;
+any sum(any head, any tail...) {
+    auto total = head;
     foreach (v; tail) {
         total = total + v;
     }
     return total;
 }
 
-fn applyCoupon(total, rate) {
-    let discounted = total * (1.0 - rate);
-    let fee = discounted > 100 ? 0 : 5;
+any applyCoupon(any total, any rate) {
+    auto discounted = total * (1.0 - rate);
+    auto fee = discounted > 100 ? 0 : 5;
     return discounted + fee, fee;
 }
 
-let subtotal = sum(30, 40, 50);
-let grand, fee = applyCoupon(subtotal, 0.1);
+auto subtotal = sum(30, 40, 50);
+auto grand, fee = applyCoupon(subtotal, 0.1);
 
 return { subtotal = subtotal, fee = fee, grand = grand };
 ```
