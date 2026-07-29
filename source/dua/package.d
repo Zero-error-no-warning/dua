@@ -17,4 +17,8 @@ struct Dua
     alias CallableValue = dua.value.CallableValue;
     alias ScriptEngine = dua.runtime.ScriptEngine;
     alias RunOutcome = dua.runtime.RunOutcome;
+    alias RunErrorKind = dua.runtime.RunErrorKind;
+    alias ExecutionLimits = dua.runtime.ExecutionLimits;
+    alias RunOptions = dua.runtime.RunOptions;
+    alias CheckDiagnostic = dua.runtime.CheckDiagnostic;
 }

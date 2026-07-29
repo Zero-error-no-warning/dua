@@ -12,6 +12,13 @@ Dua は、**D 言語アプリケーションへ組み込み可能な軽量スク
 - `bindAuto` / `engine["name"] = value` による自動変換バインド（aggregate は reflect）
 - `registerModule` + `require(...)` によるモジュール読み込み
 - `RunOutcome` によるエラー情報とスタックトレース取得
+- `#` / `//` / `/+ ... +/`（ネスト可）によるコメント
+- 参照型の配列・テーブルと `[...array]` / `{...table}` による浅いコピー
+- `auto` と `int` / `double` / `bool` / `string` による型付き宣言・関数
+- `delegate` 型と `=>` / `:>` による型付きラムダ
+- `alias` によるテーブル型、型spread、Union / Optional型
+- `try` / `catch` と構造化エラーテーブル
+- `check(source)` と `RunOptions.typeCheck` による事前型診断
 
 ## クイックスタート
 
@@ -43,7 +50,7 @@ void main()
     });
 
     auto result = engine.run(q{
-        let v = add(base, 5);
+        auto v = add(base, 5);
         return v;
     });
 

@@ -42,33 +42,33 @@ void main()
     });
 
     engine.registerModule("player_mod", q{
-        let extra = { rankBoost = 5 };
+        auto extra = { rankBoost = 5 };
         return extra;
     });
 
     immutable script = q{
-        fn suffix(self, text) {
+        any suffix(any self, any text) {
             return { name = self.name ~ text };
         }
 
-        fn buildProfile(label, total) {
+        any buildProfile(any label, any total) {
             return {
                 label = label,
                 total = total,
                 job = player.job,
                 resource = stats.hp + stats.mp,
                 name = label,
-                opBinary~ = fn(self, rhs) {
+                opBinary~ = (any self, any rhs) {
                     return buildProfile(self.label ~ rhs.label, self.total + rhs.total);
                 }
             };
         }
 
-        let total = sum(baseDamage);
-        let mod = require("player_mod");
-        let profile = buildProfile(stats.name, total);
-        let merged = profile ~ buildProfile("-elite", 2);
-        let chained = merged.suffix("-v1").suffix("-final");
+        auto total = sum(baseDamage);
+        auto mod = require("player_mod");
+        auto profile = buildProfile(stats.name, total);
+        auto merged = profile ~ buildProfile("-elite", 2);
+        auto chained = merged.suffix("-v1").suffix("-final");
         profile.rank = player.level + 10 + mod.rankBoost;
         profile.title = chained.name;
         profile.debug = json.encode(profile);

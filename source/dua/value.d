@@ -308,7 +308,7 @@ struct Value
                 }
                 return "{" ~ parts.join(", ") ~ "}";
             case ValueKind.function_:
-                return "<fn " ~ functionValue.debugName ~ ">";
+                return "<function " ~ functionValue.debugName ~ ">";
             case ValueKind.native:
                 return nativeTypeName ~ "(" ~ nativeDisplay ~ ")";
         }
@@ -338,7 +338,7 @@ struct Value
                 }
                 return "{" ~ parts.join(", ") ~ "}";
             case ValueKind.function_:
-                return "<fn " ~ functionValue.debugName ~ ">";
+                return "<function " ~ functionValue.debugName ~ ">";
             case ValueKind.native:
                 return "<" ~ nativeTypeName ~ ":" ~ nativeDisplay ~ ">";
         }
