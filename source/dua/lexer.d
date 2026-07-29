@@ -20,8 +20,12 @@ enum TokenKind
     identifier,
     number,
     string_,
-    keywordFn,
-    keywordLet,
+    keywordAuto,
+    keywordDelegate,
+    keywordAlias,
+    keywordIs,
+    keywordTry,
+    keywordCatch,
     keywordReturn,
     keywordIf,
     keywordElse,
@@ -76,8 +80,6 @@ enum TokenKind
     shiftLeft,
     shiftRight,
     fatArrow,
-    hashLeftBracket,
-    hashLeftBrace,
     dotDot,
     ellipsis
 }
@@ -92,6 +94,7 @@ Token[] lex(string source)
     while (index < source.length)
     {
         auto current = source[index];
+        auto startLine = line;
         auto startColumn = column;
 
         if (current == ' ' || current == '\t' || current == '\r')
@@ -108,6 +111,15 @@ Token[] lex(string source)
             continue;
         }
         if (current == '/' && peek(source, index + 1) == '/')
+        {
+            while (index < source.length && source[index] != '\n')
+            {
+                ++index;
+                ++column;
+            }
+            continue;
+        }
+        if (current == '#')
         {
             while (index < source.length && source[index] != '\n')
             {
@@ -147,7 +159,7 @@ Token[] lex(string source)
                 ++index;
                 ++column;
             }
-            enforce(nesting == 0, format("Unterminated block comment at %s:%s", line, startColumn));
+            enforce(nesting == 0, format("Unterminated block comment at %s:%s", startLine, startColumn));
             continue;
         }
         if (isAlpha(current) || current == '_')
@@ -166,7 +178,8 @@ Token[] lex(string source)
         {
             auto start = index;
             bool seenDot;
-            while (index < source.length && (isDigit(source[index]) || (!seenDot && source[index] == '.')))
+            while (index < source.length && (isDigit(source[index])
+                || (!seenDot && source[index] == '.' && isDigit(peek(source, index + 1)))))
             {
                 if (source[index] == '.')
                 {
@@ -311,26 +324,6 @@ Token[] lex(string source)
                     kind = TokenKind.equal;
                 }
                 break;
-            case '#':
-                if (peek(source, index + 1) == '[')
-                {
-                    kind = TokenKind.hashLeftBracket;
-                    lexeme = source[index .. index + 2];
-                    ++index;
-                    ++column;
-                }
-                else if (peek(source, index + 1) == '{')
-                {
-                    kind = TokenKind.hashLeftBrace;
-                    lexeme = source[index .. index + 2];
-                    ++index;
-                    ++column;
-                }
-                else
-                {
-                    consumed = false;
-                }
-                break;
             case '<':
                 if (peek(source, index + 1) == '<')
                 {
@@ -390,8 +383,12 @@ private TokenKind keywordFor(string identifier)
 {
     switch (identifier)
     {
-        case "fn": return TokenKind.keywordFn;
-        case "let": return TokenKind.keywordLet;
+        case "auto": return TokenKind.keywordAuto;
+        case "delegate": return TokenKind.keywordDelegate;
+        case "alias": return TokenKind.keywordAlias;
+        case "is": return TokenKind.keywordIs;
+        case "try": return TokenKind.keywordTry;
+        case "catch": return TokenKind.keywordCatch;
         case "return": return TokenKind.keywordReturn;
         case "if": return TokenKind.keywordIf;
         case "else": return TokenKind.keywordElse;
@@ -418,4 +415,23 @@ private TokenKind keywordFor(string identifier)
 private char peek(string source, size_t index)
 {
     return index < source.length ? source[index] : '\0';
+}
+
+unittest
+{
+    auto tokens = lex("auto range = 1..3; # comment\nauto member = 1.foo;");
+    assert(tokens[3].kind == TokenKind.number && tokens[3].lexeme == "1");
+    assert(tokens[4].kind == TokenKind.dotDot);
+    assert(tokens[5].kind == TokenKind.number && tokens[5].lexeme == "3");
+    assert(tokens[10].kind == TokenKind.number && tokens[10].lexeme == "1");
+    assert(tokens[11].kind == TokenKind.dot);
+    assert(tokens[12].kind == TokenKind.identifier && tokens[12].lexeme == "foo");
+}
+
+unittest
+{
+    auto tokens = lex("# [ and { always begin a comment\nauto value = [1];");
+    assert(tokens[0].kind == TokenKind.keywordAuto);
+    assert(tokens[1].kind == TokenKind.identifier && tokens[1].lexeme == "value");
+    assert(tokens[3].kind == TokenKind.leftBracket);
 }

@@ -18,6 +18,7 @@ final class TableEntry
     Expression keyExpression;
     Expression value;
     bool isArrayEntry;
+    bool isSpread;
 
     this(string key, Expression keyExpression, Expression value, bool isArrayEntry = false)
     {
@@ -46,7 +47,7 @@ final class Statement
 {
     enum Kind
     {
-        let_,
+        variableDecl,
         assign,
         expression,
         return_,
@@ -60,6 +61,8 @@ final class Statement
         break_,
         continue_,
         yield_,
+        alias_,
+        try_,
         import_,
         export_
     }
@@ -68,6 +71,8 @@ final class Statement
     size_t line;
     size_t column;
     string name;
+    string declaredType;
+    string returnType;
     string aliasName;
     string[] names;
     bool isExported;
@@ -76,6 +81,7 @@ final class Statement
     Expression target;
     Expression[] targets;
     string[] parameters;
+    string[] parameterTypes;
     bool variadic;
     Statement[] body;
     Statement elseBranch;
@@ -120,6 +126,7 @@ final class Expression
     Expression middle;
     Expression right;
     Expression[] arguments;
+    bool[] argumentSpreads;
     TableEntry[] entries;
     string[] parameters;
     bool variadic;

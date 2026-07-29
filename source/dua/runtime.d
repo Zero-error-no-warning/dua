@@ -20,12 +20,60 @@ import std.utf : byDchar;
 
 alias NativeFunction = Value delegate(scope const(Value)[] args);
 
+private final class ScriptThrownException : Exception
+{
+    Value thrownValue;
+
+    this(Value value, string message)
+    {
+        super(message);
+        thrownValue = value;
+    }
+}
+
+enum RunErrorKind
+{
+    none,
+    runtime,
+    stepLimit,
+    callDepthLimit
+}
+
+struct ExecutionLimits
+{
+    /// Zero means unlimited.
+    size_t maxSteps;
+    /// Zero means unlimited.
+    size_t maxCallDepth;
+}
+
+struct RunOptions
+{
+    ExecutionLimits limits;
+    bool typeCheck;
+}
+
 struct RunOutcome
 {
     bool ok;
     Value value;
     string errorMessage;
     string[] stackTrace;
+    RunErrorKind errorKind;
+    size_t stepsExecuted;
+}
+
+struct CheckDiagnostic
+{
+    size_t line;
+    size_t column;
+    string message;
+}
+
+private struct StaticFunctionInfo
+{
+    string[] parameterTypes;
+    string returnType;
 }
 
 final class Environment
@@ -60,6 +108,12 @@ final class Environment
         }
         enforce(false, format("Undefined variable '%s'", name));
         assert(0);
+    }
+
+    Value* find(string name)
+    {
+        if (auto value = name in values) return value;
+        return parent is null ? null : parent.find(name);
     }
 
     void assign(string name, Value value)
@@ -109,8 +163,11 @@ final class ScriptCallable : CallableValue
     private string[] parameters;
     private bool variadic;
     private Statement[] body;
+    private string[] parameterTypes;
+    private string returnType;
 
-    this(string name, ScriptEngine engine, Environment closure, string[] parameters, bool variadic, Statement[] body)
+    this(string name, ScriptEngine engine, Environment closure, string[] parameters, bool variadic,
+        Statement[] body, string[] parameterTypes = null, string returnType = "")
     {
         super(name);
         this.engine = engine;
@@ -118,6 +175,8 @@ final class ScriptCallable : CallableValue
         this.parameters = parameters.dup;
         this.variadic = variadic;
         this.body = body.dup;
+        this.parameterTypes = parameterTypes.dup;
+        this.returnType = returnType;
     }
 
     override Value invoke(Value[] args)
@@ -146,10 +205,22 @@ final class ScriptCallable : CallableValue
                 environment.define(parameter, Value.from(args[index .. $].dup));
                 break;
             }
+            if (index < parameterTypes.length)
+            {
+                enforce(engine.valueMatchesType(args[index], parameterTypes[index]),
+                    format("Function '%s' argument '%s' expected %s but got %s",
+                        debugName, parameter, parameterTypes[index], args[index].kind));
+            }
             environment.define(parameter, args[index]);
         }
 
         auto result = engine.executeStatements(body, environment);
+        if (returnType.length > 0)
+        {
+            enforce(engine.valueMatchesType(result.lastValue, returnType),
+                format("Function '%s' expected return type %s but got %s",
+                    debugName, returnType, result.lastValue.kind));
+        }
         return result.lastValue;
     }
 
@@ -196,6 +267,8 @@ final class ScriptEngine
     private CoroutineState activeCoroutine;
     private long[] indexLengthStack;
     private Value[] thisContextStack;
+    private RunOptions currentRunOptions;
+    private size_t executedSteps;
 
     this()
     {
@@ -336,6 +409,17 @@ final class ScriptEngine
         assert(0);
     }
 
+    Value run(string source, RunOptions options)
+    {
+        auto result = runSafe(source, options);
+        if (result.ok)
+        {
+            return result.value;
+        }
+        enforce(false, result.errorMessage);
+        assert(0);
+    }
+
     Value runFile(string path)
     {
         auto result = runFileSafe(path);
@@ -351,16 +435,37 @@ final class ScriptEngine
         assert(0);
     }
 
+    Value runFile(string path, RunOptions options)
+    {
+        auto result = runFileSafe(path, options);
+        if (result.ok)
+        {
+            return result.value;
+        }
+        enforce(false, result.errorMessage);
+        assert(0);
+    }
+
     RunOutcome runSafe(string source)
     {
-        return runInEnvironmentSafe(source, new Environment(globals));
+        return runSafe(source, RunOptions.init);
+    }
+
+    RunOutcome runSafe(string source, RunOptions options)
+    {
+        return runInEnvironmentSafe(source, new Environment(globals), options);
     }
 
     RunOutcome runFileSafe(string path)
     {
+        return runFileSafe(path, RunOptions.init);
+    }
+
+    RunOutcome runFileSafe(string path, RunOptions options)
+    {
         try
         {
-            return runSafe(readScriptFile(path));
+            return runSafe(readScriptFile(path), options);
         }
         catch (Exception error)
         {
@@ -401,14 +506,24 @@ final class ScriptEngine
 
     RunOutcome loadSafe(string source)
     {
-        return runInEnvironmentSafe(source, globals);
+        return loadSafe(source, RunOptions.init);
+    }
+
+    RunOutcome loadSafe(string source, RunOptions options)
+    {
+        return runInEnvironmentSafe(source, globals, options);
     }
 
     RunOutcome loadFileSafe(string path)
     {
+        return loadFileSafe(path, RunOptions.init);
+    }
+
+    RunOutcome loadFileSafe(string path, RunOptions options)
+    {
         try
         {
-            return loadSafe(readScriptFile(path));
+            return loadSafe(readScriptFile(path), options);
         }
         catch (Exception error)
         {
@@ -424,6 +539,23 @@ final class ScriptEngine
         return globals.get(name);
     }
 
+    CheckDiagnostic[] check(string source)
+    {
+        CheckDiagnostic[] diagnostics;
+        try
+        {
+            auto program = parse(lex(source));
+            string[string] variableTypes;
+            StaticFunctionInfo[string] functions;
+            checkStatements(program.statements, variableTypes, functions, diagnostics, "");
+        }
+        catch (Exception error)
+        {
+            diagnostics ~= CheckDiagnostic(0, 0, error.msg);
+        }
+        return diagnostics;
+    }
+
     Value call(string functionName, scope const(Value)[] args = [])
     {
         auto callable = getGlobal(functionName);
@@ -435,17 +567,211 @@ final class ScriptEngine
         return invokeFunctionValue(callable, copiedArgs);
     }
 
-    private RunOutcome runInEnvironmentSafe(string source, Environment environment)
+    private void checkStatements(Statement[] statements, ref string[string] variables,
+        ref StaticFunctionInfo[string] functions, ref CheckDiagnostic[] diagnostics,
+        string expectedReturnType)
+    {
+        foreach (statement; statements)
+        {
+            if (statement.kind == Statement.Kind.functionDecl)
+            {
+                functions[statement.name] = StaticFunctionInfo(
+                    statement.parameterTypes.dup, statement.returnType);
+            }
+        }
+        foreach (statement; statements)
+        {
+            final switch (statement.kind)
+            {
+                case Statement.Kind.variableDecl:
+                    foreach (index, name; statement.names)
+                    {
+                        auto actual = index < statement.expressions.length
+                            ? inferExpressionType(statement.expressions[index], variables, functions, diagnostics)
+                            : "any";
+                        auto declared = statement.declaredType.length > 0
+                            ? statement.declaredType : actual;
+                        if (statement.declaredType.length > 0 && statement.declaredType != "auto"
+                            && !staticTypesCompatible(actual, statement.declaredType))
+                            addDiagnostic(diagnostics, statement,
+                                format("Variable '%s' expects %s but expression has type %s",
+                                    name, statement.declaredType, actual));
+                        variables[name] = declared == "auto" ? actual : declared;
+                    }
+                    break;
+                case Statement.Kind.assign:
+                    foreach (index, target; statement.targets)
+                    {
+                        auto actual = index < statement.expressions.length
+                            ? inferExpressionType(statement.expressions[index], variables, functions, diagnostics)
+                            : "any";
+                        if (target.kind == Expression.Kind.variable)
+                        {
+                            auto expected = target.identifier in variables;
+                            if (expected !is null && !staticTypesCompatible(actual, *expected))
+                                diagnostics ~= CheckDiagnostic(target.line, target.column,
+                                    format("Assignment to '%s' expects %s but expression has type %s",
+                                        target.identifier, *expected, actual));
+                        }
+                    }
+                    break;
+                case Statement.Kind.return_:
+                    auto actual = statement.expressions.length == 0 ? "null"
+                        : inferExpressionType(statement.expressions[0], variables, functions, diagnostics);
+                    if (expectedReturnType.length > 0)
+                    {
+                        if (!staticTypesCompatible(actual, expectedReturnType))
+                            addDiagnostic(diagnostics, statement,
+                                format("Return expects %s but expression has type %s",
+                                    expectedReturnType, actual));
+                    }
+                    break;
+                case Statement.Kind.functionDecl:
+                    auto childVariables = variables.dup;
+                    foreach (index, parameter; statement.parameters)
+                        childVariables[parameter] = index < statement.parameterTypes.length
+                            ? statement.parameterTypes[index] : "any";
+                    checkStatements(statement.body, childVariables, functions, diagnostics,
+                        statement.returnType);
+                    break;
+                case Statement.Kind.block:
+                    auto childVariables = variables.dup;
+                    checkStatements(statement.body, childVariables, functions, diagnostics, expectedReturnType);
+                    break;
+                case Statement.Kind.if_, Statement.Kind.while_, Statement.Kind.for_,
+                     Statement.Kind.foreach_, Statement.Kind.switch_:
+                    if (statement.condition !is null)
+                        inferExpressionType(statement.condition, variables, functions, diagnostics);
+                    foreach (child; statement.body)
+                    {
+                        auto nestedVariables = variables.dup;
+                        checkStatements([child], nestedVariables, functions, diagnostics, expectedReturnType);
+                    }
+                    if (statement.elseBranch !is null)
+                    {
+                        auto nestedVariables = variables.dup;
+                        checkStatements([statement.elseBranch], nestedVariables, functions, diagnostics, expectedReturnType);
+                    }
+                    break;
+                case Statement.Kind.try_:
+                    auto tryVariables = variables.dup;
+                    checkStatements(statement.body, tryVariables, functions, diagnostics, expectedReturnType);
+                    auto catchVariables = variables.dup;
+                    catchVariables[statement.name] = "table";
+                    checkStatements(statement.elseBranch.body, catchVariables, functions, diagnostics, expectedReturnType);
+                    break;
+                case Statement.Kind.expression:
+                    inferExpressionType(statement.expression, variables, functions, diagnostics);
+                    break;
+                case Statement.Kind.alias_, Statement.Kind.break_, Statement.Kind.continue_,
+                     Statement.Kind.yield_, Statement.Kind.import_, Statement.Kind.export_:
+                    break;
+            }
+        }
+    }
+
+    private string inferExpressionType(Expression expression, ref string[string] variables,
+        ref StaticFunctionInfo[string] functions, ref CheckDiagnostic[] diagnostics)
+    {
+        if (expression is null) return "any";
+        final switch (expression.kind)
+        {
+            case Expression.Kind.literal:
+                final switch (expression.literalValue.kind)
+                {
+                    case ValueKind.integer: return "int";
+                    case ValueKind.floating: return "double";
+                    case ValueKind.boolean: return "bool";
+                    case ValueKind.string_: return "string";
+                    case ValueKind.null_: return "null";
+                    case ValueKind.array: return "array";
+                    case ValueKind.table: return "table";
+                    case ValueKind.function_: return "function";
+                    case ValueKind.native: return "any";
+                }
+            case Expression.Kind.variable:
+                auto found = expression.identifier in variables;
+                return found is null ? "any" : *found;
+            case Expression.Kind.array: return "array";
+            case Expression.Kind.table: return "table";
+            case Expression.Kind.function_: return "function";
+            case Expression.Kind.unary:
+                return expression.operatorSymbol == "!" ? "bool"
+                    : inferExpressionType(expression.right, variables, functions, diagnostics);
+            case Expression.Kind.binary:
+                auto left = inferExpressionType(expression.left, variables, functions, diagnostics);
+                auto right = expression.operatorSymbol == "is" ? "any"
+                    : inferExpressionType(expression.right, variables, functions, diagnostics);
+                if (["==", "!=", "<", "<=", ">", ">=", "&&", "||", "is"].canFind(expression.operatorSymbol))
+                    return "bool";
+                if (expression.operatorSymbol == "~") return "string";
+                return left == "int" && right == "int" ? "int" : "double";
+            case Expression.Kind.ternary:
+                auto middle = inferExpressionType(expression.middle, variables, functions, diagnostics);
+                auto right = inferExpressionType(expression.right, variables, functions, diagnostics);
+                return middle == right ? middle : "any";
+            case Expression.Kind.call:
+                if (expression.left.kind == Expression.Kind.variable)
+                {
+                    auto functionInfo = expression.left.identifier in functions;
+                    if (functionInfo !is null)
+                    {
+                        foreach (index, argument; expression.arguments)
+                        {
+                            auto actual = inferExpressionType(argument, variables, functions, diagnostics);
+                            if (index < functionInfo.parameterTypes.length
+                                && !staticTypesCompatible(actual, functionInfo.parameterTypes[index]))
+                                diagnostics ~= CheckDiagnostic(argument.line, argument.column,
+                                    format("Argument %s to '%s' expects %s but has type %s",
+                                        index + 1, expression.left.identifier,
+                                        functionInfo.parameterTypes[index], actual));
+                        }
+                        return functionInfo.returnType.length > 0 ? functionInfo.returnType : "any";
+                    }
+                }
+                return "any";
+            case Expression.Kind.get, Expression.Kind.index:
+                return "any";
+        }
+    }
+
+    private bool staticTypesCompatible(string actual, string expected) const
+    {
+        if (actual == "any" || expected == "any" || expected == "auto") return true;
+        if (canFind(expected, " delegate(")) return actual == "function";
+        if (!["int", "double", "bool", "string", "null", "void", "array", "table"].canFind(expected))
+            return actual == "table" || actual == expected;
+        return actual == expected || (expected == "void" && actual == "null");
+    }
+
+    private void addDiagnostic(ref CheckDiagnostic[] diagnostics, Statement statement, string message)
+    {
+        diagnostics ~= CheckDiagnostic(statement.line, statement.column, message);
+    }
+
+    private RunOutcome runInEnvironmentSafe(string source, Environment environment, RunOptions options)
     {
         callStack.length = 0;
         lastErrorStack.length = 0;
+        currentRunOptions = options;
+        executedSteps = 0;
+        scope (exit) currentRunOptions = RunOptions.init;
         RunOutcome outcome;
         try
         {
+            if (options.typeCheck)
+            {
+                auto typeDiagnostics = check(source);
+                enforce(typeDiagnostics.length == 0,
+                    typeDiagnostics.length == 0 ? "" : format("Type check failed at %s:%s: %s",
+                        typeDiagnostics[0].line, typeDiagnostics[0].column, typeDiagnostics[0].message));
+            }
             auto program = parse(lex(source));
             auto result = executeStatements(program.statements, environment);
             outcome.ok = true;
             outcome.value = result.lastValue;
+            outcome.errorKind = RunErrorKind.none;
+            outcome.stepsExecuted = executedSteps;
             return outcome;
         }
         catch (Exception error)
@@ -453,8 +779,123 @@ final class ScriptEngine
             outcome.ok = false;
             outcome.errorMessage = error.msg;
             outcome.stackTrace = lastErrorStack.length > 0 ? lastErrorStack.dup : callStack.dup;
+            outcome.errorKind = canFind(error.msg, "[limit:steps]")
+                ? RunErrorKind.stepLimit
+                : canFind(error.msg, "[limit:call-depth]")
+                    ? RunErrorKind.callDepthLimit
+                    : RunErrorKind.runtime;
+            outcome.stepsExecuted = executedSteps;
             return outcome;
         }
+    }
+
+    private void consumeStep()
+    {
+        ++executedSteps;
+        auto maximum = currentRunOptions.limits.maxSteps;
+        enforce(maximum == 0 || executedSteps <= maximum,
+            format("[limit:steps] Execution step limit exceeded (%s)", maximum));
+    }
+
+    private void registerTypeAlias(Statement statement)
+    {
+        auto registryName = "__dua_type_" ~ statement.name;
+        enforce(globals.find(registryName) is null,
+            format("Type alias '%s' is already defined", statement.name));
+        Value[string] definition;
+        if (statement.declaredType == "table")
+        {
+            definition["isTable"] = Value.from(true);
+            Value[string] fields;
+            Value[] typeChain = [Value.from(statement.name)];
+            foreach (baseName; statement.names)
+            {
+                auto base = globals.find("__dua_type_" ~ baseName);
+                enforce(base !is null && base.kind == ValueKind.table
+                    && base.tableValue["isTable"].truthy(),
+                    format("Base type '%s' must be a previously declared table type", baseName));
+                foreach (fieldName, fieldType; base.tableValue["fields"].tableValue)
+                {
+                    enforce((fieldName in fields) is null,
+                        format("Inherited field '%s' conflicts in type '%s'", fieldName, statement.name));
+                    fields[fieldName] = fieldType;
+                }
+                foreach (chainName; base.tableValue["chain"].arrayValue)
+                {
+                    if (!typeChain.canFind(chainName)) typeChain ~= chainName;
+                }
+            }
+            foreach (index, fieldName; statement.parameters)
+            {
+                enforce((fieldName in fields) is null,
+                    format("Field '%s' conflicts in type '%s'", fieldName, statement.name));
+                fields[fieldName] = Value.from(statement.parameterTypes[index]);
+            }
+            definition["fields"] = Value.from(fields);
+            definition["chain"] = Value.from(typeChain);
+        }
+        else
+        {
+            definition["isTable"] = Value.from(false);
+            Value[] alternatives;
+            foreach (name; statement.names) alternatives ~= Value.from(name);
+            definition["alternatives"] = Value.from(alternatives);
+        }
+        globals.define(registryName, Value.from(definition));
+    }
+
+    private bool valueMatchesType(Value value, string typeName)
+    {
+        if (canFind(typeName, " delegate(")) return value.kind == ValueKind.function_;
+        switch (typeName)
+        {
+            case "auto", "any": return true;
+            case "int": return value.kind == ValueKind.integer;
+            case "double": return value.kind == ValueKind.floating;
+            case "bool": return value.kind == ValueKind.boolean;
+            case "string": return value.kind == ValueKind.string_;
+            case "null", "void": return value.kind == ValueKind.null_;
+            default: break;
+        }
+
+        auto definition = globals.find("__dua_type_" ~ typeName);
+        if (definition is null) return false;
+        if (!definition.tableValue["isTable"].truthy())
+        {
+            foreach (alternative; definition.tableValue["alternatives"].arrayValue)
+            {
+                if (valueMatchesType(value, alternative.toHostString())) return true;
+            }
+            return false;
+        }
+        if (value.kind != ValueKind.table) return false;
+        foreach (fieldName, fieldType; definition.tableValue["fields"].tableValue)
+        {
+            auto field = fieldName in value.tableValue;
+            if (field is null || !valueMatchesType(*field, fieldType.toHostString())) return false;
+        }
+        Value[] chain;
+        foreach (chainName; definition.tableValue["chain"].arrayValue) chain ~= chainName;
+        value.tableValue["__typechain"] = Value.from(chain);
+        return true;
+    }
+
+    private bool valueIsType(Value value, string typeName)
+    {
+        auto definition = globals.find("__dua_type_" ~ typeName);
+        if (definition is null) return valueMatchesType(value, typeName);
+        if (!definition.tableValue["isTable"].truthy())
+        {
+            foreach (alternative; definition.tableValue["alternatives"].arrayValue)
+                if (valueIsType(value, alternative.toHostString())) return true;
+            return false;
+        }
+        if (value.kind != ValueKind.table) return false;
+        auto chain = "__typechain" in value.tableValue;
+        if (chain is null || chain.kind != ValueKind.array) return false;
+        foreach (entry; chain.arrayValue)
+            if (entry.toHostString() == typeName) return true;
+        return false;
     }
 
     private string readScriptFile(string path)
@@ -480,17 +921,25 @@ final class ScriptEngine
 
     private ExecutionResult executeStatement(Statement statement, Environment environment)
     {
+        consumeStep();
         try
         {
             ExecutionResult result;
 
             final switch (statement.kind)
             {
-                case Statement.Kind.let_:
-                    auto values = evaluateExpressionList(statement.expressions, environment);
+                case Statement.Kind.variableDecl:
+                    auto values = evaluateExpressionList(statement.expressions, environment,
+                        statement.names.length > 1);
                     foreach (index, name; statement.names)
                     {
                         auto value = index < values.length ? values[index] : Value.nullValue();
+                        if (statement.declaredType.length > 0 && statement.declaredType != "auto")
+                        {
+                            enforce(valueMatchesType(value, statement.declaredType),
+                                format("Variable '%s' expected %s but got %s",
+                                    name, statement.declaredType, value.kind));
+                        }
                         environment.define(name, value);
                         result.lastValue = value;
                         if (statement.isExported)
@@ -499,8 +948,45 @@ final class ScriptEngine
                         }
                     }
                     break;
+                case Statement.Kind.alias_:
+                    registerTypeAlias(statement);
+                    result.lastValue = Value.nullValue();
+                    break;
+                case Statement.Kind.try_:
+                    try
+                    {
+                        result = executeStatements(statement.body, new Environment(environment));
+                    }
+                    catch (Exception error)
+                    {
+                        if (canFind(error.msg, "[limit:steps]")
+                            || canFind(error.msg, "[limit:call-depth]"))
+                        {
+                            throw error;
+                        }
+                        Value original = Value.nullValue();
+                        string kind = "RuntimeError";
+                        if (auto thrown = cast(ScriptThrownException) error)
+                        {
+                            original = thrown.thrownValue;
+                            kind = "ScriptError";
+                        }
+                        Value[] frames;
+                        auto trace = lastErrorStack.length > 0 ? lastErrorStack : callStack;
+                        foreach (frame; trace) frames ~= Value.from(frame);
+                        Value[string] errorInfo;
+                        errorInfo["kind"] = Value.from(kind);
+                        errorInfo["message"] = Value.from(error.msg);
+                        errorInfo["value"] = original;
+                        errorInfo["stack"] = Value.from(frames);
+                        auto catchEnvironment = new Environment(environment);
+                        catchEnvironment.define(statement.name, Value.from(errorInfo));
+                        result = executeStatements(statement.elseBranch.body, catchEnvironment);
+                    }
+                    break;
                 case Statement.Kind.assign:
-                    auto values = evaluateExpressionList(statement.expressions, environment);
+                    auto values = evaluateExpressionList(statement.expressions, environment,
+                        statement.targets.length > 1);
                     foreach (index, target; statement.targets)
                     {
                         auto value = index < values.length ? values[index] : Value.nullValue();
@@ -533,7 +1019,8 @@ final class ScriptEngine
                     break;
                 case Statement.Kind.functionDecl:
                     auto callable = Value.fromFunction(new ScriptCallable(statement.name, this, environment,
-                        statement.parameters, statement.variadic, statement.body));
+                        statement.parameters, statement.variadic, statement.body,
+                        statement.parameterTypes, statement.returnType));
                     environment.define(statement.name, callable);
                     result.lastValue = callable;
                     if (statement.isExported)
@@ -735,7 +1222,7 @@ final class ScriptEngine
                     }
                     else
                     {
-                        activeCoroutine.yieldedValues = evaluateExpressionList(statement.expressions, environment);
+                        activeCoroutine.yieldedValues = evaluateExpressionList(statement.expressions, environment, true);
                     }
                     Fiber.yield();
                     result.lastValue = activeCoroutine.pendingArgs.length > 0
@@ -746,6 +1233,10 @@ final class ScriptEngine
 
             return result;
         }
+        catch (ScriptThrownException error)
+        {
+            throw error;
+        }
         catch (Exception error)
         {
             auto location = statementLocation(statement);
@@ -753,7 +1244,8 @@ final class ScriptEngine
         }
     }
 
-    private Value[] evaluateExpressionList(Expression[] expressions, Environment environment)
+    private Value[] evaluateExpressionList(Expression[] expressions, Environment environment,
+        bool expandSingleArray = false)
     {
         if (expressions.length == 0)
         {
@@ -763,7 +1255,7 @@ final class ScriptEngine
         if (expressions.length == 1)
         {
             auto value = evaluate(expressions[0], environment);
-            if (value.kind == ValueKind.array)
+            if (expandSingleArray && value.kind == ValueKind.array)
             {
                 return value.arrayValue.dup;
             }
@@ -838,6 +1330,10 @@ final class ScriptEngine
 
             enforce(false, "Invalid assignment target");
         }
+        catch (ScriptThrownException error)
+        {
+            throw error;
+        }
         catch (Exception error)
         {
             auto location = expressionLocation(target);
@@ -847,6 +1343,7 @@ final class ScriptEngine
 
     private Value evaluate(Expression expression, Environment environment)
     {
+        consumeStep();
         try
         {
             final switch (expression.kind)
@@ -874,6 +1371,11 @@ final class ScriptEngine
                             assert(0);
                     }
                 case Expression.Kind.binary:
+                    if (expression.operatorSymbol == "is")
+                    {
+                        return Value.from(valueIsType(
+                            evaluate(expression.left, environment), expression.right.identifier));
+                    }
                     if (expression.operatorSymbol == "&&")
                     {
                         auto left = evaluate(expression.left, environment);
@@ -909,11 +1411,43 @@ final class ScriptEngine
                     auto args = expression.arguments.map!(arg => evaluate(arg, environment)).array;
                     return evaluateCall(expression.left, args, environment);
                 case Expression.Kind.array:
-                    return Value.from(expression.arguments.map!(arg => evaluate(arg, environment)).array);
+                    Value[] items;
+                    foreach (index, argument; expression.arguments)
+                    {
+                        auto value = evaluate(argument, environment);
+                        if (index < expression.argumentSpreads.length && expression.argumentSpreads[index])
+                        {
+                            enforce(value.kind == ValueKind.array,
+                                "Array spread requires an array value");
+                            items ~= value.arrayValue;
+                        }
+                        else
+                        {
+                            items ~= value;
+                        }
+                    }
+                    return Value.from(items);
                 case Expression.Kind.table:
                     Value[string] entries;
                     foreach (entry; expression.entries)
                     {
+                        if (entry.isSpread)
+                        {
+                            auto spread = evaluate(entry.value, environment);
+                            enforce(spread.kind == ValueKind.table,
+                                "Table spread requires a table value");
+                            foreach (spreadKey, spreadValue; spread.tableValue)
+                            {
+                                if (spreadKey == "__meta" || spreadKey == "__typechain"
+                                    || startsWith(spreadKey, internalFieldGetterPrefix)
+                                    || startsWith(spreadKey, internalFieldSetterPrefix))
+                                {
+                                    continue;
+                                }
+                                entries[spreadKey] = spreadValue;
+                            }
+                            continue;
+                        }
                         auto key = entry.key;
                         if (entry.isArrayEntry)
                         {
@@ -1007,6 +1541,10 @@ final class ScriptEngine
                     enforce(false, "Indexing currently supports arrays and tables");
                     assert(0);
             }
+        }
+        catch (ScriptThrownException error)
+        {
+            throw error;
         }
         catch (Exception error)
         {
@@ -1240,6 +1778,9 @@ final class ScriptEngine
     private Value invokeFunctionValue(Value callable, Value[] args)
     {
         enforce(callable.kind == ValueKind.function_, "Only functions are callable");
+        auto maximumDepth = currentRunOptions.limits.maxCallDepth;
+        enforce(maximumDepth == 0 || callStack.length < maximumDepth,
+            format("[limit:call-depth] Function call depth limit exceeded (%s)", maximumDepth));
         auto name = callable.functionValue.debugName;
         callStack ~= name;
         scope (exit)
@@ -1379,7 +1920,7 @@ final class ScriptEngine
 
     private Value mapValue(scope const(Value)[] args)
     {
-        enforce(args.length == 2, "map(collection, fn) expects two arguments");
+        enforce(args.length == 2, "map(collection, callback) expects two arguments");
         auto collection = cast(Value) args[0];
         auto mapper = cast(Value) args[1];
         enforce(mapper.kind == ValueKind.function_, "map second argument must be function");
@@ -1410,7 +1951,7 @@ final class ScriptEngine
 
     private Value filterValue(scope const(Value)[] args)
     {
-        enforce(args.length == 2, "filter(collection, fn) expects two arguments");
+        enforce(args.length == 2, "filter(collection, callback) expects two arguments");
         auto collection = cast(Value) args[0];
         auto predicate = cast(Value) args[1];
         enforce(predicate.kind == ValueKind.function_, "filter second argument must be function");
@@ -1766,7 +2307,7 @@ final class ScriptEngine
 
     private Value createCoroutine(Value functionValue)
     {
-        enforce(functionValue.kind == ValueKind.function_, "coroutine.create(fn) expects function");
+        enforce(functionValue.kind == ValueKind.function_, "coroutine.create(callback) expects function");
         auto state = new CoroutineState();
         state.entryFunction = functionValue;
 
@@ -1784,7 +2325,7 @@ final class ScriptEngine
                 state.errorMessage = error.msg;
             }
             state.dead = true;
-        });
+        }, 1024 * 1024);
 
         auto id = nextCoroutineId++;
         coroutines[id] = state;
@@ -1880,7 +2421,8 @@ final class ScriptEngine
             {
                 message = format("%s (level: %s)", message, (cast(Value) args[1]).toHostString());
             }
-            enforce(false, message);
+            throw new ScriptThrownException(cast(Value) args[0], message);
+            assert(0);
             return Value.nullValue();
         });
         bindNative("typeof", (scope const(Value)[] args) {
@@ -1941,7 +2483,7 @@ final class ScriptEngine
             return Value.nullValue();
         });
         bindNative("pcall", (scope const(Value)[] args) {
-            enforce(args.length >= 1, "pcall(fn, ...) expects at least one argument");
+            enforce(args.length >= 1, "pcall(callback, ...) expects at least one argument");
             enforce(args[0].kind == ValueKind.function_, "pcall first argument must be function");
             try
             {
@@ -1959,7 +2501,7 @@ final class ScriptEngine
             }
         });
         bindNative("xpcall", (scope const(Value)[] args) {
-            enforce(args.length >= 2, "xpcall(fn, errHandler, ...) expects at least two arguments");
+            enforce(args.length >= 2, "xpcall(callback, errHandler, ...) expects at least two arguments");
             enforce(args[0].kind == ValueKind.function_, "xpcall first argument must be function");
             enforce(args[1].kind == ValueKind.function_, "xpcall second argument must be function");
             try
@@ -1987,7 +2529,7 @@ final class ScriptEngine
 
         Value[string] coroutineLib;
         coroutineLib["create"] = Value.fromFunction(new NativeCallable("coroutine.create", (scope const(Value)[] args) {
-            enforce(args.length == 1, "coroutine.create(fn) expects one argument");
+            enforce(args.length == 1, "coroutine.create(callback) expects one argument");
             return createCoroutine(cast(Value) args[0]);
         }));
         coroutineLib["resume"] = Value.fromFunction(new NativeCallable("coroutine.resume", (scope const(Value)[] args) {
@@ -2012,7 +2554,7 @@ final class ScriptEngine
             return Value.from(activeCoroutine !is null);
         }));
         coroutineLib["wrap"] = Value.fromFunction(new NativeCallable("coroutine.wrap", (scope const(Value)[] args) {
-            enforce(args.length == 1, "coroutine.wrap(fn) expects one argument");
+            enforce(args.length == 1, "coroutine.wrap(callback) expects one argument");
             auto handle = createCoroutine(cast(Value) args[0]);
             return Value.fromFunction(new NativeCallable("coroutine.wrapped", (scope const(Value)[] callArgs) {
                 Value[] resumeArgs;
@@ -2213,8 +2755,8 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let sum = 0;
-        for (let i = 0; i < 6; i = i + 1) {
+        auto sum = 0;
+        for (auto i = 0; i < 6; i = i + 1) {
             if (i == 4) {
                 continue;
             }
@@ -2228,8 +2770,237 @@ unittest
 unittest
 {
     auto engine = new ScriptEngine();
+    RunOptions options;
+    options.limits.maxSteps = 25;
+    auto result = engine.runSafe(q{
+        while (true) {
+        }
+    }, options);
+    assert(!result.ok);
+    assert(result.errorKind == RunErrorKind.stepLimit);
+    assert(result.stepsExecuted == 26);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    RunOptions options;
+    options.limits.maxCallDepth = 4;
+    auto result = engine.runSafe(q{
+        any recurse(any n) {
+            return recurse(n + 1);
+        }
+        return recurse(0);
+    }, options);
+    assert(!result.ok);
+    assert(result.errorKind == RunErrorKind.callDepthLimit);
+    assert(result.stackTrace.length > 0);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let total = 0;
+        int add(int left, int right) {
+            return left + right;
+        }
+
+        int answer = add(20, 22);
+        double ratio = 1.5;
+        bool enabled = true;
+        string label = "typed";
+        auto values = [answer, 8];
+        return values[0] + (ratio > 1.0 ? 1 : 0) + (enabled ? 1 : 0) + length(label);
+    });
+    assert(result.toInt() == 49);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto variableError = engine.runSafe(q{
+        int value = "wrong";
+        return value;
+    });
+    assert(!variableError.ok);
+    assert(variableError.errorMessage.canFind("expected int"));
+
+    auto argumentError = engine.runSafe(q{
+        int identity(int value) {
+            return value;
+        }
+        return identity("wrong");
+    });
+    assert(!argumentError.ok);
+    assert(argumentError.errorMessage.canFind("argument 'value' expected int"));
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        int apply(int value, int delegate(int) transform) {
+            return transform(value);
+        }
+
+        auto doubled = (int value) => value * 2;
+        return apply(21, doubled);
+    });
+    assert(result.toInt() == 42);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto state = { calls = 0 };
+        int sideEffect() {
+            state.calls = state.calls + 1;
+            return 99;
+        }
+        void invoke(void delegate() callback) {
+            callback();
+        }
+
+        invoke(() :> sideEffect());
+        return state.calls;
+    });
+    assert(result.toInt() == 1);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        alias BaseObject = {
+            string name;
+        };
+        alias LivingObject = {
+            int hp;
+        };
+        alias Player = {
+            ...BaseObject;
+            ...LivingObject;
+            int level;
+        };
+        alias GameObject = Player | null;
+
+        Player player = { name = "hero", hp = 100, level = 7, extra = true };
+        GameObject selected = player;
+        auto legacy = setmetatableWithType(
+            { name = "legacy", hp = 5, level = 2 }, null,
+            "Player", "BaseObject", "LivingObject");
+        Player checked = legacy;
+        auto info = typeinfo(selected);
+        return selected.hp + selected.level + checked.hp + length(info.chain)
+            + (selected is BaseObject ? 10 : 1000);
+    });
+    assert(result.toInt() == 125);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto collision = engine.runSafe(q{
+        alias Base = { int value; };
+        alias Invalid = { ...Base; double value; };
+        return 0;
+    });
+    assert(!collision.ok);
+    assert(collision.errorMessage.canFind("conflicts"));
+
+    auto missingField = engine.runSafe(q{
+        alias Player = { string name; int hp; };
+        Player player = { name = "hero" };
+        return player;
+    });
+    assert(!missingField.ok);
+    assert(missingField.errorMessage.canFind("expected Player"));
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto handled = "";
+        try {
+            handled = missingValue;
+        } catch (err) {
+            handled = err.kind ~ ":" ~ (length(err.message) > 0 ? "message" : "empty");
+        }
+        return handled;
+    });
+    assert(result.toHostString() == "RuntimeError:message");
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        try {
+            error({ kind = "InvalidAmount", message = "boom", code = 7 });
+        } catch (err) {
+            return err.kind ~ ":" ~ err.value.kind ~ ":" ~ err.value.code;
+        }
+        return "unreachable";
+    });
+    assert(result.toHostString() == "ScriptError:InvalidAmount:7");
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    RunOptions options;
+    options.limits.maxSteps = 20;
+    auto result = engine.runSafe(q{
+        try {
+            while (true) {
+            }
+        } catch (err) {
+            return "budget bypassed";
+        }
+    }, options);
+    assert(!result.ok);
+    assert(result.errorKind == RunErrorKind.stepLimit);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto diagnostics = engine.check(q{
+        int identity(int value) {
+            return "wrong";
+        }
+        int value = "wrong";
+        return identity(true);
+    });
+    assert(diagnostics.length == 3);
+    assert(diagnostics[0].line > 0 && diagnostics[0].column > 0);
+
+    RunOptions options;
+    options.typeCheck = true;
+    auto blocked = engine.runSafe(q{
+        int value = "wrong";
+        return value;
+    }, options);
+    assert(!blocked.ok);
+    assert(blocked.errorMessage.canFind("Type check failed"));
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto oldVariable = engine.runSafe("let value = 1; return value;");
+    auto oldFunction = engine.runSafe("fn identity(value) { return value; }");
+    assert(!oldVariable.ok);
+    assert(!oldFunction.ok);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto total = 0;
         foreach (item; [1, 2, 3, 4, 5]) {
             if (item > 3) {
                 break;
@@ -2254,14 +3025,14 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let indexTotal = 0;
-        let valueTotal = 0;
+        auto indexTotal = 0;
+        auto valueTotal = 0;
         foreach (idx, item; [3, 5, 7]) {
             indexTotal = indexTotal + idx;
             valueTotal = valueTotal + item;
         }
 
-        let seen = 0;
+        auto seen = 0;
         foreach (key, value; { a = 2, b = 4 }) {
             if (key == "a" || key == "b") {
                 seen = seen + value;
@@ -2278,19 +3049,19 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let fallback = { hp = 9 };
-        let sink = {};
-        let obj = {
+        auto fallback = { hp = 9 };
+        auto sink = {};
+        auto obj = {
             __index = fallback,
             __newindex = sink,
-            __call = fn(self, x) { return self.hp + x; },
-            __len = fn(self) { return 77; }
+            __call = (any self, any x) { return self.hp + x; },
+            __len = (any self) { return 77; }
         };
 
         obj.mp = 5;
-        let hp = obj.hp;
-        let mp = obj.__newindex.mp;
-        let callValue = obj(3);
+        auto hp = obj.hp;
+        auto mp = obj.__newindex.mp;
+        auto callValue = obj(3);
         return hp + mp + callValue + table.len(obj);
     });
 
@@ -2301,17 +3072,17 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let touched = 0;
+        auto touched = 0;
 
-        fn mark() {
+        any mark() {
             touched = touched + 1;
             return true;
         }
 
-        let a = false && mark();
-        let b = true || mark();
-        let c = true && mark();
-        let d = false || mark();
+        auto a = false && mark();
+        auto b = true || mark();
+        auto c = true && mark();
+        auto d = false || mark();
 
         if (!a && b && c && d) {
             return touched;
@@ -2326,11 +3097,11 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        fn split(x) {
+        any split(any x) {
             return x, x + 1, x + 2;
         }
 
-        let a, b, c = split(10);
+        auto a, b, c = split(10);
         a, b = split(2);
         return a + b + c;
     });
@@ -2342,8 +3113,8 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        fn total(head, tail...) {
-            let sum = head;
+        any total(any head, any tail...) {
+            auto sum = head;
             foreach (item; tail) {
                 sum = sum + item;
             }
@@ -2360,19 +3131,19 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        fn decorate(self, suffix) {
+        any decorate(any self, any suffix) {
             return { value = self.value ~ suffix };
         }
 
-        let node = {
+        auto node = {
             value = "A",
-            opBinary~ = fn(self, rhs) {
+            opBinary~ = (any self, any rhs) {
                 return { value = self.value ~ rhs.value };
             }
         };
 
-        let combined = node ~ { value = "B" };
-        let chained = combined.decorate("C");
+        auto combined = node ~ { value = "B" };
+        auto chained = combined.decorate("C");
         return chained.value;
     });
 
@@ -2383,11 +3154,11 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.runSafe(q{
-        fn outer() {
+        any outer() {
             return missing();
         }
 
-        fn missing() {
+        any missing() {
             return undefinedValue;
         }
 
@@ -2403,14 +3174,14 @@ unittest
 {
     auto engine = new ScriptEngine();
     engine.registerModule("combat", q{
-        let stats = { base = 40 };
+        auto stats = { base = 40 };
         return stats;
     });
 
     auto result = engine.run(q{
-        let combat = require("combat");
-        let cached = require("combat");
-        let text = string.upper("ok");
+        auto combat = require("combat");
+        auto cached = require("combat");
+        auto text = string.upper("ok");
         return combat.base + table.len(cached) + math.abs(-1) + string.len(text);
     });
 
@@ -2421,8 +3192,8 @@ unittest
 {
     auto engine = new ScriptEngine();
     engine.registerModule("combat.rules", q{
-        export let base = 7;
-        export fn add(x) {
+        export auto base = 7;
+        export any add(any x) {
             return x + base;
         }
     });
@@ -2553,8 +3324,8 @@ unittest
     engine.bindType!StatsTemplate("StatsTemplate");
 
     auto result = engine.run(q{
-        let s = StatsTemplate.new({ hp = 11, mp = 7 });
-        let infoS = typeinfo(StatsTemplate);
+        auto s = StatsTemplate.new({ hp = 11, mp = 7 });
+        auto infoS = typeinfo(StatsTemplate);
         return s.hp + s.mp + length(infoS.chain);
     });
 
@@ -2567,9 +3338,9 @@ unittest
     engine.bindType!BindTypeEnemy("BindTypeEnemy");
 
     auto result = engine.run(q{
-        let enemy = BindTypeEnemy({ hp = 42, role = "boss" });
-        let text = enemy.shout("!");
-        let info = typeinfo(enemy);
+        auto enemy = BindTypeEnemy({ hp = 42, role = "boss" });
+        auto text = enemy.shout("!");
+        auto info = typeinfo(enemy);
         if (text != "boss:42!") {
             return -10;
         }
@@ -2638,10 +3409,10 @@ unittest
     auto engine = new ScriptEngine();
 
     auto result = engine.run(q{
-        let obj = {
+        auto obj = {
             value = 0,
-            get = fn() { return this.value; },
-            set = fn(v) { this.value = v; }
+            get = () { return this.value; },
+            set = (any v) { this.value = v; }
         };
         obj.set = 5;
         obj.set = obj.get + 2;
@@ -2656,9 +3427,9 @@ unittest
     auto engine = new ScriptEngine();
 
     auto result = engine.run(q{
-        let point = {
+        auto point = {
             x = 3,
-            move = fn(delta) {
+            move = (any delta) {
                 this.x = this.x + delta;
                 return this.x;
             }
@@ -2673,7 +3444,7 @@ unittest
 {
     auto engine = new ScriptEngine();
     engine.load(q{
-        fn add(a, b) {
+        any add(any a, any b) {
             return a + b;
         }
     });
@@ -2695,7 +3466,7 @@ unittest
     }
 
     write(scriptPath, q{
-        fn add(a, b) {
+        any add(any a, any b) {
             return a + b;
         }
         return add(10, 32);
@@ -2705,7 +3476,7 @@ unittest
     assert(runResult.toInt() == 42);
 
     write(scriptPath, q{
-        fn mul(a, b) {
+        any mul(any a, any b) {
             return a * b;
         }
     });
@@ -2735,15 +3506,15 @@ unittest
 {
     auto engine = new ScriptEngine();
     engine.load(q{
-        fn makeCounter(start) {
-            let value = start;
-            return fn(step) {
+        any makeCounter(any start) {
+            auto value = start;
+            return (any step) {
                 value = value + step;
                 return value;
             };
         }
 
-        let counter = makeCounter(10);
+        auto counter = makeCounter(10);
     });
 
     auto counter = engine.getGlobal("counter");
@@ -2774,9 +3545,9 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let ok, value = pcall(fn() { return 9; });
-        let failed, err = pcall(fn() { return missingValue; });
-        let xok, xval = xpcall(fn() { return nope; }, fn(msg) { return "handled"; });
+        auto ok, value = pcall(() { return 9; });
+        auto failed, err = pcall(() { return missingValue; });
+        auto xok, xval = xpcall(() { return nope; }, (any msg) { return "handled"; });
         if (ok && !failed && !xok) {
             return value + string.len(err) + string.len(xval);
         }
@@ -2790,7 +3561,7 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let t = {};
+        auto t = {};
         t = setmetatable(t, { __index = { hp = 30 } });
         return t.hp + table.len(getmetatable(t));
     });
@@ -2801,7 +3572,7 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let info = typeof({ hp = 1 });
+        auto info = typeof({ hp = 1 });
         if (info.kind != "table") {
             return -10;
         }
@@ -2820,9 +3591,9 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let obj = {};
+        auto obj = {};
         obj = setmetatableWithType(obj, { __index = { hp = 10 } }, "Enemy", "Actor");
-        let info = typeinfo(obj);
+        auto info = typeinfo(obj);
         if (obj.hp != 10) {
             return -10;
         }
@@ -2844,7 +3615,7 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let v = 10 & 3;
+        auto v = 10 & 3;
         v = v + (8 >> 1);
         v = v + (1 << 3);
         v = v + (6 ^ 3);
@@ -2858,8 +3629,8 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let key = "name";
-        let tbl = { [key] = "mage", 7, 8, fixed = 1 };
+        auto key = "name";
+        auto tbl = { [key] = "mage", 7, 8, fixed = 1 };
         return tbl.name ~ ":" ~ tbl[0] ~ ":" ~ tbl[1] ~ ":" ~ tbl.fixed;
     });
     assert(result.toHostString() == "mage:7:8:1");
@@ -2869,8 +3640,8 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let tbl = { 11, 22, name = "mage" };
-        let foundZero = false;
+        auto tbl = { 11, 22, name = "mage" };
+        auto foundZero = false;
         foreach (k, v; tbl) {
             if (k == 0 && v == 11) { foundZero = true; }
         }
@@ -2883,8 +3654,8 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(
-        "let a, b, c = #[1, 2, 3];\n"
-        ~ "let tbl = #{ hp = 7, mp = 5 };\n"
+        "auto a, b, c = [1, 2, 3];\n"
+        ~ "auto tbl = { hp = 7, mp = 5 };\n"
         ~ "return a + c + tbl.hp + tbl.mp;\n");
     assert(result.toInt() == 16);
 }
@@ -2893,18 +3664,18 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let co = coroutine.create(fn(start) {
-            let current = start;
+        auto co = coroutine.create((any start) {
+            auto current = start;
             yield current;
             current = current + 1;
             yield current;
             return current + 1;
         });
 
-        let ok1, v1 = coroutine.resume(co, 5);
-        let ok2, v2 = coroutine.resume(co);
-        let ok3, v3 = coroutine.resume(co);
-        let status = coroutine.status(co);
+        auto ok1, v1 = coroutine.resume(co, 5);
+        auto ok2, v2 = coroutine.resume(co);
+        auto ok3, v3 = coroutine.resume(co);
+        auto status = coroutine.status(co);
 
         if (ok1 && ok2 && ok3 && status == "dead") {
             return v1 + v2 + v3;
@@ -2919,7 +3690,7 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let text = string.trim("  Dua  ");
+        auto text = string.trim("  Dua  ");
         if (!string.contains(text, "ua")) {
             return -1;
         }
@@ -2932,7 +3703,7 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let replaced = string.replace("a-b-c", "-", ":");
+        auto replaced = string.replace("a-b-c", "-", ":");
         return string.len(replaced) + math.min(6, 2, 9) + math.max(1, 5, 3);
     });
     assert(result.toInt() == 12);
@@ -2942,10 +3713,10 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let addOne = fn x => x + 1;
-        let twice = fn(v) => v * 2;
-        let composed = twice(addOne(20));
-        let pair = fn(a, b) => a + b;
+        auto addOne = (any x) => x + 1;
+        auto twice = (any v) => v * 2;
+        auto composed = twice(addOne(20));
+        auto pair = (any a, any b) => a + b;
         return composed + pair(1, 2);
     });
     assert(result.toInt() == 45);
@@ -2955,9 +3726,9 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let box = { v = 0 };
-        let sink = fn(x) :> rawset(box, "v", x * 3);
-        let out = sink(7);
+        auto box = { v = 0 };
+        auto sink = (any x) :> rawset(box, "v", x * 3);
+        auto out = sink(7);
         if (box.v == 21 && out == null) {
             return 1;
         }
@@ -2970,12 +3741,12 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let ev0 = filter(map([1, 2, 3, 4, 5], fn(x) => x * 2), fn(x) => x % 4 == 0)[0];
-        let ev1 = filter(map([1, 2, 3, 4, 5], fn(x) => x * 2), fn(x) => x % 4 == 0)[1];
+        auto ev0 = filter(map([1, 2, 3, 4, 5], (any x) => x * 2), (any x) => x % 4 == 0)[0];
+        auto ev1 = filter(map([1, 2, 3, 4, 5], (any x) => x * 2), (any x) => x % 4 == 0)[1];
 
-        let stats = { hp = 10, mp = 7, sp = 4 };
-        let boosted = table.map(stats, fn(v, k) => v + 1);
-        let picked = table.filter(boosted, fn(v, k) => v >= 8);
+        auto stats = { hp = 10, mp = 7, sp = 4 };
+        auto boosted = table.map(stats, (any v, any k) => v + 1);
+        auto picked = table.filter(boosted, (any v, any k) => v >= 8);
 
         return ev0 + ev1 + picked.hp + picked.mp + table.len(picked);
     });
@@ -2999,8 +3770,8 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let name = "Dua";
-        let level = 7;
+        auto name = "Dua";
+        auto level = 7;
         return i"Hello, $(name)! Lv.$(level)";
     });
     assert(result.toHostString() == "Hello, Dua! Lv.7");
@@ -3010,8 +3781,43 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        let table = { nested = { value = 3 } };
+        auto table = { nested = { value = 3 } };
         return i"$$score=$(1 + 2, table.nested.value)";
     });
     assert(result.toHostString() == "$score=33");
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto nested = { value = 1 };
+        auto original = { name = "hero", hp = 100, nested = nested };
+        auto copied = { ...original, hp = 75 };
+        copied.nested.value = 9;
+
+        auto left = [1, 2];
+        auto shared = left;
+        shared[0] = 8;
+        auto right = [4, 5];
+        auto combined = [...left, 3, ...right];
+        combined[0] = 1;
+        copied.name = "mage";
+
+        return original.name ~ ":" ~ original.hp ~ ":" ~ original.nested.value
+            ~ ":" ~ left[0] ~ combined[0] ~ combined[2] ~ combined[4];
+    });
+    assert(result.toHostString() == "hero:100:9:8135");
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto source = setmetatableWithType({ hp = 10 }, { __index = { mp = 5 } }, "Player");
+        auto copied = { ...source };
+        auto info = typeinfo(copied);
+        return copied.hp + length(info.chain) + (getmetatable(copied) == null ? 1 : 100);
+    });
+    assert(result.toInt() == 11);
 }
