@@ -2,11 +2,12 @@ module dua.value;
 
 import std.algorithm : map;
 import std.array : array;
-import std.conv : to;
+import std.conv : convTo = to;
 import std.exception : enforce;
 import std.format : format;
 import std.string : join;
-import std.traits : BaseClassesTuple, KeyType, Parameters, ReturnType, isAggregateType, isAssociativeArray, isCallable, isDynamicArray, isFloatingPoint, isIntegral, isSomeString;
+import std.meta : staticMap;
+import std.traits : BaseClassesTuple, FieldNameTuple, KeyType, Parameters, ReturnType, Unqual, isAggregateType, isAssociativeArray, isCallable, isDynamicArray, isFloatingPoint, isIntegral, isSomeString, isStaticArray;
 import std.typecons : Tuple;
 
 abstract class CallableValue
@@ -156,14 +157,19 @@ struct Value
         Value result;
         result.kind = ValueKind.native;
         result.nativeTypeName = T.stringof;
-        result.nativeDisplay = to!string(value);
+        result.nativeDisplay = convTo!string(value);
         return result;
     }
 
     static Value from(T)(T values)
-        if (isDynamicArray!T && !isSomeString!T)
+        if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
     {
-        return Value.from(values.map!(item => convertToValue(item)).array);
+        Value[] converted;
+        foreach (ref value; values)
+        {
+            converted ~= convertToValue(value);
+        }
+        return Value.from(converted);
     }
 
     static Value from(T)(T entries)
@@ -185,50 +191,38 @@ struct Value
         {{
             static if (memberName != "this" && memberName != "__ctor" && memberName != "Monitor" && memberName != "factory")
             {
-                static if (__traits(compiles, mixin("value." ~ memberName)))
+                static if (__traits(compiles, mixin("&value." ~ memberName)))
                 {
-                    static if (__traits(compiles, mixin("&value." ~ memberName)))
+                    alias Member = typeof(mixin("&value." ~ memberName));
+                    static if (isCallable!Member
+                        && __traits(compiles, makeReflectedCallable(
+                            T.stringof ~ "." ~ memberName, mixin("&value." ~ memberName))))
                     {
-                        alias Member = typeof(mixin("&value." ~ memberName));
-                        static if (isCallable!Member)
-                        {
-                            converted[memberName] = Value.fromFunction(
-                                makeReflectedCallable(T.stringof ~ "." ~ memberName, mixin("&value." ~ memberName)));
-                        }
-                        else
-                        {
-                            converted[memberName] = convertToValue(mixin("value." ~ memberName));
-                            static if (is(T == class))
-                            {
-                                converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
-                                    new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".getter", 0, (Value[] args) {
-                                    return convertToValue(mixin("value." ~ memberName));
-                                }));
-                                converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
-                                    new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".setter", 1, (Value[] args) {
-                                    alias FieldType = typeof(mixin("value." ~ memberName));
-                                    mixin("value." ~ memberName) = convertFromValue!FieldType(args[0]);
-                                    return Value.nullValue();
-                                }));
-                            }
-                        }
+                        converted[memberName] = Value.fromFunction(
+                            makeReflectedCallable(T.stringof ~ "." ~ memberName, mixin("&value." ~ memberName)));
                     }
-                    else
+                }
+            }
+        }}
+        static foreach (memberName; FieldNameTuple!T)
+        {{
+            static if (__traits(compiles, convertToValue(mixin("value." ~ memberName))))
+            {
+                converted[memberName] = convertToValue(mixin("value." ~ memberName));
+                static if (is(T == class))
+                {
+                    converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
+                        new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".getter", 0, (Value[] args) {
+                        return convertToValue(mixin("value." ~ memberName));
+                    }));
+                    static if (__traits(compiles, mixin("value." ~ memberName) = mixin("value." ~ memberName)))
                     {
-                        converted[memberName] = convertToValue(mixin("value." ~ memberName));
-                        static if (is(T == class))
-                        {
-                            converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
-                                new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".getter", 0, (Value[] args) {
-                                return convertToValue(mixin("value." ~ memberName));
-                            }));
-                            converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
-                                new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".setter", 1, (Value[] args) {
-                                alias FieldType = typeof(mixin("value." ~ memberName));
-                                mixin("value." ~ memberName) = convertFromValue!FieldType(args[0]);
-                                return Value.nullValue();
-                            }));
-                        }
+                        converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
+                            new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".setter", 1, (Value[] args) {
+                            alias FieldType = typeof(mixin("value." ~ memberName));
+                            mixin("value." ~ memberName) = convertFromValue!FieldType(args[0]);
+                            return Value.nullValue();
+                        }));
                     }
                 }
             }
@@ -291,9 +285,9 @@ struct Value
             case ValueKind.null_:
                 return "null";
             case ValueKind.integer:
-                return integerValue.to!string;
+                return convTo!string(integerValue);
             case ValueKind.floating:
-                return floatingValue.to!string;
+                return convTo!string(floatingValue);
             case ValueKind.boolean:
                 return booleanValue ? "true" : "false";
             case ValueKind.string_:
@@ -321,9 +315,9 @@ struct Value
             case ValueKind.null_:
                 return "null";
             case ValueKind.integer:
-                return integerValue.to!string;
+                return convTo!string(integerValue);
             case ValueKind.floating:
-                return floatingValue.to!string;
+                return convTo!string(floatingValue);
             case ValueKind.boolean:
                 return booleanValue ? "true" : "false";
             case ValueKind.string_:
@@ -374,14 +368,15 @@ private ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C 
     if (isCallable!C)
 {
     alias Params = Parameters!C;
+    alias MutableParams = staticMap!(Unqual, Params);
     return new ReflectedCallable(debugName, Params.length, (Value[] args) {
         enforce(args.length == Params.length,
             format("Function '%s' expected %s arguments but got %s", debugName, Params.length, args.length));
 
-        auto converted = Tuple!Params();
+        auto converted = Tuple!MutableParams();
         static foreach (index, Param; Params)
         {
-            converted[index] = convertFromValue!Param(args[index]);
+            converted[index] = convertFromValue!(Unqual!Param)(args[index]);
         }
 
         static if (is(ReturnType!C == void))
@@ -404,7 +399,7 @@ private Value convertToValue(T)(auto ref T value)
     }
     else static if (isSomeString!T)
     {
-        return Value.from(to!string(value));
+        return Value.from(convTo!string(value));
     }
     else static if (is(T == bool))
     {
@@ -418,7 +413,7 @@ private Value convertToValue(T)(auto ref T value)
     {
         return Value.from(cast(double) value);
     }
-    else static if (isDynamicArray!T && !isSomeString!T)
+    else static if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
     {
         return Value.from(value);
     }
@@ -444,7 +439,7 @@ private T convertFromValue(T)(const(Value) value)
     }
     else static if (isSomeString!T)
     {
-        return to!T(value.toHostString());
+        return convTo!T(value.toHostString());
     }
     else static if (is(T == bool))
     {
@@ -462,21 +457,19 @@ private T convertFromValue(T)(const(Value) value)
     {
         enforce(value.kind == ValueKind.table,
             format("Expected table value to convert into '%s' but got %s", T.stringof, value.kind));
-        T result = T.init;
-        static foreach (memberName; __traits(allMembers, T))
+        alias MutableT = Unqual!T;
+        MutableT result = MutableT.init;
+        static foreach (memberName; FieldNameTuple!MutableT)
         {{
-            static if (memberName != "this" && memberName != "__ctor" && memberName != "Monitor" && memberName != "factory")
+            static if (__traits(compiles, mixin("result." ~ memberName)))
             {
-                static if (__traits(compiles, mixin("&result." ~ memberName)))
+                alias FieldType = typeof(mixin("result." ~ memberName));
+                static if (__traits(compiles,
+                    mixin("result." ~ memberName) = convertFromValue!FieldType(value)))
                 {
-                    alias Member = typeof(mixin("&result." ~ memberName));
-                    static if (!isCallable!Member)
+                    if (auto fieldValue = memberName in value.tableValue)
                     {
-                        if (auto fieldValue = memberName in value.tableValue)
-                        {
-                            alias FieldType = typeof(mixin("result." ~ memberName));
-                            mixin("result." ~ memberName) = convertFromValue!FieldType(*fieldValue);
-                        }
+                        mixin("result." ~ memberName) = convertFromValue!FieldType(*fieldValue);
                     }
                 }
             }
@@ -547,4 +540,66 @@ bool valuesEqual(Value left, Value right)
     }
 
     return false;
+}
+
+private struct ReflectionVectorFixture
+{
+    double x;
+    double y;
+
+    double dot(const ReflectionVectorFixture other) const
+    {
+        return x * other.x + y * other.y;
+    }
+
+    int[2] indices() const
+    {
+        return [1, 2];
+    }
+}
+
+private class ReflectionMemberFilteringFixture
+{
+    enum LightMode
+    {
+        dark,
+        light
+    }
+
+    int score = 7;
+    Tuple!(bool, ubyte, ubyte) color;
+    double[4] weights = [1.0, 2.0, 3.0, 4.0];
+    ReflectionVectorFixture[4] vertices;
+    ubyte* pixels;
+
+    void repoxy(T)(T value)
+    {
+    }
+}
+
+unittest
+{
+    auto fixture = new ReflectionMemberFilteringFixture();
+    fixture.color = typeof(fixture.color)(true, 10, 20);
+
+    auto reflected = Value.reflect(fixture);
+
+    assert(reflected.kind == ValueKind.table);
+    assert(reflected.tableValue["score"].toInt() == 7);
+    assert("color" in reflected.tableValue);
+    assert(reflected.tableValue["weights"].kind == ValueKind.array);
+    assert(reflected.tableValue["weights"].arrayValue.length == 4);
+    assert(reflected.tableValue["vertices"].kind == ValueKind.array);
+    assert(reflected.tableValue["pixels"].kind == ValueKind.native);
+    assert("LightMode" !in reflected.tableValue);
+    assert("repoxy" !in reflected.tableValue);
+
+    auto vector = ReflectionVectorFixture(3.0, 4.0);
+    auto reflectedVector = Value.reflect(vector);
+    assert(reflectedVector.tableValue["dot"].kind == ValueKind.function_);
+    auto dotResult = reflectedVector.tableValue["dot"].functionValue.invoke([
+        Value.reflect(ReflectionVectorFixture(1.0, 2.0))
+    ]);
+    assert(dotResult.toFloat() == 11.0);
+    assert(reflectedVector.tableValue["indices"].functionValue.invoke([]).arrayValue.length == 2);
 }
