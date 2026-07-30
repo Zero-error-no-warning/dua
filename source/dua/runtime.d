@@ -1471,7 +1471,11 @@ final class ScriptEngine
                     if (auto getter = getterKey in container.tableValue)
                     {
                         auto refreshed = invokeFunctionValueWithThis(*getter, [], container);
-                        container.tableValue[expression.identifier] = refreshed;
+                        auto property = expression.identifier in container.tableValue;
+                        if (property is null || property.kind != ValueKind.function_)
+                        {
+                            container.tableValue[expression.identifier] = refreshed;
+                        }
                         return refreshed;
                     }
                     if (auto value = expression.identifier in container.tableValue)
@@ -3402,6 +3406,45 @@ unittest
     });
 
     assert(result.toInt() == 42);
+}
+
+unittest
+{
+    final class Gauge
+    {
+        private int current;
+
+        int value() const
+        {
+            return current;
+        }
+
+        void value(int next)
+        {
+            current = next;
+        }
+
+        int value(int left, int right) const
+        {
+            return current + left + right;
+        }
+    }
+
+    auto engine = new ScriptEngine();
+    auto gauge = new Gauge();
+    auto reflectedGauge = Value.reflect(gauge);
+    assert((internalFieldGetterPrefix ~ "value") in reflectedGauge.tableValue);
+    assert((internalFieldSetterPrefix ~ "value") in reflectedGauge.tableValue);
+    engine.bind("gauge", reflectedGauge);
+
+    auto result = engine.run(q{
+        gauge.value = 39;
+        auto readAsProperty = gauge.value;
+        auto readAsMethod = gauge.value();
+        return readAsProperty + readAsMethod + gauge.value(1, 2);
+    });
+
+    assert(result.toInt() == 120);
 }
 
 unittest

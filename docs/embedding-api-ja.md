@@ -156,6 +156,7 @@ D 側との連携は `Value.reflect` と `bindType` が中心です。
 
 - **struct を `reflect`** した場合: フィールド値とメソッドをテーブル化して公開（値として扱われるため、スクリプトからのフィールド再代入は元 struct を直接更新しない）。
 - **class を `reflect`** した場合: フィールド getter/setter が内部的に公開され、スクリプトからの代入が元インスタンスへ反映される。
+- class に同名の 0 引数メソッドと 1 引数メソッドがある場合、それぞれ property の getter/setter として扱われる（例: `obj.value` / `obj.value = 1`）。引数個数が異なる同名メソッドは、通常の呼び出しでもオーバーロードとして選択される。
 - class には `__typechain` が付与され、`typeinfo` から継承チェーンを取得可能。
 
 ```d
