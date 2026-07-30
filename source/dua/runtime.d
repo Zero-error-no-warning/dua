@@ -323,6 +323,18 @@ final class ScriptEngine
             }
         }
 
+        ReflectedCallable[] reflectedConstructors;
+        static if (__traits(compiles, __traits(getOverloads, T, "__ctor")))
+        {
+            static foreach (ctor; __traits(getOverloads, T, "__ctor"))
+            {
+                static if (__traits(compiles, makeReflectedConstructor!(ctor, T)(name ~ ".new")))
+                {
+                    reflectedConstructors ~= makeReflectedConstructor!(ctor, T)(name ~ ".new");
+                }
+            }
+        }
+
         auto constructor = Value.fromFunction(new NativeCallable(name ~ ".new", (scope const(Value)[] args) {
             size_t argOffset = 0;
             if (args.length > 0 && args[0].kind == ValueKind.table)
@@ -333,27 +345,56 @@ final class ScriptEngine
                 }
             }
             auto userArgs = args[argOffset .. $];
-            enforce(userArgs.length <= 1, format("%s.new([initTable]) expects zero or one argument", name));
+            ReflectedCallable matchedConstructor;
+            foreach (candidate; reflectedConstructors)
+            {
+                if (candidate.expectedArity() == userArgs.length)
+                {
+                    enforce(matchedConstructor is null,
+                        format("%s.new has multiple constructors taking %s arguments", name, userArgs.length));
+                    matchedConstructor = candidate;
+                }
+            }
+            if (matchedConstructor !is null)
+            {
+                Value[] copiedArgs;
+                foreach (arg; userArgs)
+                {
+                    copiedArgs ~= cast(Value) arg;
+                }
+                return matchedConstructor.invoke(copiedArgs);
+            }
+
+            enforce(userArgs.length <= 1,
+                format("%s.new has no constructor taking %s arguments", name, userArgs.length));
             static if (is(T == class))
             {
-                auto instance = new T();
-                auto reflected = Value.reflect(instance);
-                if (userArgs.length == 1)
+                static if (__traits(compiles, new T()))
                 {
-                    enforce(userArgs[0].kind == ValueKind.table, format("%s.new init argument must be table", name));
-                    foreach (key, entry; userArgs[0].tableValue)
+                    auto instance = new T();
+                    auto reflected = Value.reflect(instance);
+                    if (userArgs.length == 1)
                     {
-                        auto setterKey = internalFieldSetterPrefix ~ key;
-                        if (auto setter = setterKey in reflected.tableValue)
+                        enforce(userArgs[0].kind == ValueKind.table, format("%s.new init argument must be table", name));
+                        foreach (key, entry; userArgs[0].tableValue)
                         {
-                            enforce((*setter).kind == ValueKind.function_,
-                                format("%s.new setter '%s' is not callable", name, key));
-                            Value[] setterArgs = [cast(Value) entry];
-                            (*setter).functionValue.invoke(setterArgs);
+                            auto setterKey = internalFieldSetterPrefix ~ key;
+                            if (auto setter = setterKey in reflected.tableValue)
+                            {
+                                enforce((*setter).kind == ValueKind.function_,
+                                    format("%s.new setter '%s' is not callable", name, key));
+                                Value[] setterArgs = [cast(Value) entry];
+                                (*setter).functionValue.invoke(setterArgs);
+                            }
                         }
                     }
+                    return reflected;
                 }
-                return reflected;
+                else
+                {
+                    enforce(false, format("%s.new requires constructor arguments", name));
+                    assert(0);
+                }
             }
             else static if (is(T == struct))
             {
@@ -371,6 +412,34 @@ final class ScriptEngine
         typeTable["name"] = Value.from(name);
         typeTable["new"] = constructor;
         typeTable["__typechain"] = Value.from(typeChain);
+        static foreach (memberName; __traits(allMembers, T))
+        {{
+            static if (memberName != "this" && memberName != "__ctor")
+            {
+                static if (__traits(compiles, __traits(getOverloads, T, memberName)))
+                {
+                    ReflectedCallable[] staticOverloads;
+                    static foreach (overload; __traits(getOverloads, T, memberName))
+                    {
+                        static if (__traits(compiles,
+                            makeStaticReflectedCallable!overload(name ~ "." ~ memberName)))
+                        {
+                            staticOverloads ~= makeStaticReflectedCallable!overload(
+                                name ~ "." ~ memberName);
+                        }
+                    }
+                    if (staticOverloads.length == 1)
+                    {
+                        typeTable[memberName] = Value.fromFunction(staticOverloads[0]);
+                    }
+                    else if (staticOverloads.length > 1)
+                    {
+                        typeTable[memberName] = Value.fromFunction(
+                            new OverloadedReflectedCallable(name ~ "." ~ memberName, staticOverloads));
+                    }
+                }
+            }
+        }}
 
         Value[string] meta;
         meta["__index"] = Value.from(typeTable);
@@ -2756,6 +2825,27 @@ private final class BindTypeEnemy
     }
 }
 
+private final class BindTypeFeatures
+{
+    int value;
+
+    this(int value, int scale)
+    {
+        this.value = value * scale;
+    }
+
+    static int combine(int left, int right)
+    {
+        return left * 10 + right;
+    }
+
+    int opBinary(string operator)(int rhs) const
+        if (operator == "+")
+    {
+        return value + rhs;
+    }
+}
+
 unittest
 {
     auto engine = new ScriptEngine();
@@ -3356,6 +3446,21 @@ unittest
     });
 
     assert(result.toInt() >= 1);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindType!BindTypeFeatures("BindTypeFeatures");
+    auto reflectedFeature = Value.reflect(new BindTypeFeatures(1, 1));
+    assert("opBinary+" in reflectedFeature.tableValue);
+
+    auto result = engine.run(q{
+        auto feature = BindTypeFeatures(6, 7);
+        return BindTypeFeatures.combine(4, 2) + (feature + 8);
+    });
+
+    assert(result.toInt() == 92);
 }
 
 unittest

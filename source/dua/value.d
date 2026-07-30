@@ -257,6 +257,29 @@ struct Value
                 }
             }
         }}
+        static foreach (operatorSymbol; ["+", "-", "*", "/", "%", "~", "&", "|", "^", "<<", ">>"])
+        {{
+            static if (__traits(compiles, makeBoundBinaryOperator!(T, "opBinary", operatorSymbol)(
+                T.stringof ~ ".opBinary" ~ operatorSymbol, value)))
+            {
+                converted["opBinary" ~ operatorSymbol] = Value.fromFunction(
+                    makeBoundBinaryOperator!(T, "opBinary", operatorSymbol)(
+                        T.stringof ~ ".opBinary" ~ operatorSymbol, value));
+            }
+            static if (__traits(compiles, makeBoundBinaryOperator!(T, "opBinaryRight", operatorSymbol)(
+                T.stringof ~ ".opBinaryRight" ~ operatorSymbol, value)))
+            {
+                converted["opBinaryRight" ~ operatorSymbol] = Value.fromFunction(
+                    makeBoundBinaryOperator!(T, "opBinaryRight", operatorSymbol)(
+                        T.stringof ~ ".opBinaryRight" ~ operatorSymbol, value));
+            }
+        }}
+        static if (is(T == struct) && __traits(compiles, makeBoundEqualityOperator(
+            T.stringof ~ ".opEquals", value)))
+        {
+            converted["__eq"] = Value.fromFunction(
+                makeBoundEqualityOperator(T.stringof ~ ".opEquals", value));
+        }
         static foreach (memberName; FieldNameTuple!T)
         {{
             static if (__traits(compiles, convertToValue(mixin("value." ~ memberName))))
@@ -451,6 +474,54 @@ private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string d
     alias Delegate = ReturnType!Function delegate(Parameters!Function);
     Delegate callable = &__traits(getMember, value, __traits(identifier, overload));
     return makeReflectedCallable(debugName, callable);
+}
+
+ReflectedCallable makeStaticReflectedCallable(alias overload)(string debugName)
+{
+    auto callable = &overload;
+    return makeReflectedCallable(debugName, callable);
+}
+
+ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugName)
+{
+    alias Params = Parameters!constructor;
+    alias MutableParams = staticMap!(Unqual, Params);
+    return new ReflectedCallable(debugName, Params.length, (Value[] args) {
+        auto converted = Tuple!MutableParams();
+        static foreach (index, Param; Params)
+        {
+            converted[index] = convertFromValue!(Unqual!Param)(args[index]);
+        }
+        static if (is(T == class))
+        {
+            auto instance = new T(converted.expand);
+            return Value.reflect(instance);
+        }
+        else
+        {
+            auto instance = T(converted.expand);
+            return Value.reflect(instance);
+        }
+    });
+}
+
+private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string operatorSymbol)(
+    string debugName, auto ref T value)
+{
+    auto callable = mixin("&value." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")");
+    auto bound = makeReflectedCallable(debugName, callable);
+    return new ReflectedCallable(debugName, 2, (Value[] args) {
+        return bound.invoke(args[1 .. $]);
+    });
+}
+
+private ReflectedCallable makeBoundEqualityOperator(T)(string debugName, auto ref T value)
+{
+    auto callable = &value.opEquals;
+    auto bound = makeReflectedCallable(debugName, callable);
+    return new ReflectedCallable(debugName, 2, (Value[] args) {
+        return bound.invoke(args[1 .. $]);
+    });
 }
 
 private Value convertToValue(T)(auto ref T value)
