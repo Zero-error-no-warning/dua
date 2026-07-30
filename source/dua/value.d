@@ -6,7 +6,7 @@ import std.conv : to;
 import std.exception : enforce;
 import std.format : format;
 import std.string : join;
-import std.traits : BaseClassesTuple, KeyType, Parameters, ReturnType, isAggregateType, isAssociativeArray, isCallable, isDynamicArray, isFloatingPoint, isIntegral, isSomeString;
+import std.traits : BaseClassesTuple, FieldNameTuple, KeyType, Parameters, ReturnType, isAggregateType, isAssociativeArray, isCallable, isDynamicArray, isFloatingPoint, isIntegral, isSomeString;
 import std.typecons : Tuple;
 
 abstract class CallableValue
@@ -185,50 +185,36 @@ struct Value
         {{
             static if (memberName != "this" && memberName != "__ctor" && memberName != "Monitor" && memberName != "factory")
             {
-                static if (__traits(compiles, mixin("value." ~ memberName)))
+                static if (__traits(compiles, mixin("&value." ~ memberName)))
                 {
-                    static if (__traits(compiles, mixin("&value." ~ memberName)))
+                    alias Member = typeof(mixin("&value." ~ memberName));
+                    static if (isCallable!Member)
                     {
-                        alias Member = typeof(mixin("&value." ~ memberName));
-                        static if (isCallable!Member)
-                        {
-                            converted[memberName] = Value.fromFunction(
-                                makeReflectedCallable(T.stringof ~ "." ~ memberName, mixin("&value." ~ memberName)));
-                        }
-                        else
-                        {
-                            converted[memberName] = convertToValue(mixin("value." ~ memberName));
-                            static if (is(T == class))
-                            {
-                                converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
-                                    new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".getter", 0, (Value[] args) {
-                                    return convertToValue(mixin("value." ~ memberName));
-                                }));
-                                converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
-                                    new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".setter", 1, (Value[] args) {
-                                    alias FieldType = typeof(mixin("value." ~ memberName));
-                                    mixin("value." ~ memberName) = convertFromValue!FieldType(args[0]);
-                                    return Value.nullValue();
-                                }));
-                            }
-                        }
+                        converted[memberName] = Value.fromFunction(
+                            makeReflectedCallable(T.stringof ~ "." ~ memberName, mixin("&value." ~ memberName)));
                     }
-                    else
+                }
+            }
+        }}
+        static foreach (memberName; FieldNameTuple!T)
+        {{
+            static if (__traits(compiles, convertToValue(mixin("value." ~ memberName))))
+            {
+                converted[memberName] = convertToValue(mixin("value." ~ memberName));
+                static if (is(T == class))
+                {
+                    converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
+                        new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".getter", 0, (Value[] args) {
+                        return convertToValue(mixin("value." ~ memberName));
+                    }));
+                    static if (__traits(compiles, mixin("value." ~ memberName) = mixin("value." ~ memberName)))
                     {
-                        converted[memberName] = convertToValue(mixin("value." ~ memberName));
-                        static if (is(T == class))
-                        {
-                            converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
-                                new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".getter", 0, (Value[] args) {
-                                return convertToValue(mixin("value." ~ memberName));
-                            }));
-                            converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
-                                new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".setter", 1, (Value[] args) {
-                                alias FieldType = typeof(mixin("value." ~ memberName));
-                                mixin("value." ~ memberName) = convertFromValue!FieldType(args[0]);
-                                return Value.nullValue();
-                            }));
-                        }
+                        converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
+                            new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".setter", 1, (Value[] args) {
+                            alias FieldType = typeof(mixin("value." ~ memberName));
+                            mixin("value." ~ memberName) = convertFromValue!FieldType(args[0]);
+                            return Value.nullValue();
+                        }));
                     }
                 }
             }
@@ -547,4 +533,34 @@ bool valuesEqual(Value left, Value right)
     }
 
     return false;
+}
+
+private class ReflectionMemberFilteringFixture
+{
+    enum LightMode
+    {
+        dark,
+        light
+    }
+
+    int score = 7;
+    Tuple!(bool, ubyte, ubyte) color;
+
+    void repoxy(T)(T value)
+    {
+    }
+}
+
+unittest
+{
+    auto fixture = new ReflectionMemberFilteringFixture();
+    fixture.color = typeof(fixture.color)(true, 10, 20);
+
+    auto reflected = Value.reflect(fixture);
+
+    assert(reflected.kind == ValueKind.table);
+    assert(reflected.tableValue["score"].toInt() == 7);
+    assert("color" in reflected.tableValue);
+    assert("LightMode" !in reflected.tableValue);
+    assert("repoxy" !in reflected.tableValue);
 }
