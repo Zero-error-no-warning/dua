@@ -57,6 +57,34 @@ final class ReflectedCallable : CallableValue
 
 }
 
+final class OverloadedReflectedCallable : CallableValue
+{
+    private ReflectedCallable[] overloads;
+
+    this(string debugName, ReflectedCallable[] overloads)
+    {
+        super(debugName);
+        this.overloads = overloads;
+    }
+
+    override Value invoke(Value[] args)
+    {
+        ReflectedCallable match;
+        foreach (overload; overloads)
+        {
+            if (overload.expectedArity() == args.length)
+            {
+                enforce(match is null,
+                    format("Function '%s' has multiple overloads with %s arguments", debugName, args.length));
+                match = overload;
+            }
+        }
+        enforce(match !is null,
+            format("Function '%s' has no overload taking %s arguments", debugName, args.length));
+        return match.invoke(args);
+    }
+}
+
 enum ValueKind
 {
     null_,
@@ -191,15 +219,40 @@ struct Value
         {{
             static if (memberName != "this" && memberName != "__ctor" && memberName != "Monitor" && memberName != "factory")
             {
-                static if (__traits(compiles, mixin("&value." ~ memberName)))
+                static if (__traits(compiles, __traits(getOverloads, T, memberName)))
                 {
-                    alias Member = typeof(mixin("&value." ~ memberName));
-                    static if (isCallable!Member
-                        && __traits(compiles, makeReflectedCallable(
-                            T.stringof ~ "." ~ memberName, mixin("&value." ~ memberName))))
+                    ReflectedCallable[] overloads;
+                    static foreach (overload; __traits(getOverloads, T, memberName))
+                    {
+                        static if (__traits(compiles, makeBoundReflectedCallable!overload(
+                            T.stringof ~ "." ~ memberName, value)))
+                        {
+                            overloads ~= makeBoundReflectedCallable!overload(
+                                T.stringof ~ "." ~ memberName, value);
+                        }
+                    }
+                    if (overloads.length == 1)
+                    {
+                        converted[memberName] = Value.fromFunction(overloads[0]);
+                    }
+                    else if (overloads.length > 1)
                     {
                         converted[memberName] = Value.fromFunction(
-                            makeReflectedCallable(T.stringof ~ "." ~ memberName, mixin("&value." ~ memberName)));
+                            new OverloadedReflectedCallable(T.stringof ~ "." ~ memberName, overloads));
+                    }
+                    static if (is(T == class))
+                    {
+                        foreach (overload; overloads)
+                        {
+                            if (overload.expectedArity() == 0)
+                            {
+                                converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(overload);
+                            }
+                            else if (overload.expectedArity() == 1)
+                            {
+                                converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(overload);
+                            }
+                        }
                     }
                 }
             }
@@ -369,6 +422,7 @@ private ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C 
 {
     alias Params = Parameters!C;
     alias MutableParams = staticMap!(Unqual, Params);
+    auto storedCallable = callable;
     return new ReflectedCallable(debugName, Params.length, (Value[] args) {
         enforce(args.length == Params.length,
             format("Function '%s' expected %s arguments but got %s", debugName, Params.length, args.length));
@@ -381,14 +435,22 @@ private ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C 
 
         static if (is(ReturnType!C == void))
         {
-            callable(converted.expand);
+            storedCallable(converted.expand);
             return Value.nullValue();
         }
         else
         {
-            return convertToValue(callable(converted.expand));
+            return convertToValue(storedCallable(converted.expand));
         }
     });
+}
+
+private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string debugName, auto ref T value)
+{
+    alias Function = typeof(overload);
+    alias Delegate = ReturnType!Function delegate(Parameters!Function);
+    Delegate callable = &__traits(getMember, value, __traits(identifier, overload));
+    return makeReflectedCallable(debugName, callable);
 }
 
 private Value convertToValue(T)(auto ref T value)
