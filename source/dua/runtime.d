@@ -215,13 +215,14 @@ final class ScriptCallable : CallableValue
         }
 
         auto result = engine.executeStatements(body, environment);
+        auto returnValue = result.returned ? result.lastValue : Value.nullValue();
         if (returnType.length > 0)
         {
-            enforce(engine.valueMatchesType(result.lastValue, returnType),
+            enforce(engine.valueMatchesType(returnValue, returnType),
                 format("Function '%s' expected return type %s but got %s",
-                    debugName, returnType, result.lastValue.kind));
+                    debugName, returnType, returnValue.kind));
         }
-        return result.lastValue;
+        return returnValue;
     }
 
     override size_t expectedArity() const
@@ -3778,6 +3779,43 @@ unittest
         return 0;
     });
     assert(result.toInt() == 1);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto values = { first = 1, second = 2, };
+        return values.first + values.second;
+    });
+    assert(result.toInt() == 3);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto value = 0;
+        auto assign = () :> value = 42;
+        auto returned = assign();
+        return value == 42 && returned == null;
+    });
+    assert(result.kind == ValueKind.boolean && result.booleanValue);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        void consume() {
+            42;
+        }
+        auto inferred = () {
+            42;
+        };
+        return consume() == null && inferred() == null;
+    });
+    assert(result.kind == ValueKind.boolean && result.booleanValue);
 }
 
 unittest
