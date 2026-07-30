@@ -707,10 +707,14 @@ private struct Parser
             else
             {
                 auto operatorToken = consumeArrowLike("Expected '=>' or ':>' after lambda parameters");
-                auto shorthandResult = parseExpression();
-                node.body = operatorToken.kind == TokenKind.fatArrow
-                    ? makeImplicitReturnBody(shorthandResult)
-                    : makeImplicitSubroutineBody(shorthandResult);
+                if (operatorToken.kind == TokenKind.fatArrow)
+                {
+                    node.body = makeImplicitReturnBody(parseExpression());
+                }
+                else
+                {
+                    node.body = parseImplicitSubroutineBody();
+                }
             }
             return node;
         }
@@ -1006,7 +1010,7 @@ private struct Parser
                 entries.put(new TableEntry(arrayIndex.to!string, null, parseExpression(), true));
                 ++arrayIndex;
             }
-            while (match(TokenKind.comma));
+            while (match(TokenKind.comma) && !check(TokenKind.rightBrace));
         }
         consume(TokenKind.rightBrace, "Expected '}' after table literal");
         node.entries = entries.data;
@@ -1112,6 +1116,24 @@ private struct Parser
         returnStatement.line = expression.line;
         returnStatement.column = expression.column;
         return [expressionStatement, returnStatement];
+    }
+
+    Statement[] parseImplicitSubroutineBody()
+    {
+        auto target = parseExpression();
+        if (!match(TokenKind.equal))
+        {
+            return makeImplicitSubroutineBody(target);
+        }
+
+        auto assignment = locatedStatement(Statement.Kind.assign, previous());
+        assignment.target = target;
+        assignment.targets = [target];
+        assignment.expression = parseExpression();
+        assignment.expressions = [assignment.expression];
+
+        auto returnStatement = locatedStatement(Statement.Kind.return_, previous());
+        return [assignment, returnStatement];
     }
 
     bool isTypedLambdaExpressionWithParen() const
