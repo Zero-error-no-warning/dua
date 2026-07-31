@@ -1430,11 +1430,19 @@ final class ScriptEngine
                             return Value.from(indexLengthStack[$ - 1]);
                         case "-":
                             auto right = evaluate(expression.right, environment);
+                            if (auto overloaded = tryCallUnaryOverload(expression.operatorSymbol, right))
+                            {
+                                return *overloaded;
+                            }
                             return right.kind == ValueKind.integer
                                 ? Value.from(-right.integerValue)
                                 : Value.from(-right.toFloat());
                         case "!":
                             auto right = evaluate(expression.right, environment);
+                            if (auto overloaded = tryCallUnaryOverload(expression.operatorSymbol, right))
+                            {
+                                return *overloaded;
+                            }
                             return Value.from(!right.truthy());
                         default:
                             enforce(false, format("Unsupported unary operator '%s'", expression.operatorSymbol));
@@ -1816,6 +1824,27 @@ final class ScriptEngine
             }
         }
         return null;
+    }
+
+    private Value* tryCallUnaryOverload(string operatorSymbol, Value operand)
+    {
+        if (operand.kind != ValueKind.table)
+        {
+            return null;
+        }
+
+        auto slot = "opUnary" ~ operatorSymbol;
+        Value functionValue;
+        if (!lookupMetamethod(operand, slot, functionValue))
+        {
+            return null;
+        }
+
+        enforce(functionValue.kind == ValueKind.function_,
+            "Table unary operator overload must be a function value");
+        auto result = new Value();
+        *result = invokeFunctionValue(functionValue, [operand]);
+        return result;
     }
 
     private Value* tryCallEqualityOverload(Value left, Value right)
@@ -2844,6 +2873,12 @@ private final class BindTypeFeatures
     {
         return value + rhs;
     }
+
+    int opUnary(string operator)() const
+        if (operator == "-")
+    {
+        return -value;
+    }
 }
 
 unittest
@@ -3248,6 +3283,22 @@ unittest
 unittest
 {
     auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto value = {
+            amount = 12,
+            opUnary- = (any self) {
+                return -self.amount;
+            }
+        };
+        return -value;
+    });
+
+    assert(result.toInt() == -12);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
     auto result = engine.runSafe(q{
         any outer() {
             return missing();
@@ -3454,13 +3505,14 @@ unittest
     engine.bindType!BindTypeFeatures("BindTypeFeatures");
     auto reflectedFeature = Value.reflect(new BindTypeFeatures(1, 1));
     assert("opBinary+" in reflectedFeature.tableValue);
+    assert("opUnary-" in reflectedFeature.tableValue);
 
     auto result = engine.run(q{
         auto feature = BindTypeFeatures(6, 7);
-        return BindTypeFeatures.combine(4, 2) + (feature + 8);
+        return BindTypeFeatures.combine(4, 2) + (feature + 8) + (-feature);
     });
 
-    assert(result.toInt() == 92);
+    assert(result.toInt() == 50);
 }
 
 unittest

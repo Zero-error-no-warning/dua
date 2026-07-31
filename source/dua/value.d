@@ -309,6 +309,16 @@ struct Value
                         T.stringof ~ ".opBinaryRight" ~ operatorSymbol, value));
             }
         }}
+        static foreach (operatorSymbol; ["-", "!"])
+        {{
+            static if (__traits(compiles, makeBoundUnaryOperator!(T, operatorSymbol)(
+                T.stringof ~ ".opUnary" ~ operatorSymbol, value)))
+            {
+                converted["opUnary" ~ operatorSymbol] = Value.fromFunction(
+                    makeBoundUnaryOperator!(T, operatorSymbol)(
+                        T.stringof ~ ".opUnary" ~ operatorSymbol, value));
+            }
+        }}
         static if (is(T == struct) && __traits(compiles, makeBoundEqualityOperator(
             T.stringof ~ ".opEquals", value)))
         {
@@ -548,6 +558,16 @@ private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string o
     auto callable = mixin("&value." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")");
     auto bound = makeReflectedCallable(debugName, callable);
     return new ReflectedCallable(debugName, 2, (Value[] args) {
+        return bound.invoke(args[1 .. $]);
+    });
+}
+
+private ReflectedCallable makeBoundUnaryOperator(T, string operatorSymbol)(
+    string debugName, auto ref T value)
+{
+    auto callable = mixin("&value.opUnary!(\"" ~ operatorSymbol ~ "\")");
+    auto bound = makeReflectedCallable(debugName, callable);
+    return new ReflectedCallable(debugName, 1, (Value[] args) {
         return bound.invoke(args[1 .. $]);
     });
 }
