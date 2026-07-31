@@ -170,6 +170,19 @@ auto msg = i"HP:$(a), ok=$(ok)";
 - 連結: `~`
 - ビット: `& | ^ << >>`
 
+テーブルでは `opUnary-`（および `opUnary!`）に関数を設定すると、単項演算子をオーバーロードできます。
+関数の第1引数には演算対象のテーブル自身が渡されます。
+
+```D
+auto value = {
+    amount = 12,
+    opUnary- = (any self) {
+        return -self.amount;
+    }
+};
+auto negated = -value; // -12
+```
+
 ### 5.1 文字列補間（Interpolation Expression Sequence）
 
 `i"..."` 形式で、`$(式)` を文字列の中に埋め込めます。
