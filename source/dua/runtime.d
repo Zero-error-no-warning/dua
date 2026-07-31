@@ -2897,6 +2897,79 @@ unittest
     assert(result.toInt() == 11);
 }
 
+private struct AliasNumberFixture
+{
+    int value;
+    int opBinary(string op)(int rhs) const if (op == "+") { return value + rhs; }
+    int opBinaryRight(string op)(int lhs) const if (op == "+") { return lhs + value; }
+    bool opEquals(const AliasNumberFixture rhs) const { return value == rhs.value; }
+}
+
+private struct AliasWrapperFixture
+{
+    AliasNumberFixture number;
+    alias number this;
+}
+
+private struct AliasMiddleFixture { AliasNumberFixture number; alias number this; }
+private struct AliasOuterFixture { AliasMiddleFixture middle; alias middle this; }
+
+private struct AliasOverrideFixture
+{
+    AliasNumberFixture number;
+    alias number this;
+    int opBinary(string op)(int rhs) const if (op == "+") { return 1000 + rhs; }
+}
+
+private struct AliasGetterFixture
+{
+    int* current;
+    AliasNumberFixture number() const { return AliasNumberFixture(*current); }
+    alias number this;
+}
+
+private struct AliasGenericNumberFixture
+{
+    int value;
+    auto opBinary(string op, R)(R rhs) const if (op == "+") { return value + rhs; }
+}
+private struct AliasGenericWrapperFixture
+{
+    AliasGenericNumberFixture number;
+    alias number this;
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindAuto("wrapped", AliasWrapperFixture(AliasNumberFixture(7)));
+    engine.bindAuto("outer", AliasOuterFixture(AliasMiddleFixture(AliasNumberFixture(8))));
+    engine.bindAuto("override", AliasOverrideFixture(AliasNumberFixture(9)));
+    engine.bindAuto("other", AliasWrapperFixture(AliasNumberFixture(7)));
+    engine.bindAuto("different", AliasWrapperFixture(AliasNumberFixture(6)));
+    engine.bindAuto("generic", AliasGenericWrapperFixture(AliasGenericNumberFixture(10)));
+    assert("opBinary+" in engine["wrapped"].tableValue);
+    assert("opBinaryRight+" in engine["wrapped"].tableValue);
+    assert("__eq" in engine["wrapped"].tableValue);
+    assert("opBinary+" in engine["generic"].tableValue);
+    auto result = engine.run(q{
+        return [wrapped + 3, 3 + wrapped, outer + 3, override + 3,
+            wrapped == other, wrapped != different, generic + 5];
+    });
+    assert(result.arrayValue[0].toInt() == 10);
+    assert(result.arrayValue[1].toInt() == 10);
+    assert(result.arrayValue[2].toInt() == 11);
+    assert(result.arrayValue[3].toInt() == 1003);
+    assert(result.arrayValue[4].truthy());
+    assert(result.arrayValue[5].truthy());
+    assert(result.arrayValue[6].toInt() == 15);
+
+    int current = 4;
+    engine.bindAuto("getter", AliasGetterFixture(&current));
+    current = 20;
+    assert(engine.run("return getter + 2;").toInt() == 22);
+}
+
 unittest
 {
     auto engine = new ScriptEngine();

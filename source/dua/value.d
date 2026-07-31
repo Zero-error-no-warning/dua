@@ -6,8 +6,8 @@ import std.conv : convTo = to;
 import std.exception : enforce;
 import std.format : format;
 import std.string : join;
-import std.meta : staticMap;
-import std.traits : BaseClassesTuple, FieldNameTuple, KeyType, Parameters, ReturnType, Unqual, isAggregateType, isAssociativeArray, isCallable, isDynamicArray, isFloatingPoint, isIntegral, isSomeString, isStaticArray;
+import std.meta : AliasSeq, staticIndexOf, staticMap;
+import std.traits : BaseClassesTuple, FieldNameTuple, KeyType, Parameters, ReturnType, Unqual, isAggregateType, isAssociativeArray, isCallable, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray;
 import std.typecons : Tuple;
 
 abstract class CallableValue
@@ -294,14 +294,16 @@ struct Value
         }}
         static foreach (operatorSymbol; ["+", "-", "*", "/", "%", "~", "&", "|", "^", "<<", ">>"])
         {{
-            static if (__traits(compiles, makeBoundBinaryOperator!(T, "opBinary", operatorSymbol)(
+            static if (staticIndexOf!("opBinary", __traits(allMembers, T)) >= 0
+                && __traits(compiles, makeBoundBinaryOperator!(T, "opBinary", operatorSymbol)(
                 T.stringof ~ ".opBinary" ~ operatorSymbol, value)))
             {
                 converted["opBinary" ~ operatorSymbol] = Value.fromFunction(
                     makeBoundBinaryOperator!(T, "opBinary", operatorSymbol)(
                         T.stringof ~ ".opBinary" ~ operatorSymbol, value));
             }
-            static if (__traits(compiles, makeBoundBinaryOperator!(T, "opBinaryRight", operatorSymbol)(
+            static if (staticIndexOf!("opBinaryRight", __traits(allMembers, T)) >= 0
+                && __traits(compiles, makeBoundBinaryOperator!(T, "opBinaryRight", operatorSymbol)(
                 T.stringof ~ ".opBinaryRight" ~ operatorSymbol, value)))
             {
                 converted["opBinaryRight" ~ operatorSymbol] = Value.fromFunction(
@@ -319,7 +321,8 @@ struct Value
                         T.stringof ~ ".opUnary" ~ operatorSymbol, value));
             }
         }}
-        static if (is(T == struct) && __traits(compiles, makeBoundEqualityOperator(
+        static if (is(T == struct) && staticIndexOf!("opEquals", __traits(allMembers, T)) >= 0
+            && __traits(compiles, makeBoundEqualityOperator(
             T.stringof ~ ".opEquals", value)))
         {
             converted["__eq"] = Value.fromFunction(
@@ -357,6 +360,18 @@ struct Value
                 typeChain ~= Value.from(Base.stringof);
             }
             converted["__typechain"] = Value.from(typeChain);
+        }
+        // Reflect alias-this targets last: the helper only fills missing slots,
+        // so declarations on the outer aggregate always win.  It retains the
+        // outer receiver and evaluates every alias-this hop when called.
+        static if (__traits(getAliasThis, T).length && !isInstanceOf!(Tuple, T))
+        {
+            static if (is(T == struct))
+                addAliasThisReflection!(T, T, "root", AliasSeq!T)(converted,
+                    reflectedTarget.value, reflectedTarget);
+            else
+                addAliasThisReflection!(T, T, "root", AliasSeq!T)(converted,
+                    reflectedTarget);
         }
         return Value.from(converted);
     }
@@ -485,6 +500,83 @@ struct Value
     }
 }
 
+private void addAliasThisReflection(Root, Current, string expression, Seen...)(
+    ref Value[string] converted, auto ref Root root, Object lifetimeOwner = null)
+{
+    static if (__traits(getAliasThis, Current).length)
+    {
+        enum aliasName = __traits(getAliasThis, Current)[0];
+        enum rawExpression = expression ~ "." ~ aliasName;
+        alias AliasMember = typeof(mixin(rawExpression));
+        static if (isCallable!AliasMember)
+        {
+            enum nextExpression = rawExpression ~ "()";
+            alias Next = Unqual!(ReturnType!AliasMember);
+        }
+        else
+        {
+            enum nextExpression = rawExpression;
+            alias Next = Unqual!AliasMember;
+        }
+        // D rejects direct alias-this cycles, but this guard also handles
+        // mutually recursive types and keeps reflection compilation bounded.
+        static if (isAggregateType!Next && staticIndexOf!(Next, Seen) < 0)
+        {
+            static foreach (memberName; __traits(allMembers, Next))
+            {{
+                static if (memberName != "this" && memberName != "__ctor"
+                    && memberName != "Monitor" && memberName != "factory")
+                {
+                    static if (__traits(compiles, __traits(getOverloads, Next, memberName)))
+                    {
+                        ReflectedCallable[] overloads;
+                        static foreach (overload; __traits(getOverloads, Next, memberName))
+                        {
+                            static if (__traits(compiles, makeLazyAliasCallable!(overload,
+                                Root, nextExpression)(Root.stringof ~ "." ~ memberName,
+                                    root, lifetimeOwner)))
+                                overloads ~= makeLazyAliasCallable!(overload, Root,
+                                    nextExpression)(Root.stringof ~ "." ~ memberName,
+                                        root, lifetimeOwner);
+                        }
+                        if (memberName !in converted && overloads.length == 1)
+                            converted[memberName] = Value.fromFunction(overloads[0]);
+                        else if (memberName !in converted && overloads.length > 1)
+                            converted[memberName] = Value.fromFunction(
+                                new OverloadedReflectedCallable(Root.stringof ~ "." ~ memberName,
+                                    overloads));
+                    }
+                }
+            }}
+            static foreach (operatorSymbol; ["+", "-", "*", "/", "%", "~", "&", "|", "^", "<<", ">>"])
+            {{
+                static foreach (methodName; ["opBinary", "opBinaryRight"])
+                {{
+                    auto slot = methodName ~ operatorSymbol;
+                    if (slot !in converted)
+                    {
+                        static if (__traits(compiles, mixin("&" ~ nextExpression ~ "."
+                            ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")"))
+                            || __traits(compiles, mixin(nextExpression ~ "." ~ methodName
+                                ~ "!(\"" ~ operatorSymbol ~ "\", long)(long.init)")))
+                            converted[slot] = Value.fromFunction(makeLazyAliasBinary!(Root, Next,
+                                nextExpression, methodName, operatorSymbol)(slot, root, lifetimeOwner));
+                    }
+                }}
+            }}
+            if ("__eq" !in converted)
+            {
+                static if (__traits(compiles, makeLazyAliasEquality!(Root, Next,
+                    nextExpression)(Root.stringof ~ ".opEquals", root, lifetimeOwner)))
+                    converted["__eq"] = Value.fromFunction(makeLazyAliasEquality!(Root, Next,
+                        nextExpression)(Root.stringof ~ ".opEquals", root, lifetimeOwner));
+            }
+            addAliasThisReflection!(Root, Next, nextExpression, Seen, Next)(converted,
+                root, lifetimeOwner);
+        }
+    }
+}
+
 private ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C callable,
     Object lifetimeOwner = null)
     if (isCallable!C)
@@ -521,6 +613,111 @@ private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string d
     alias Delegate = ReturnType!Function delegate(Parameters!Function);
     Delegate callable = &__traits(getMember, value, __traits(identifier, overload));
     return makeReflectedCallable(debugName, callable, lifetimeOwner);
+}
+
+private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string expression)(
+    string debugName, auto ref Root root, Object lifetimeOwner = null)
+{
+    alias Function = typeof(overload);
+    alias Params = Parameters!Function;
+    alias MutableParams = staticMap!(Unqual, Params);
+    return new ReflectedCallable(debugName, Params.length, (Value[] args) {
+        auto converted = Tuple!MutableParams();
+        static foreach (index, Param; Params)
+            converted[index] = convertFromValue!(Unqual!Param)(args[index]);
+        static if (is(ReturnType!Function == void))
+        {
+            __traits(getMember, mixin(expression), __traits(identifier, overload))(converted.expand);
+            return Value.nullValue();
+        }
+        else
+            return convertToValue(__traits(getMember, mixin(expression),
+                __traits(identifier, overload))(converted.expand));
+    }, lifetimeOwner);
+}
+
+private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
+    string methodName, string operatorSymbol)(string debugName, auto ref Root root,
+        Object lifetimeOwner = null)
+{
+    // Prefer the traditional partially-instantiated operator.  This preserves
+    // concrete RHS overloads and their exact conversion behavior.
+    static if (__traits(compiles, mixin("&" ~ expression ~ "." ~ methodName
+        ~ "!(\"" ~ operatorSymbol ~ "\")")))
+    {
+        alias Callable = typeof(mixin("&" ~ expression ~ "." ~ methodName
+            ~ "!(\"" ~ operatorSymbol ~ "\")"));
+        alias Params = Parameters!Callable;
+        alias Rhs = Unqual!(Params[0]);
+        return new ReflectedCallable(debugName, 2, (Value[] args) {
+            auto rhs = convertFromValue!Rhs(args[1]);
+            return convertToValue(mixin(expression ~ "." ~ methodName
+                ~ "!(\"" ~ operatorSymbol ~ "\")(rhs)"));
+        }, lifetimeOwner);
+    }
+    else static if (__traits(compiles, mixin(expression ~ "." ~ methodName
+        ~ "!(\"" ~ operatorSymbol ~ "\", long)(long.init)")))
+    {
+        return new ReflectedCallable(debugName, 2, (Value[] args) {
+            switch (args[1].kind)
+            {
+                case ValueKind.integer:
+                    auto rhs = convertFromValue!long(args[1]);
+                    return convertToValue(mixin(expression ~ "." ~ methodName
+                        ~ "!(\"" ~ operatorSymbol ~ "\", long)(rhs)"));
+                case ValueKind.floating:
+                    static if (__traits(compiles, mixin(expression ~ "." ~ methodName
+                        ~ "!(\"" ~ operatorSymbol ~ "\", double)(double.init)")))
+                    {
+                        auto rhs = convertFromValue!double(args[1]);
+                        return convertToValue(mixin(expression ~ "." ~ methodName
+                            ~ "!(\"" ~ operatorSymbol ~ "\", double)(rhs)"));
+                    }
+                    else { enforce(false, "Operator does not accept a floating RHS"); assert(0); }
+                case ValueKind.boolean:
+                    static if (__traits(compiles, mixin(expression ~ "." ~ methodName
+                        ~ "!(\"" ~ operatorSymbol ~ "\", bool)(bool.init)")))
+                    {
+                        auto rhs = convertFromValue!bool(args[1]);
+                        return convertToValue(mixin(expression ~ "." ~ methodName
+                            ~ "!(\"" ~ operatorSymbol ~ "\", bool)(rhs)"));
+                    }
+                    else { enforce(false, "Operator does not accept a boolean RHS"); assert(0); }
+                case ValueKind.string_:
+                    static if (__traits(compiles, mixin(expression ~ "." ~ methodName
+                        ~ "!(\"" ~ operatorSymbol ~ "\", string)(string.init)")))
+                    {
+                        auto rhs = convertFromValue!string(args[1]);
+                        return convertToValue(mixin(expression ~ "." ~ methodName
+                            ~ "!(\"" ~ operatorSymbol ~ "\", string)(rhs)"));
+                    }
+                    else { enforce(false, "Operator does not accept a string RHS"); assert(0); }
+                case ValueKind.table:
+                    static if (__traits(compiles, mixin(expression ~ "." ~ methodName
+                        ~ "!(\"" ~ operatorSymbol ~ "\", Target)(Target.init)")))
+                    {
+                        auto rhs = convertFromValue!Target(args[1]);
+                        return convertToValue(mixin(expression ~ "." ~ methodName
+                            ~ "!(\"" ~ operatorSymbol ~ "\", Target)(rhs)"));
+                    }
+                    else { enforce(false, "Operator does not accept an aggregate RHS"); assert(0); }
+                default: enforce(false, "Unsupported RHS value kind for templated operator"); assert(0);
+            }
+            assert(0);
+        }, lifetimeOwner);
+    }
+    else static assert(0, "No supported binary operator");
+}
+
+private ReflectedCallable makeLazyAliasEquality(Root, Target, string expression)(
+    string debugName, auto ref Root root, Object lifetimeOwner = null)
+{
+    auto callable = mixin("&" ~ expression ~ ".opEquals");
+    alias Rhs = Unqual!(Parameters!(typeof(callable))[0]);
+    return new ReflectedCallable(debugName, 2, (Value[] args) {
+        auto rhs = convertFromValue!Rhs(args[1]);
+        return convertToValue(mixin(expression ~ ".opEquals(rhs)"));
+    }, lifetimeOwner);
 }
 
 ReflectedCallable makeStaticReflectedCallable(alias overload)(string debugName)
@@ -648,6 +845,20 @@ private T convertFromValue(T)(const(Value) value)
         enforce(value.kind == ValueKind.table,
             format("Expected table value to convert into '%s' but got %s", T.stringof, value.kind));
         alias MutableT = Unqual!T;
+
+        // A reflected alias-this wrapper retains its outer fields.  When an
+        // operator expects the target type, peel the single structural layer
+        // whose table exposes that target's fields.
+        static if (FieldNameTuple!MutableT.length)
+        {
+            enum firstField = FieldNameTuple!MutableT[0];
+            if (firstField !in value.tableValue)
+            {
+                foreach (candidate; value.tableValue)
+                    if (candidate.kind == ValueKind.table && firstField in candidate.tableValue)
+                        return convertFromValue!T(candidate);
+            }
+        }
         MutableT result = MutableT.init;
         static foreach (memberName; FieldNameTuple!MutableT)
         {{
