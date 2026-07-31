@@ -37,12 +37,17 @@ final class ReflectedCallable : CallableValue
 {
     private Value delegate(Value[] args) invoker;
     private size_t arity;
+    // Keeps a heap-backed struct receiver alive for the lifetime of its bound
+    // delegate. Class receivers do not need a separate owner.
+    private Object lifetimeOwner;
 
-    this(string debugName, size_t arity, Value delegate(Value[] args) invoker)
+    this(string debugName, size_t arity, Value delegate(Value[] args) invoker,
+        Object lifetimeOwner = null)
     {
         super(debugName);
         this.arity = arity;
         this.invoker = invoker;
+        this.lifetimeOwner = lifetimeOwner;
     }
 
     override Value invoke(Value[] args)
@@ -82,6 +87,16 @@ final class OverloadedReflectedCallable : CallableValue
         enforce(match !is null,
             format("Function '%s' has no overload taking %s arguments", debugName, args.length));
         return match.invoke(args);
+    }
+}
+
+private final class ReflectedStructStorage(T)
+{
+    T value;
+
+    this(T source)
+    {
+        value = source;
     }
 }
 
@@ -215,6 +230,17 @@ struct Value
         if (isAggregateType!T)
     {
         Value[string] converted;
+        // A member delegate contains a pointer to its struct receiver.  Keep a
+        // reflected struct copy on the GC heap so delegates remain valid when
+        // reflection was triggered by a temporary return value.
+        static if (is(T == struct))
+        {
+            auto reflectedTarget = new ReflectedStructStorage!T(value);
+        }
+        else
+        {
+            auto reflectedTarget = value;
+        }
         static foreach (memberName; __traits(allMembers, T))
         {{
             static if (memberName != "this" && memberName != "__ctor" && memberName != "Monitor" && memberName != "factory")
@@ -227,8 +253,17 @@ struct Value
                         static if (__traits(compiles, makeBoundReflectedCallable!overload(
                             T.stringof ~ "." ~ memberName, value)))
                         {
-                            overloads ~= makeBoundReflectedCallable!overload(
-                                T.stringof ~ "." ~ memberName, value);
+                            static if (is(T == struct))
+                            {
+                                overloads ~= makeBoundReflectedCallable!overload(
+                                    T.stringof ~ "." ~ memberName, reflectedTarget.value,
+                                    reflectedTarget);
+                            }
+                            else
+                            {
+                                overloads ~= makeBoundReflectedCallable!overload(
+                                    T.stringof ~ "." ~ memberName, reflectedTarget);
+                            }
                         }
                     }
                     if (overloads.length == 1)
@@ -240,7 +275,7 @@ struct Value
                         converted[memberName] = Value.fromFunction(
                             new OverloadedReflectedCallable(T.stringof ~ "." ~ memberName, overloads));
                     }
-                    static if (is(T == class))
+                    static if (is(T == class) || is(T == struct))
                     {
                         foreach (overload; overloads)
                         {
@@ -440,7 +475,8 @@ struct Value
     }
 }
 
-private ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C callable)
+private ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C callable,
+    Object lifetimeOwner = null)
     if (isCallable!C)
 {
     alias Params = Parameters!C;
@@ -465,15 +501,16 @@ private ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C 
         {
             return convertToValue(storedCallable(converted.expand));
         }
-    });
+    }, lifetimeOwner);
 }
 
-private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string debugName, auto ref T value)
+private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string debugName,
+    auto ref T value, Object lifetimeOwner = null)
 {
     alias Function = typeof(overload);
     alias Delegate = ReturnType!Function delegate(Parameters!Function);
     Delegate callable = &__traits(getMember, value, __traits(identifier, overload));
-    return makeReflectedCallable(debugName, callable);
+    return makeReflectedCallable(debugName, callable, lifetimeOwner);
 }
 
 ReflectedCallable makeStaticReflectedCallable(alias overload)(string debugName)

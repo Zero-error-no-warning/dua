@@ -3555,6 +3555,93 @@ unittest
 
 unittest
 {
+    struct Proxy
+    {
+        int currentValue;
+
+        int value() const
+        {
+            return currentValue;
+        }
+
+        void value(int next)
+        {
+            currentValue = next;
+        }
+
+        int value(int left, int right) const
+        {
+            return currentValue + left + right;
+        }
+    }
+
+    auto engine = new ScriptEngine();
+    Proxy proxy = Proxy(7);
+    auto reflectedProxy = Value.reflect(proxy);
+    engine.bind("proxy", reflectedProxy);
+
+    auto result = engine.run(q{
+        proxy.value = 39;
+        auto propertyValue = proxy.value;
+        auto explicitValue = proxy.value();
+        auto overloadedValue = proxy.value(1, 2);
+        return [propertyValue, explicitValue, overloadedValue, proxy.value];
+    });
+
+    assert(result.arrayValue[0].toInt() == 39);
+    assert(result.arrayValue[1].toInt() == 39);
+    assert(result.arrayValue[2].toInt() == 42);
+    assert(result.arrayValue[3].toInt() == 39);
+    assert(reflectedProxy.tableValue["value"].kind == ValueKind.function_);
+    assert(proxy.currentValue == 7);
+}
+
+unittest
+{
+    final class Owner
+    {
+        struct FieldProxy
+        {
+            Owner owner;
+
+            int x() const
+            {
+                return owner.currentX;
+            }
+
+            void x(int next)
+            {
+                owner.currentX = next;
+            }
+        }
+
+        int currentX = 11;
+
+        FieldProxy point()
+        {
+            return FieldProxy(this);
+        }
+    }
+
+    auto engine = new ScriptEngine();
+    auto owner = new Owner();
+    engine.bind("owner", Value.reflect(owner));
+
+    auto result = engine.run(q{
+        auto before = owner.point.x;
+        owner.point.x = 42;
+        auto after = owner.point.x;
+        return [before, after, owner.point.x];
+    });
+
+    assert(result.arrayValue[0].toInt() == 11);
+    assert(result.arrayValue[1].toInt() == 42);
+    assert(result.arrayValue[2].toInt() == 42);
+    assert(owner.currentX == 42);
+}
+
+unittest
+{
     auto engine = new ScriptEngine();
 
     auto result = engine.run(q{
