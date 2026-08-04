@@ -60,11 +60,11 @@ void main()
 
 ## ドキュメント
 
-公開向けドキュメントは `docs/` に整理しています。
+用途別の日本語ドキュメントを `docs/` に用意しています。
 
-- [公開ガイド / 導入](docs/public-guide-ja.md)
-- [言語リファレンス](docs/language-reference-ja.md)
-- [埋め込み API リファレンス](docs/embedding-api-ja.md)
+- [入門ガイド](docs/public-guide-ja.md) — ビルド、最初の埋め込み、値・関数・モジュールの基本
+- [言語リファレンス](docs/language-reference-ja.md) — 構文、型、標準ライブラリの一覧
+- [埋め込み API リファレンス](docs/embedding-api-ja.md) — `ScriptEngine` / `Value` / reflection / 安全な実行
 
 ## リポジトリ構成
 
