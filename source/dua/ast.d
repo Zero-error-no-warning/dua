@@ -122,6 +122,8 @@ final class Expression
     Value literalValue;
     string identifier;
     string operatorSymbol;
+    /// Declared result type for function expressions. Empty means inferred/dynamic.
+    string returnType;
     Expression left;
     Expression middle;
     Expression right;

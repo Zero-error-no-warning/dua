@@ -1540,7 +1540,8 @@ final class ScriptEngine
                     return Value.from(entries);
                 case Expression.Kind.function_:
                     return Value.fromFunction(new ScriptCallable("anonymous", this, environment,
-                        expression.parameters, expression.variadic, expression.body));
+                        expression.parameters, expression.variadic, expression.body,
+                        null, expression.returnType));
                 case Expression.Kind.get:
                     auto container = evaluate(expression.left, environment);
                     enforce(container.kind == ValueKind.table,
@@ -4014,11 +4015,14 @@ unittest
 unittest
 {
     auto engine = new ScriptEngine();
-    auto result = engine.run(
-        "auto a, b, c = [1, 2, 3];\n"
-        ~ "auto tbl = { hp = 7, mp = 5 };\n"
-        ~ "return a + c + tbl.hp + tbl.mp;\n");
-    assert(result.toInt() == 16);
+    auto result = engine.run(q{
+        auto a, b, c = [1, 2, 3];
+        a, b = [b, a];
+        return [a, b, c];
+    });
+    assert(result.arrayValue[0].toInt() == 2);
+    assert(result.arrayValue[1].toInt() == 1);
+    assert(result.arrayValue[2].toInt() == 3);
 }
 
 unittest
@@ -4089,13 +4093,10 @@ unittest
     auto result = engine.run(q{
         auto box = { v = 0 };
         auto sink = (any x) :> rawset(box, "v", x * 3);
-        auto out = sink(7);
-        if (box.v == 21 && out == null) {
-            return 1;
-        }
-        return 0;
+        sink(7);
+        return box.v;
     });
-    assert(result.toInt() == 1);
+    assert(result.toInt() == 21);
 }
 
 unittest
@@ -4113,11 +4114,11 @@ unittest
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
         auto value = 0;
-        auto assign = () :> value = 42;
-        auto returned = assign();
-        return value == 42 && returned == null;
+        auto assign = (int next) :> value = next;
+        assign(42);
+        return value;
     });
-    assert(result.kind == ValueKind.boolean && result.booleanValue);
+    assert(result.toInt() == 42);
 }
 
 unittest

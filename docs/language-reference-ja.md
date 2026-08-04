@@ -38,7 +38,7 @@ bool active = true;
 string name = "Ada";
 any dynamic = [1, 2];
 
-auto first, second = [10, 20]; # 多値展開
+auto first, second = [10, 20]; # 配列の要素を各変数へ分配
 first = first + 1;
 first, second = [second, first];
 ```
@@ -47,7 +47,7 @@ first, second = [second, first];
 - `Type name = expr;` は代入時に型を検査します。組み込み型は `int`、`double`、`bool`、`string`、`any`、`void` です。
 - 宣言には初期値が必須です。未宣言変数への代入はエラーです。
 - ブロックと関数は外側を参照できるレキシカルスコープを作り、ラムダは外側の変数をキャプチャします。
-- `auto a, b = array;` と複数代入では、配列の要素を左辺へ順番に割り当てます。
+- `auto a, b = array;` と `a, b = array;` は、右辺の配列要素を左辺へ順番に割り当てる分配代入です。関数が複数の戻り値を持つ機能ではありません。要素が足りない左辺には `null` が入ります。
 
 ## 3. 関数とラムダ
 
@@ -70,7 +70,7 @@ auto sink = (any value) :> rawset({}, "value", value);
 - 宣言は `ReturnType name(Type parameter, ...) { ... }` です。
 - 可変長引数は最後の引数名に `...` を付け、残りの引数を配列として受け取ります。
 - `(typedArgs) => expression` は式を返すラムダです。
-- `(typedArgs) :> expression` は式を評価して結果を捨て、`null` を返します。
+- `(typedArgs) :> expression` は式を評価して結果を捨てる `void` ラムダです。値を返すラムダではありません。
 - ブロック形式の関数は明示的な `return` がなければ `null` を返します。単なる最後の式は暗黙 return になりません。
 - `ReturnType delegate(ArgumentTypes)` は関数型です（例: `int delegate(int)`）。引数・戻り値は呼び出し時に検査されます。
 - テーブル上の関数を `object.method(...)` と呼ぶと、関数本体の `this` はそのテーブルになります。
@@ -225,7 +225,7 @@ try {
 
 `return` / `break` / `continue` / `yield` は捕捉しません。ステップ数・呼び出し深度の超過も安全制御を迂回できないよう捕捉しません。`finally` と try 式はありません。
 
-`pcall(function, args...)` は `[成功bool, 値またはメッセージ]`、`xpcall(function, handler, args...)` は失敗メッセージを handler で変換した同形式の配列を返します。多値宣言と組み合わせられます。
+`pcall(function, args...)` は `[成功bool, 値またはメッセージ]`、`xpcall(function, handler, args...)` は失敗メッセージを handler で変換した同形式の配列を返します。配列の分配代入と組み合わせられます。
 
 ## 10. コルーチン
 

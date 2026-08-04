@@ -713,6 +713,7 @@ private struct Parser
                 }
                 else
                 {
+                    node.returnType = "void";
                     node.body = parseImplicitSubroutineBody();
                 }
             }
