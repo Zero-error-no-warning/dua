@@ -176,6 +176,10 @@ auto status = engine.run("return { hp = 3, active = true };").to!Status();
 | `truthy()` | Dua の条件規則で真か |
 | `to!T()` | 対応する D 型へ変換。テーブルから struct も可 |
 
+`to!T()` および reflection による引数変換では、Dua の関数値を対応する D の
+`ReturnType delegate(Parameters)` 型へ変換できます。生成された delegate を D 側から
+呼ぶと、引数は Dua の `Value` へ、戻り値は宣言された D 型へ自動変換されます。
+
 `toScriptLiteral()` は汎用 JSON encoder ではありません。
 
 ## 6. D aggregate の reflection

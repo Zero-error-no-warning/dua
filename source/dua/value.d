@@ -7,7 +7,7 @@ import std.exception : enforce;
 import std.format : format;
 import std.string : join;
 import std.meta : AliasSeq, staticIndexOf, staticMap;
-import std.traits : BaseClassesTuple, FieldNameTuple, KeyType, Parameters, ReturnType, Unqual, isAggregateType, isAssociativeArray, isCallable, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray;
+import std.traits : BaseClassesTuple, FieldNameTuple, KeyType, Parameters, ReturnType, Unqual, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray;
 import std.typecons : Tuple;
 
 abstract class CallableValue
@@ -840,6 +840,29 @@ private T convertFromValue(T)(const(Value) value)
     {
         return cast(T) value.toFloat();
     }
+    else static if (isDelegate!T)
+    {
+        enforce(value.kind == ValueKind.function_,
+            format("Expected function value to convert into '%s' but got %s", T.stringof, value.kind));
+        // A const Value only makes the handle const; invoking a function may
+        // legitimately mutate the script closure captured by the callable.
+        auto callable = cast(CallableValue) value.functionValue;
+
+        ReturnType!T converted(Parameters!T args)
+        {
+            Value[] convertedArgs;
+            static foreach (index; 0 .. Parameters!T.length)
+                convertedArgs ~= convertToValue(args[index]);
+
+            auto result = callable.invoke(convertedArgs);
+            static if (is(ReturnType!T == void))
+                return;
+            else
+                return convertFromValue!(ReturnType!T)(result);
+        }
+
+        return &converted;
+    }
     else static if (isAggregateType!T && !is(T == class))
     {
         enforce(value.kind == ValueKind.table,
@@ -978,6 +1001,11 @@ private class ReflectionMemberFilteringFixture
     }
 }
 
+private int applyDelegateFixture(int value, int delegate(int) transform)
+{
+    return transform(value);
+}
+
 unittest
 {
     auto fixture = new ReflectionMemberFilteringFixture();
@@ -1003,4 +1031,18 @@ unittest
     ]);
     assert(dotResult.toFloat() == 11.0);
     assert(reflectedVector.tableValue["indices"].functionValue.invoke([]).arrayValue.length == 2);
+}
+
+unittest
+{
+    auto scriptDelegate = Value.fromFunction(new ReflectedCallable("double", 1, (Value[] args) {
+        return Value.from(args[0].toInt() * 2);
+    }));
+
+    auto converted = scriptDelegate.to!(int delegate(int));
+    assert(converted(21) == 42);
+
+    auto hostFunction = makeStaticReflectedCallable!applyDelegateFixture("applyDelegateFixture");
+    auto result = hostFunction.invoke([Value.from(21), scriptDelegate]);
+    assert(result.toInt() == 42);
 }
