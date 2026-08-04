@@ -1,163 +1,186 @@
-# Dua 埋め込み API リファレンス（日本語）
+# Dua 埋め込み API リファレンス
 
-この文書は、`module dua` の公開 API と、`source/dua/runtime.d` の `unittest` で実際に保証している挙動を対応付けて説明します。
+この文書は公開入口 `module dua` の API を、用途別に説明します。最初のプログラムは[入門ガイド](public-guide-ja.md)、スクリプト構文は[言語リファレンス](language-reference-ja.md)を参照してください。
 
-## 1. 基本オブジェクト
-
-`module dua` では、以下の名前で主要 API を公開しています。
-
-- `Dua.ScriptEngine`
-- `Dua.Value`
-- `Dua.ValueKind`
-- `Dua.RunOutcome`
-
-## 2. ScriptEngine
-
-### 2.1 値と関数の公開
+## 1. 公開ファサード
 
 ```d
-final class Player
-{
-    int hp;
-}
+import dua;
 
 auto engine = new Dua.ScriptEngine();
-engine.bind("answer", Dua.Value.from(42));
-engine.bindAuto("lives", 3); // Value.from(...) を自動適用
-
-auto player = new Player();
-engine.bindAuto("player", player); // class/struct は Value.reflect(...) を自動適用
-engine["score"] = 0; // opIndexAssign 経由でも bindAuto 可能
-
-engine.bindNative("mul", (scope const(Dua.Value)[] args) {
-    return Dua.Value.from(args[0].toInt() * args[1].toInt());
-});
-
-auto result = engine.run("player.hp = player.hp + lives; return mul(answer, 2) + score;");
-assert(result.toInt() == 84);
 ```
 
-### 2.2 実行 API
+`Dua` 名前空間は次を公開します。
 
-- `run(source)` / `runSafe(source)`
-- `load(source)` / `loadSafe(source)`
-- `runFile(path)` / `runFileSafe(path)`
-- `loadFile(path)` / `loadFileSafe(path)`
+| 型 | 役割 |
+|---|---|
+| `Dua.ScriptEngine` | グローバル環境、モジュールキャッシュ、実行状態を持つエンジン |
+| `Dua.Value`, `Dua.ValueKind`, `Dua.CallableValue` | D と Dua の境界値 |
+| `Dua.RunOutcome`, `Dua.RunErrorKind` | Safe API の結果と失敗分類 |
+| `Dua.ExecutionLimits`, `Dua.RunOptions` | 実行予算と事前検査設定 |
+| `Dua.CheckDiagnostic` | 静的診断の位置とメッセージ |
 
-`*Safe` 系は `RunOutcome` を返し、エラー時に例外を直接投げず状態を受け取れます。
+`module dua` は `dua.runtime` と `dua.value` も public import します。利用側では互換性のある入口として `Dua.*` を使うと、内部モジュールへの直接依存を減らせます。
+
+## 2. ScriptEngine のライフサイクル
 
 ```d
-auto out = engine.runSafe("return unknownName + 1;");
-if (!out.ok) {
-    writeln("script error: ", out.errorMessage);
-    writeln(out.stackTrace);
+auto engine = new Dua.ScriptEngine();
+```
+
+生成時に新しいグローバル環境、標準ライブラリ、モジュール検索設定が作られます。グローバル値、ロード済み宣言、モジュールキャッシュは同じインスタンス内で保持されます。テナントや信頼境界をまたいで不用意に共有せず、必要なら処理単位でエンジンを作ってください。
+
+Dua のオブジェクトは D GC の管理下です。手動 GC API はありません。不要になったエンジンや大きな `Value` への参照をホスト側で手放してください。
+
+## 3. 実行、ロード、呼び出し
+
+### 3.1 API 一覧
+
+| API | 成功時 | 用途 |
+|---|---|---|
+| `run(source[, options])` | `Value` | ソースを実行し、トップレベルの結果を返す |
+| `runFile(path[, options])` | `Value` | UTF-8 テキストファイルを読み実行する |
+| `load(source)` / `loadFile(path)` | `void` | 同じグローバル環境へ宣言をロードする |
+| `call(name, args = [])` | `Value` | グローバル関数を D から呼ぶ |
+| `getGlobal(name)` / `engine[name]` | `Value` | グローバル値を取得する |
+| `runSafe`, `runFileSafe` | `RunOutcome` | 実行失敗を値として受け取る |
+| `loadSafe`, `loadFileSafe` | `RunOutcome` | ロード失敗を値として受け取る |
+
+非 Safe API は字句・構文・実行・ファイルエラーを例外として送出します。ユーザー提供ソースや通常運用で失敗し得る処理には Safe API を推奨します。
+
+```d
+engine.load(q{
+    int add(int a, int b) { return a + b; }
+});
+
+auto answer = engine.call("add", [Dua.Value.from(20), Dua.Value.from(22)]);
+assert(answer.toInt() == 42);
+```
+
+`load` もトップレベル文を実行しますが、結果を返す用途ではなく環境へのロード用途です。
+
+### 3.2 RunOutcome
+
+```d
+auto out = engine.runSafe("return missing + 1;");
+if (!out.ok)
+{
+    // out.errorKind, out.errorMessage, out.stackTrace
+}
+else
+{
+    auto value = out.value;
 }
 ```
 
-実行ごとのステップ数と関数呼び出し深度は `RunOptions` で制限できます。
-値 `0` は無制限を表します。
+| フィールド | 内容 |
+|---|---|
+| `ok` | 成功したか |
+| `value` | 成功時の戻り値 |
+| `errorMessage` | 失敗メッセージ |
+| `stackTrace` | Dua 関数呼び出しスタック |
+| `errorKind` | `none`, `runtime`, `stepLimit`, `callDepthLimit` |
+| `stepsExecuted` | 今回消費した概算ステップ |
+
+### 3.3 実行制限と型検査
 
 ```d
 auto options = Dua.RunOptions();
 options.limits.maxSteps = 100_000;
 options.limits.maxCallDepth = 128;
+options.typeCheck = true;
 
 auto out = engine.runSafe(source, options);
-if (!out.ok)
-{
-    if (out.errorKind == Dua.RunErrorKind.stepLimit
-        || out.errorKind == Dua.RunErrorKind.callDepthLimit)
-    {
-        // 信頼できないスクリプトが実行予算を超過
-    }
-}
 ```
 
-`stepsExecuted` から実際に消費した概算ステップ数を取得できます。ステップは文と式の
-実行時に加算される安全制御用の単位であり、性能測定用の安定した命令数ではありません。
-ネイティブ関数の内部処理はステップ制限の対象外です。
+制限値 `0` は無制限です。ステップは安全制御用の概算で、性能指標として安定した命令数ではありません。ネイティブ関数内部はステップ制限外です。ホスト側でも I/O、時間、メモリを制限してください。
 
-`check(source)` はスクリプトを実行せず、基本型の宣言・代入、関数引数、
-戻り値の明白な不一致を `CheckDiagnostic[]` として返します。
+`check(source)` は実行せず診断を返します。
 
 ```d
-auto diagnostics = engine.check(source);
-foreach (diagnostic; diagnostics)
+foreach (diagnostic; engine.check(source))
 {
     writeln(diagnostic.line, ":", diagnostic.column, ": ", diagnostic.message);
 }
-
-auto checkedOptions = Dua.RunOptions();
-checkedOptions.typeCheck = true;
-auto checked = engine.runSafe(source, checkedOptions);
 ```
 
-現在の事前検査は保守的で、動的なテーブルプロパティ、ネイティブ関数の戻り値、
-`any` は実行時の型境界検査に委ねます。
+`CheckDiagnostic` は1始まりの `line` / `column` と `message` を持ちます。検査は保守的で、動的なテーブルプロパティ、`any`、ネイティブ関数の結果などは実行時境界検査に委ねます。`typeCheck = true` の実行は診断があれば失敗します。
 
-### 2.3 モジュール
+## 4. 値とネイティブ関数のバインド
+
+### 4.1 bind / bindAuto / 添字記法
 
 ```d
-engine.registerModule("game.rules", q{
-    any bonus(any x) { return x + 10; }
-    return { bonus = bonus };
-});
-
-auto v = engine.run(q{
-    auto rules = require("game.rules");
-    return rules.bonus(5);
-});
-assert(v.toInt() == 15);
+engine.bind("exact", Dua.Value.from(42));
+engine.bindAuto("name", "Dua");
+engine["scores"] = [10, 20, 30];
+assert(engine["exact"].toInt() == 42);
 ```
 
-- `registerModule(name, source)` で D 側登録
-- スクリプト側は `require(name)` で利用
-- `export`/`import ... as ...` のモジュール記法にも対応
+- `bind(name, Value)` は変換済みの値を公開します。
+- `bindAuto(name, value)` は `Value` をそのまま、aggregate を `Value.reflect`、その他を `Value.from` で変換します。
+- `engine[name] = value` は `bindAuto`、`engine[name]` はグローバル取得の短縮です。
+- 同名を再度 bind するとそのグローバル値を置き換えます。
 
-`export` / `import` 形式の最小例:
+### 4.2 bindNative
 
 ```d
-engine.registerModule("math.plus10", q{
-    export any add10(any x) { return x + 10; }
+engine.bindNative("sum", (scope const(Dua.Value)[] args) {
+    long total;
+    foreach (arg; args)
+        total += arg.toInt();
+    return Dua.Value.from(total);
 });
-
-auto v2 = engine.run(q{
-    import "math.plus10" as m;
-    return m.add10(7);
-});
-assert(v2.toInt() == 17);
 ```
 
-### 2.4 GC（ガベージコレクション）とメモリ管理
+シグネチャは `Value delegate(scope const(Value)[] args)` です。引数個数、型、範囲をコールバック側で検査し、必ず `Value` を返します。戻り値がない処理は `Dua.Value.nullValue()` を返します。
 
-- Dua ランタイムは D の GC 管理下で動作し、`ScriptEngine`、クロージャ、コルーチン状態、`Value` の配列/テーブルは GC 到達可能性で管理されます。
-- `runtime.d` の標準ライブラリ公開 API に Lua 互換の `collectgarbage()` のような手動 GC 制御関数は存在しません。
-- そのため運用上は「エンジンインスタンスのライフサイクルをホスト側で短く保つ」「巨大テーブルを不要になった時点で参照解除する」を基本戦略にしてください。
+## 5. Value リファレンス
+
+### 5.1 ValueKind と格納フィールド
+
+`ValueKind` は `null_`, `integer`, `floating`, `boolean`, `string_`, `array`, `table`, `function_`, `native` です。`kind` を確認したうえで、必要に応じて `integerValue`, `floatingValue`, `booleanValue`, `stringValue`, `arrayValue`, `tableValue`, `functionValue` を参照できます。通常は変換メソッドを優先してください。
+
+### 5.2 D から Value を作る
 
 ```d
-// 推奨パターン: エンジンの寿命を業務単位で区切る
-Dua.Value evalOnce(string source) {
-    auto engine = new Dua.ScriptEngine();
-    return engine.run(source);
-}
-
-// 推奨パターン: 不要な巨大値への参照を落とす
-auto e = new Dua.ScriptEngine();
-auto large = e.run("return { data = [1,2,3,4,5] };");
-// ... 利用後
-large = Dua.Value.init; // 参照を切って GC 対象化しやすくする
+auto nil = Dua.Value.nullValue();
+auto integer = Dua.Value.from(42);
+auto floating = Dua.Value.from(1.5);
+auto boolean = Dua.Value.from(true);
+auto text = Dua.Value.from("hello");
+auto array = Dua.Value.from([1, 2, 3]);
+auto table = Dua.Value.from(["hp": 80, "mp": 30]);
 ```
 
-## 3. D 言語とのクラス・構造体連携
+`from` は `long` / `int` / `double` / `bool` / `string`、配列、文字列キーの連想配列を受けます。独自 aggregate は `reflect`、Dua から変換しない opaque な表示値には `native` があります。
 
-D 側との連携は `Value.reflect` と `bindType` が中心です。
+### 5.3 Value から取り出す
 
-### 3.1 `Value.reflect` の意味
+```d
+auto n = engine.run("return 1 + 2;").toInt();
+auto f = engine.run("return 1.5;").toFloat();
+auto s = engine.run("return \"abc\";").toHostString();
+auto literal = engine.run("return { hp = 3 };").toScriptLiteral();
 
-- **struct を `reflect`** した場合: フィールド値とメソッドをテーブル化して公開（値として扱われるため、スクリプトからのフィールド再代入は元 struct を直接更新しない）。
-- **class を `reflect`** した場合: フィールド getter/setter が内部的に公開され、スクリプトからの代入が元インスタンスへ反映される。
-- class または struct に同名の 0 引数メソッドと 1 引数メソッドがある場合、それぞれ property の getter/setter として扱われる（例: `obj.value` / `obj.value = 1`）。引数個数が異なる同名メソッドは、通常の呼び出しでもオーバーロードとして選択される。struct のメソッドは reflect 時に安全な値コピーへ束縛されるため、class の getter が値で返した一時的な struct でも利用できる（通常フィールドの値コピー仕様は変わらない）。
-- class には `__typechain` が付与され、`typeinfo` から継承チェーンを取得可能。
+struct Status { int hp; bool active; }
+auto status = engine.run("return { hp = 3, active = true };").to!Status();
+```
+
+| メソッド | 用途 |
+|---|---|
+| `isNumber()` | integer または floating か |
+| `toInt()`, `toFloat()` | 数値変換 |
+| `toHostString()` | ホスト表示用文字列 |
+| `toScriptLiteral()` | Dua リテラル風の表現 |
+| `truthy()` | Dua の条件規則で真か |
+| `to!T()` | 対応する D 型へ変換。テーブルから struct も可 |
+
+`toScriptLiteral()` は汎用 JSON encoder ではありません。
+
+## 6. D aggregate の reflection
+
+### 6.1 Value.reflect
 
 ```d
 struct Vec2 {
@@ -165,30 +188,29 @@ struct Vec2 {
     int y;
     int sum() const { return x + y; }
 }
-
 class Counter {
     int value;
 }
 
-auto eng = new Dua.ScriptEngine();
+Vec2 vector = Vec2(1, 2);
+auto counter = new Counter();
+engine.bindAuto("vector", vector);
+engine.bindAuto("counter", counter);
 
-Vec2 v = Vec2(1, 2);
-eng.bind("vec", Dua.Value.reflect(v));
-eng.run("vec.x = 100;");
-assert(v.x == 1); // struct は元値へ反映されない
-
-auto c = new Counter();
-c.value = 3;
-eng.bind("counter", Dua.Value.reflect(c));
-eng.run("counter.value = 9;");
-assert(c.value == 9); // class は setter/getter 経由で反映
+engine.run("vector.x = 99; counter.value = 7;");
+assert(vector.x == 1);       // struct は安全な値コピー
+assert(counter.value == 7); // class は元インスタンスへ反映
 ```
 
-### 3.2 `bindType` の意味
+- struct はコピーを reflection するため、スクリプト側フィールド代入は元 struct に反映されません。
+- class は getter/setter を介して元インスタンスを読み書きします。
+- 公開可能なフィールド、メソッド、演算子がテーブルへ反映されます。
+- 同名の0引数メソッドと1引数メソッドは property getter/setter としても扱われます。通常の `obj.method(...)` 呼び出しも可能です。
+- class の継承チェーンは `typeinfo(value).chain` で取得できます。
 
-- `bindType!T("Name")` で `Name.new({...})` / `Name({...})` コンストラクタをスクリプトに公開。
-- struct/class とも初期化テーブル 1 引数を受け取り可能。
-- `typeinfo(Name)` または `typeinfo(instance)` で型チェーンを取得可能。
+Reflection は D の型安全な境界変換に対応できるメンバーだけを公開します。公開面が意図どおりかテストしてください。
+
+### 6.2 bindType
 
 ```d
 struct Player {
@@ -196,168 +218,75 @@ struct Player {
     int hp;
 }
 
-class Enemy {
-    string kind;
-    int hp;
+engine.bindType!Player("Player");
+auto value = engine.run(q{
+    auto player = Player.new({ name = "Ada", hp = 40 });
+    auto alsoPlayer = Player({ name = "Bob", hp = 30 });
+    return player.hp + alsoPlayer.hp;
+});
+```
+
+`bindType!T(name)` は型テーブルを公開し、`Name.new(...)` と `Name(...)` を利用可能にします。
+
+- D コンストラクタは引数個数で候補を選択します。同じ arity の候補が複数あると曖昧エラーです。
+- 対応するコンストラクタがなければ、struct はゼロ初期化または初期化テーブル、既定構築可能な class は既定構築後に初期化テーブルを適用します。
+- 公開可能な static メンバーも型テーブルへ反映されます。
+- `typeinfo(Name)` と `typeinfo(instance)` で型チェーンを確認できます。
+
+## 7. モジュール API
+
+```d
+engine.registerModule("game.rules", q{
+    export int bonus(int value) { return value + 10; }
+});
+
+auto answer = engine.run(q{
+    import game.rules as rules;
+    return rules.bonus(32);
+});
+engine.clearModuleCache();
+```
+
+- `registerModule(name, source)` はソースをエンジンへ登録します。
+- `require(name)` / `import ... as ...` は一度評価した値をキャッシュします。
+- `clearModuleCache()` は全キャッシュを消します。登録ソースは残ります。
+- 未登録時は loader、続いて検索パターン `?.dua`, `?/init.dua` を調べます。`.` はパス区切りへ変換されます。
+- スクリプト側で `package.path`、`package.addPath`、`package.addLoader` などを使って設定できます。ファイル探索を許可する場合は検索元を信頼境界として扱ってください。
+
+## 8. エラーとセキュリティの推奨パターン
+
+```d
+auto options = Dua.RunOptions();
+options.typeCheck = true;
+options.limits.maxSteps = 50_000;
+options.limits.maxCallDepth = 64;
+
+auto out = engine.runSafe(untrustedSource, options);
+if (!out.ok)
+{
+    final switch (out.errorKind)
+    {
+    case Dua.RunErrorKind.none: break;
+    case Dua.RunErrorKind.runtime: /* 入力エラーとして通知 */ break;
+    case Dua.RunErrorKind.stepLimit: /* 予算超過 */ break;
+    case Dua.RunErrorKind.callDepthLimit: /* 再帰過多 */ break;
+    }
 }
 ```
 
+実行制限は完全な sandbox ではありません。特に標準 `io.readFile` / `io.exists` / `os.getenv` と、バインドしたネイティブ関数はホストプロセスの権限で動作します。信頼できないコードには、別プロセス、OS 権限、ファイルシステム分離、ホスト側タイムアウトも組み合わせてください。
 
-## 4. Value
+## 9. API 選択早見表
 
-`Dua.Value` は D とスクリプト間の境界型です。
-
-### 4.1 主な変換
-
-- `Dua.Value.from(primitive)`
-- `Dua.Value.from(array)`
-- `Dua.Value.from(associativeArray)`
-- `Dua.Value.reflect(structOrClass)`
-
-```d
-auto i = Dua.Value.from(42);
-auto arr = Dua.Value.from([1, 2, 3]);
-auto aa = Dua.Value.from(["hp": 80, "mp": 30]);
-```
-
-### 4.2 主な取り出し
-
-- `toInt()`
-- `toFloat()`
-- `toBool()`
-- `toStringValue()`
-- `toScriptLiteral()`
-- `to!T()`（テーブル→D struct 変換を含む）
-
-```d
-auto n = engine.run("return 1 + 2;").toInt();
-auto s = engine.run("return 'abc';").toStringValue();
-
-struct Status { int hp; int mp; }
-auto st = engine.run("return { hp = 120, mp = 40 };").to!Status();
-assert(st.hp == 120 && st.mp == 40);
-```
-
-## 5. エラー処理パターン
-
-```d
-auto out = engine.runSafe("return missingVar;");
-if (!out.ok) {
-    // out.errorMessage
-    // out.stackTrace
-}
-```
-
-アプリケーションでは、`ok` を起点にログ・ユーザー通知・フォールバックへ分岐させるのが基本です。
-
-## 6. `runtime.d` の unittest 網羅一覧（サンプル付き）
-
-以下は `source/dua/runtime.d` で `unittest` されている内容の網羅リストです（2026-04-10 時点）。
-
-1. `for` + `continue` の制御フロー。
-2. `foreach` + `break` と `switch/case/default`。
-3. 配列 `foreach(index, value)` とテーブル列挙。
-4. メタテーブル `__index` / `__newindex` / `__call` / `__len`。
-5. 論理演算の短絡評価（`&&`, `||`）。
-6. 多値 return と多値代入。
-7. 可変長引数 `tail...`。
-8. `opBinary~` とメソッドチェーン。
-9. `runSafe` の失敗結果（`errorMessage`, `stackTrace`）。
-10. `registerModule` + `require` キャッシュ + 標準ライブラリ併用。
-11. `export`/`import` モジュール。
-12. `Value.reflect` による struct/class のメソッド呼び出し・class フィールド更新。
-13. `bindType` した struct の `new` 初期化と `typeinfo`。
-14. `bindType` した class のコンストラクタ呼び出しと `typeinfo`。
-15. `reflect(struct)` の書き換えが元値へ波及しないこと。
-16. `reflect(class)` の setter/getter 経由更新（元インスタンス反映）。
-17. スクリプト table 内のプロパティ風 getter/setter（`obj.get` / `obj.set`）。
-18. `this` 解決付きメソッド呼び出し。
-19. `load` + `call` の D 側直接関数呼び出し。
-20. `runFile` / `loadFile` のファイル実行。
-21. `runFileSafe` / `loadFileSafe` の失敗系。
-22. クロージャ（`makeCounter`）の状態保持。
-23. `Value.to!Struct` でのテーブル→struct 変換。
-24. `pcall` / `xpcall` の成功・失敗・エラーハンドラ。
-25. `setmetatable` / `getmetatable`。
-26. `typeof` の kind/length 判定。
-27. `setmetatableWithType` + `typeinfo` の型チェーン。
-28. ビット演算（`&`, `>>`, `<<`, `^`, `|`）。
-29. 計算キー付きテーブルリテラル（`[key] = value`）。
-30. 配列要素を持つテーブルの `foreach` 列挙。
-31. 配列・テーブルリテラル。
-32. `coroutine.create/resume/status` と `yield`。
-33. `string.trim` / `string.contains` / `string.replace`。
-34. `math.min` / `math.max` と `string.len`。
-35. 短縮ラムダ `(any x) => ...` / `(any a, any b) => ...`。
-36. 戻り値なしラムダ構文 `:>` 
-37. `map` / `filter`（配列）と `table.map` / `table.filter`（テーブル）。
-38. 行コメント・ネストブロックコメントとスライス式。
-39. `rawset`
-
-### 6.1 代表サンプル（unittest 対応）
-
-**高階関数（`map` / `filter`、UFCS 併用）**
-
-```d
-auto n = engine.run(q{
-    auto evens = [1, 2, 3, 4, 5]
-        .map((any x) => x * 2)
-        .filter((any x) => x % 4 == 0);
-    return evens[0] + evens[1]; // 4 + 8
-});
-assert(n.toInt() == 12);
-```
-
-`map(xs, callback)` / `filter(xs, callback)` の入れ子でも同じ結果になります。
-
-**戻り値なしラムダ `:>`（副作用用途）**
-
-```d
-auto sinkResult = engine.run(q{
-    auto box = { v = 0 };
-    auto sink = (any x) :> rawset(box, "v", x * 3);
-    auto out = sink(7);
-    return [box.v, out == null];
-});
-```
-
-**コルーチン**
-
-```d
-auto co = engine.run(q{
-    auto c = coroutine.create(() {
-        coroutine.yield(10);
-        return 20;
-    });
-    auto a = coroutine.resume(c); // 10
-    auto b = coroutine.resume(c); // 20
-    return [a, b, coroutine.status(c)];
-});
-```
-
-**pcall / xpcall**
-
-```d
-auto ok = engine.run(q{
-    auto a = pcall(() { return 123; });
-    auto b = pcall(() { error("boom"); });
-    return [a[0], b[0]];
-});
-```
-
-**module + require キャッシュ**
-
-```d
-engine.registerModule("counter.mod", q{
-    auto n = 0;
-    export any next() { n = n + 1; return n; }
-});
-
-auto r = engine.run(q{
-    import "counter.mod" as c1;
-    import "counter.mod" as c2;
-    return [c1.next(), c2.next()]; // [1, 2]
-});
-```
-
-> 補足: 上記は「公開 API が実際にどう使えるか」を示す実例です。破壊的変更時はこの一覧を更新し、対応する `unittest` の追加/修正も同時に行ってください。
+| やりたいこと | API |
+|---|---|
+| 1回実行して結果を得る | `runSafe` |
+| 信頼済み固定ソースを簡潔に実行 | `run` |
+| 関数群を環境へ定義して後で呼ぶ | `load` + `call` |
+| primitive / 配列 / AA を公開 | `bindAuto` |
+| 変換済み値を公開 | `bind` |
+| D callback を公開 | `bindNative` |
+| class / struct インスタンスを公開 | `bindAuto` / `Value.reflect` |
+| D 型の構築機能を公開 | `bindType!T` |
+| 実行せず型診断 | `check` |
+| スクリプトをモジュール化 | `registerModule` + `import` / `require` |
