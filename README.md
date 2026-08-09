@@ -66,6 +66,10 @@ void main()
 - [言語リファレンス](docs/language-reference-ja.md) — 構文、型、標準ライブラリの一覧
 - [埋め込み API リファレンス](docs/embedding-api-ja.md) — `ScriptEngine` / `Value` / reflection / 安全な実行
 
+## エディターサポート
+
+- [Visual Studio Code 拡張](editors/vscode-dua/README.md) — `.dua` のシンタックスハイライト、コメント、括弧補完、折りたたみ
+
 ## リポジトリ構成
 
 - `source/dua/lexer.d` : Lexer
