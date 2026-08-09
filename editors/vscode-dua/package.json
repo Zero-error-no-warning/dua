@@ -1,0 +1,41 @@
+{
+  "name": "dua-language",
+  "displayName": "Dua Language",
+  "description": "Syntax highlighting and editor support for the Dua scripting language.",
+  "version": "0.1.0",
+  "publisher": "dua-lang",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "dua",
+    "syntax highlighting",
+    "embedded scripting"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "dua",
+        "aliases": [
+          "Dua",
+          "dua"
+        ],
+        "extensions": [
+          ".dua"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dua",
+        "scopeName": "source.dua",
+        "path": "./syntaxes/dua.tmLanguage.json"
+      }
+    ]
+  }
+}
