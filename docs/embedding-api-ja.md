@@ -72,13 +72,16 @@ engine.registerModule("game.rules", q{
 });
 
 auto rules = engine.loadModule("game.rules");
-assert(rules.tableValue["answer"].toInt() == 42);
+assert(rules["answer"].toInt() == 42);
+auto result = rules.call("calculate", [Dua.Value.from(10)]);
 
 // ファイルを直接モジュールとしてロードする場合
 auto settings = engine.loadModuleFile("config/settings.dua");
 ```
 
 `loadModule` は `require` と同じ登録ソース、検索パス、ローダー、キャッシュを利用します。各モジュールは専用のファイルスコープで評価されるため、非 export 宣言は他のファイルへ漏れず、別モジュールで同名のローカル変数を宣言できます。失敗を例外ではなく `RunOutcome` で扱う場合は `loadModuleSafe` を使います。
+
+`loadModule` と `loadModuleFile` の返り値は `Value` ですが、モジュールの export テーブルには `ScriptEngine` と同じ形式の `call(name, args)` と `moduleValue["name"]` を使用できます。これにより、D 側では `moduleValue.call("calculate", args)` の形で export 関数を呼び、添字で export 値を取得できます。存在しない export や関数ではない export を指定すると例外になります。Safe API から取得する場合も、成功時の `outcome.value.call(...)` を使用できます。
 
 ファイルパスが既に分かっている場合は `loadModuleFile(path)` を使います。`runFile` が戻り値だけを返す一時実行、`loadFile` が共有グローバル環境へのロードであるのに対し、`loadModuleFile` はファイルを専用スコープで評価し、`export` された値のテーブルを返します。ファイルパスはキャッシュキーにもなります。Safe API は `loadModuleFileSafe(path)` です。
 

@@ -3513,13 +3513,16 @@ unittest
     engine.registerModule("first", q{
         auto privateValue = 10;
         export auto value = privateValue;
+        export any add(any amount) { return privateValue + amount; }
     });
     engine.registerModule("second", q{
         auto privateValue = 20;
         export auto value = privateValue;
     });
 
-    assert(engine.loadModule("first").tableValue["value"].toInt() == 10);
+    auto first = engine.loadModule("first");
+    assert(first["value"].toInt() == 10);
+    assert(first.call("add", [Value.from(5)]).toInt() == 15);
     assert(engine.loadModule("second").tableValue["value"].toInt() == 20);
     auto missing = engine.loadModuleSafe("missing-module");
     assert(!missing.ok);
@@ -3532,11 +3535,13 @@ unittest
     write(modulePath, q{
         auto privateValue = 40;
         export auto answer = privateValue + 2;
+        export any add(any amount) { return privateValue + amount; }
     });
 
     auto engine = new ScriptEngine();
     auto moduleValue = engine.loadModuleFile(modulePath);
-    assert(moduleValue.tableValue["answer"].toInt() == 42);
+    assert(moduleValue["answer"].toInt() == 42);
+    assert(moduleValue.call("add", [Value.from(2)]).toInt() == 42);
     auto hidden = engine.runSafe("return privateValue;");
     assert(!hidden.ok);
 
