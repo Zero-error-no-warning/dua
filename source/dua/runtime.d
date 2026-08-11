@@ -183,25 +183,31 @@ final class NativeCallable : CallableValue
 /// This is deliberately a scoped facade over ScriptEngine, not a second
 /// interpreter: parsing, execution limits, imports, and export collection all
 /// continue through the owning engine's single execution implementation.
-final class ScriptModule
+private enum ModuleVisibility { global, explicitExports }
+
+/// A thin scope facade owned by a ScriptEngine.
+final class ModuleHandle
 {
     private ScriptEngine engine;
     private string moduleName;
     private Environment environment;
     private Value moduleValue;
+    private ModuleVisibility visibility;
+    private bool hostCreated;
 
-    private this(ScriptEngine engine, string name, Environment environment)
+    private this(ScriptEngine engine, string name, Environment environment,
+        ModuleVisibility visibility, bool hostCreated = false)
     {
         this.engine = engine;
         this.moduleName = name;
         this.environment = environment;
+        this.visibility = visibility;
+        this.hostCreated = hostCreated;
 
-        // Ensure that the associative array backing the table is allocated so
-        // copies returned by import keep observing subsequently added exports.
-        Value[string] exports;
-        exports["__dua_module_placeholder"] = Value.nullValue();
-        exports.remove("__dua_module_placeholder");
-        moduleValue = Value.from(exports);
+        moduleValue.kind = ValueKind.table;
+        // Touch the property to allocate explicit reference storage even while
+        // the export set is empty.
+        auto storage = moduleValue.tableValue;
     }
 
     string name() const
@@ -212,8 +218,8 @@ final class ScriptModule
     void bind(string name, Value value)
     {
         environment.define(name, value);
-        moduleValue.tableValue[name] = value;
-        engine.updateHostModule(this);
+        if (visibility == ModuleVisibility.explicitExports)
+            moduleValue.tableValue[name] = value;
     }
 
     mixin AutoBindingAPI;
@@ -225,17 +231,21 @@ final class ScriptModule
 
     Value opIndex(string name)
     {
-        return moduleValue[name];
+        return get(name);
     }
 
     Value get(string name)
     {
-        return environment.get(name);
+        if (visibility == ModuleVisibility.global)
+            return environment.get(name);
+        auto value = name in moduleValue.tableValue;
+        enforce(value !is null, format("Undefined module export '%s'", name));
+        return *value;
     }
 
     Value call(string functionName, scope const(Value)[] args = [])
     {
-        return moduleValue.call(functionName, args);
+        return engine.callInModule(this, functionName, args);
     }
 
     Value run(string source)
@@ -257,7 +267,7 @@ final class ScriptModule
 
     RunOutcome runSafe(string source, RunOptions options)
     {
-        return engine.runInHostModuleSafe(this, source, new Environment(environment), options);
+        return engine.runInModuleSafe(this, source, new Environment(environment), options);
     }
 
     void load(string source)
@@ -273,7 +283,7 @@ final class ScriptModule
 
     RunOutcome loadSafe(string source, RunOptions options)
     {
-        return engine.runInHostModuleSafe(this, source, environment, options);
+        return engine.runInModuleSafe(this, source, environment, options);
     }
 
     void loadFile(string path)
@@ -300,7 +310,12 @@ final class ScriptModule
             return outcome;
         }
     }
+
+    Value exportsValue() { return moduleValue; }
 }
+
+/// Backwards-compatible name for the former host-only module facade.
+alias ScriptModule = ModuleHandle;
 
 final class ScriptCallable : CallableValue
 {
@@ -405,8 +420,7 @@ final class ScriptEngine
     private string[] callStack;
     private string[] lastErrorStack;
     private string[string] moduleSources;
-    private Value[string] moduleCache;
-    private ScriptModule[string] hostModules;
+    private ModuleHandle[string] modules;
     private Value[string][] moduleExportScopes;
     private string[] moduleSearchPaths;
     private Value[] moduleLoaders;
@@ -417,25 +431,29 @@ final class ScriptEngine
     private Value[] thisContextStack;
     private RunOptions currentRunOptions;
     private size_t executedSteps;
+    private ModuleHandle globalModule_;
 
     this()
     {
         globals = new Environment();
+        globalModule_ = new ModuleHandle(this, "<global>", globals, ModuleVisibility.global);
         moduleSearchPaths = ["?.dua", "?/init.dua"];
         installStandardLibraries();
         installRequireFunction();
     }
 
+    ModuleHandle globalModule() { return globalModule_; }
+
     void bind(string name, Value value)
     {
-        globals.define(name, value);
+        globalModule_.bind(name, value);
     }
 
     mixin AutoBindingAPI;
 
     Value opIndex(string name)
     {
-        return globals.get(name);
+        return globalModule_.get(name);
     }
 
     void bindType(T)(string name)
@@ -579,47 +597,45 @@ final class ScriptEngine
 
     void bindNative(string name, NativeFunction callback)
     {
-        globals.define(name, Value.fromFunction(new NativeCallable(name, callback)));
+        globalModule_.bindNative(name, callback);
     }
 
     void registerModule(string name, string source)
     {
+        enforce((name in moduleSources) is null && (name in modules) is null,
+            format("Module '%s' is already registered", name));
         moduleSources[name] = source;
     }
 
     /// Creates an empty, independently scoped module that can be populated from D.
-    ScriptModule newModule(string name)
+    ModuleHandle newModule(string name)
     {
         enforce(name.length > 0, "Module name must not be empty");
-        enforce((name in hostModules) is null && (name in moduleSources) is null
-                && (name in moduleCache) is null,
+        enforce((name in modules) is null && (name in moduleSources) is null,
             format("Module '%s' is already registered", name));
-        auto result = new ScriptModule(this, name, new Environment(globals));
-        hostModules[name] = result;
-        moduleCache[name] = result.moduleValue;
+        auto result = new ModuleHandle(this, name, new Environment(globals),
+            ModuleVisibility.explicitExports, true);
+        modules[name] = result;
         return result;
-    }
-
-    private void updateHostModule(ScriptModule hostModule)
-    {
-        moduleCache[hostModule.moduleName] = hostModule.moduleValue;
     }
 
     void clearModuleCache()
     {
-        moduleCache = null;
-        foreach (name, hostModule; hostModules)
-            moduleCache[name] = hostModule.moduleValue;
+        string[] sourceModuleNames;
+        foreach (name, handle; modules)
+            if (!handle.hostCreated) sourceModuleNames ~= name;
+        foreach (name; sourceModuleNames)
+            modules.remove(name);
     }
 
     /// Loads a registered or discoverable Dua module and returns its exports.
     /// Modules are evaluated in their own file scope and cached by name.
-    Value loadModule(string name)
+    ModuleHandle loadModule(string name)
     {
         auto result = loadModuleSafe(name);
         if (result.ok)
         {
-            return result.value;
+            return requireModuleHandle(name);
         }
 
         auto trace = result.stackTrace.length > 0
@@ -639,7 +655,7 @@ final class ScriptEngine
         RunOutcome outcome;
         try
         {
-            outcome.value = requireModule(name);
+            outcome.value = requireModuleHandle(name).exportsValue();
             outcome.ok = true;
             outcome.errorKind = RunErrorKind.none;
         }
@@ -657,12 +673,12 @@ final class ScriptEngine
 
     /// Loads the file at path as a module, rather than as a shared global script.
     /// The path is also the module cache key.
-    Value loadModuleFile(string path)
+    ModuleHandle loadModuleFile(string path)
     {
         auto result = loadModuleFileSafe(path);
         if (result.ok)
         {
-            return result.value;
+            return requireModuleHandle(path);
         }
 
         auto trace = result.stackTrace.length > 0
@@ -750,7 +766,7 @@ final class ScriptEngine
 
     RunOutcome runSafe(string source, RunOptions options)
     {
-        return runInEnvironmentSafe(source, new Environment(globals), options);
+        return globalModule_.runSafe(source, options);
     }
 
     RunOutcome runFileSafe(string path)
@@ -808,7 +824,7 @@ final class ScriptEngine
 
     RunOutcome loadSafe(string source, RunOptions options)
     {
-        return runInEnvironmentSafe(source, globals, options);
+        return globalModule_.loadSafe(source, options);
     }
 
     RunOutcome loadFileSafe(string path)
@@ -855,7 +871,12 @@ final class ScriptEngine
 
     Value call(string functionName, scope const(Value)[] args = [])
     {
-        auto callable = getGlobal(functionName);
+        return globalModule_.call(functionName, args);
+    }
+
+    private Value callInModule(ModuleHandle handle, string functionName, scope const(Value)[] args)
+    {
+        auto callable = handle.get(functionName);
         Value[] copiedArgs;
         foreach (arg; args)
         {
@@ -1086,14 +1107,21 @@ final class ScriptEngine
         }
     }
 
-    private RunOutcome runInHostModuleSafe(ScriptModule hostModule, string source,
+    private RunOutcome runInModuleSafe(ModuleHandle hostModule, string source,
         Environment environment, RunOptions options)
     {
         moduleExportScopes ~= hostModule.moduleValue.tableValue;
         auto outcome = runInEnvironmentSafe(source, environment, options);
-        hostModule.moduleValue.tableValue = moduleExportScopes[$ - 1];
+        if (hostModule.visibility == ModuleVisibility.explicitExports)
+        {
+            hostModule.moduleValue.tableValue = moduleExportScopes[$ - 1];
+            // Preserve the historical `return table` module form when no
+            // explicit export declaration was used.
+            if (hostModule.moduleValue.tableValue.length == 0
+                && outcome.ok && outcome.value.kind == ValueKind.table)
+                hostModule.moduleValue.tableValue = outcome.value.tableValue.dup;
+        }
         moduleExportScopes.length -= 1;
-        updateHostModule(hostModule);
         return outcome;
     }
 
@@ -1337,7 +1365,7 @@ final class ScriptEngine
                     }
                     break;
                 case Statement.Kind.import_:
-                    auto imported = requireModule(statement.name);
+                    auto imported = requireModuleHandle(statement.name).exportsValue();
                     environment.define(statement.aliasName, imported);
                     result.lastValue = imported;
                     break;
@@ -2499,7 +2527,7 @@ final class ScriptEngine
     {
         bindNative("require", (scope const(Value)[] args) {
             enforce(args.length == 1, "require(name) expects exactly one argument");
-            return requireModule(args[0].toHostString());
+            return requireModuleHandle(args[0].toHostString()).exportsValue();
         });
         bindNative("addModulePath", (scope const(Value)[] args) {
             enforce(args.length == 1, "addModulePath(path) expects one argument");
@@ -2543,9 +2571,9 @@ final class ScriptEngine
         packageLib["loaded"] = Value.fromFunction(new NativeCallable("package.loaded", (scope const(Value)[] args) {
             enforce(args.length == 1, "package.loaded(name) expects one argument");
             auto name = args[0].toHostString();
-            if (auto cached = name in moduleCache)
+            if (auto cached = name in modules)
             {
-                return *cached;
+                return (*cached).exportsValue();
             }
             return Value.nullValue();
         }));
@@ -2578,10 +2606,10 @@ final class ScriptEngine
         }
     }
 
-    private Value requireModule(string name)
+    private ModuleHandle requireModuleHandle(string name)
     {
         syncPackageConfigFromGlobals();
-        if (auto cached = name in moduleCache)
+        if (auto cached = name in modules)
         {
             return *cached;
         }
@@ -2598,24 +2626,13 @@ final class ScriptEngine
         }
         enforce(source !is null, format("Module '%s' is not registered", name));
 
-        auto program = parse(lex(*source));
-        auto moduleEnvironment = new Environment(globals);
-        Value[string] exportScope;
-        moduleExportScopes ~= exportScope;
-        scope(failure)
-        {
-            if (moduleExportScopes.length > 0)
-            {
-                moduleExportScopes.length -= 1;
-            }
-        }
-        auto result = executeStatements(program.statements, moduleEnvironment);
-        auto exports = moduleExportScopes[$ - 1];
-        moduleExportScopes.length -= 1;
-
-        auto moduleValue = exports.length > 0 ? Value.from(exports) : result.lastValue;
-        moduleCache[name] = moduleValue;
-        return moduleValue;
+        auto handle = new ModuleHandle(this, name, new Environment(globals),
+            ModuleVisibility.explicitExports);
+        modules[name] = handle; // visible while loading, so cycles share identity
+        scope(failure) modules.remove(name);
+        auto outcome = handle.loadSafe(*source);
+        enforce(outcome.ok, outcome.errorMessage);
+        return handle;
     }
 
     private void exportSymbol(string name, Value value)
@@ -3699,6 +3716,40 @@ unittest
 unittest
 {
     auto engine = new ScriptEngine();
+    engine.globalModule.bindAuto("base", 40);
+    engine.bindAuto("offset", 2);
+    engine.load("any answer() { return base + offset; }");
+    assert(engine.call("answer").toInt() == 42);
+    assert(engine["base"].toInt() == 40);
+    assert(engine.globalModule["offset"].toInt() == 2);
+
+    auto moduleHandle = engine.newModule("identity");
+    assert(engine.loadModule("identity") is moduleHandle);
+
+    // A host callback re-enters through ModuleHandle.call. The resulting
+    // recursion must still use the engine's active depth accounting.
+    moduleHandle.bindNative("enter", (scope const(Value)[] args) {
+        return moduleHandle.call("loop");
+    });
+    moduleHandle.load("export any loop() { return enter(); }");
+    RunOptions options;
+    options.limits.maxCallDepth = 3;
+    auto limited = moduleHandle.runSafe("return enter();", options);
+    assert(!limited.ok);
+    assert(limited.errorKind == RunErrorKind.callDepthLimit);
+    assert(limited.stackTrace.length > 0);
+
+    auto privateLookup = false;
+    moduleHandle.load("auto secret = 7; export any reveal() { return secret; }");
+    try moduleHandle.get("secret");
+    catch (Exception) privateLookup = true;
+    assert(privateLookup);
+    assert(moduleHandle.call("reveal").toInt() == 7);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
     engine.registerModule("first", q{
         auto privateValue = 10;
         export auto value = privateValue;
@@ -3712,7 +3763,7 @@ unittest
     auto first = engine.loadModule("first");
     assert(first["value"].toInt() == 10);
     assert(first.call("add", [Value.from(5)]).toInt() == 15);
-    assert(engine.loadModule("second").tableValue["value"].toInt() == 20);
+    assert(engine.loadModule("second")["value"].toInt() == 20);
     auto missing = engine.loadModuleSafe("missing-module");
     assert(!missing.ok);
 }
