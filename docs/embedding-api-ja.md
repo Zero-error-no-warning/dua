@@ -107,6 +107,8 @@ auto score = gm.score(32);
 
 `ScriptModule` は `run` / `runSafe`、`load` / `loadSafe`、`loadFile` / `loadFileSafe`、`call`、添字アクセスも提供します。ロードしたソースの通常の宣言はそのモジュール内だけに保持され、`export` 宣言だけが import 経由で公開されます。同名モジュールは重複作成できません。`clearModuleCache()` を呼んでも D で作成したモジュールは登録されたままです。
 
+内部的に `ScriptModule` が別のインタプリタを持つわけではありません。字句解析、構文解析、評価、実行制限、import、export の処理は所有元の `ScriptEngine` に集約され、`ScriptModule` は専用の `Environment` と export テーブルを選択する薄いスコープファサードです。また、`bindAuto` と添字代入の型変換実装も両者で共通化されています。そのためエンジンとモジュールで Dua の評価規則が分岐せず、モジュールごとに分離されるのはトップレベルの状態だけです。
+
 ファイルパスが既に分かっている場合は `loadModuleFile(path)` を使います。`runFile` が戻り値だけを返す一時実行、`loadFile` が共有グローバル環境へのロードであるのに対し、`loadModuleFile` はファイルを専用スコープで評価し、`export` された値のテーブルを返します。ファイルパスはキャッシュキーにもなります。Safe API は `loadModuleFileSafe(path)` です。
 
 ### 3.4 RunOutcome

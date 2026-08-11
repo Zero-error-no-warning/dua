@@ -20,6 +20,26 @@ import std.utf : byDchar;
 
 alias NativeFunction = Value delegate(scope const(Value)[] args);
 
+/// Shared implementation of the automatically converting binding APIs.
+/// The containing type only has to provide bind(string, Value).
+private mixin template AutoBindingAPI()
+{
+    void bindAuto(T)(string name, auto ref T value)
+    {
+        static if (is(T == Value))
+            bind(name, value);
+        else static if (isAggregateType!T)
+            bind(name, Value.reflect(value));
+        else
+            bind(name, Value.from(value));
+    }
+
+    void opIndexAssign(T)(auto ref T value, string name)
+    {
+        bindAuto(name, value);
+    }
+}
+
 private final class ScriptThrownException : Exception
 {
     Value thrownValue;
@@ -159,7 +179,10 @@ final class NativeCallable : CallableValue
 }
 
 /// A host-created Dua module with an isolated top-level environment.
-/// Values bound through this facade are exposed as module exports.
+///
+/// This is deliberately a scoped facade over ScriptEngine, not a second
+/// interpreter: parsing, execution limits, imports, and export collection all
+/// continue through the owning engine's single execution implementation.
 final class ScriptModule
 {
     private ScriptEngine engine;
@@ -193,24 +216,11 @@ final class ScriptModule
         engine.updateHostModule(this);
     }
 
-    void bindAuto(T)(string name, auto ref T value)
-    {
-        static if (is(T == Value))
-            bind(name, value);
-        else static if (isAggregateType!T)
-            bind(name, Value.reflect(value));
-        else
-            bind(name, Value.from(value));
-    }
+    mixin AutoBindingAPI;
 
     void bindNative(string name, NativeFunction callback)
     {
         bind(name, Value.fromFunction(new NativeCallable(moduleName ~ "." ~ name, callback)));
-    }
-
-    void opIndexAssign(T)(auto ref T value, string name)
-    {
-        bindAuto(name, value);
     }
 
     Value opIndex(string name)
@@ -421,26 +431,7 @@ final class ScriptEngine
         globals.define(name, value);
     }
 
-    void bindAuto(T)(string name, auto ref T value)
-    {
-        static if (is(T == Value))
-        {
-            bind(name, value);
-        }
-        else static if (isAggregateType!T)
-        {
-            bind(name, Value.reflect(value));
-        }
-        else
-        {
-            bind(name, Value.from(value));
-        }
-    }
-
-    void opIndexAssign(T)(auto ref T value, string name)
-    {
-        bindAuto(name, value);
-    }
+    mixin AutoBindingAPI;
 
     Value opIndex(string name)
     {
