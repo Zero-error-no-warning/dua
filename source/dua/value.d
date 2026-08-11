@@ -116,6 +116,13 @@ enum ValueKind
 enum string internalFieldGetterPrefix = "__dua_get_";
 enum string internalFieldSetterPrefix = "__dua_set_";
 
+/// Reference storage makes table identity explicit. Copies of Value (including
+/// module exports already handed to an importer) therefore observe additions.
+private final class TableStorage
+{
+    Value[string] entries;
+}
+
 struct Value
 {
     ValueKind kind = ValueKind.null_;
@@ -124,10 +131,22 @@ struct Value
     bool booleanValue;
     string stringValue;
     Value[] arrayValue;
-    Value[string] tableValue;
+    private TableStorage tableStorage;
     CallableValue functionValue;
     string nativeTypeName;
     string nativeDisplay;
+
+    ref Value[string] tableValue()
+    {
+        if (tableStorage is null)
+            tableStorage = new TableStorage();
+        return tableStorage.entries;
+    }
+
+    const(Value[string]) tableValue() const
+    {
+        return tableStorage is null ? null : tableStorage.entries;
+    }
 
     static Value nullValue()
     {
@@ -183,7 +202,8 @@ struct Value
     {
         Value result;
         result.kind = ValueKind.table;
-        result.tableValue = entries.dup;
+        result.tableStorage = new TableStorage();
+        result.tableStorage.entries = entries.dup;
         return result;
     }
 

@@ -15,7 +15,8 @@ auto engine = new Dua.ScriptEngine();
 | 型 | 役割 |
 |---|---|
 | `Dua.ScriptEngine` | グローバル環境、モジュールキャッシュ、実行状態を持つエンジン |
-| `Dua.ScriptModule` | D から作成し、独立した状態と export を持たせるモジュール |
+| `Dua.ModuleHandle` | 所有元エンジンと独立したモジュールスコープを結ぶ薄いハンドル |
+| `Dua.ScriptModule` | `ModuleHandle` の後方互換 alias |
 | `Dua.Value`, `Dua.ValueKind`, `Dua.CallableValue` | D と Dua の境界値 |
 | `Dua.RunOutcome`, `Dua.RunErrorKind` | Safe API の結果と失敗分類 |
 | `Dua.ExecutionLimits`, `Dua.RunOptions` | 実行予算と事前検査設定 |
@@ -42,8 +43,8 @@ Dua のオブジェクトは D GC の管理下です。手動 GC API はあり�
 | `run(source[, options])` | `Value` | ソースを実行し、トップレベルの結果を返す |
 | `runFile(path[, options])` | `Value` | UTF-8 テキストファイルを読み実行する |
 | `load(source)` / `loadFile(path)` | `void` | 同じグローバル環境へ宣言をロードする |
-| `loadModule(name)` | `Value` | 登録済み、または検索可能なモジュールを独立スコープでロードする |
-| `loadModuleFile(path)` | `Value` | 指定した Dua ファイルを独立スコープのモジュールとしてロードする |
+| `loadModule(name)` | `ModuleHandle` | 登録済み、または検索可能なモジュールを独立スコープでロードする |
+| `loadModuleFile(path)` | `ModuleHandle` | 指定した Dua ファイルを独立スコープのモジュールとしてロードする |
 | `call(name, args = [])` | `Value` | グローバル関数を D から呼ぶ |
 | `getGlobal(name)` / `engine[name]` | `Value` | グローバル値を取得する |
 | `runSafe`, `runFileSafe` | `RunOutcome` | 実行失敗を値として受け取る |
@@ -82,11 +83,19 @@ auto settings = engine.loadModuleFile("config/settings.dua");
 
 `loadModule` は `require` と同じ登録ソース、検索パス、ローダー、キャッシュを利用します。各モジュールは専用のファイルスコープで評価されるため、非 export 宣言は他のファイルへ漏れず、別モジュールで同名のローカル変数を宣言できます。失敗を例外ではなく `RunOutcome` で扱う場合は `loadModuleSafe` を使います。
 
-`loadModule` と `loadModuleFile` の返り値は `Value` ですが、モジュールの export テーブルには `ScriptEngine` と同じ形式の `call(name, args)` と `moduleValue["name"]` を使用できます。これにより、D 側では `moduleValue.call("calculate", args)` の形で export 関数を呼び、添字で export 値を取得できます。存在しない export や関数ではない export を指定すると例外になります。Safe API から取得する場合も、成功時の `outcome.value.call(...)` を使用できます。
+`loadModule` と `loadModuleFile` はともに `ModuleHandle` を返します。`newModule(name)` で D 側から作ったモジュールも同じレジストリに入り、同じ名前を `loadModule` すると同一ハンドルが返ります。`handle.call(name, args)` は callable 検査、引数コピー、call depth 制限、call stack と例外 stack trace を含む所有元 `ScriptEngine` の共通呼び出し経路を必ず通ります。
+
+`exportsValue()` は Dua の `import name as alias` と低レベル連携のための export テーブルです。通常の D 埋め込みコードでは、エンジン管理を迂回しない `ModuleHandle.call` とハンドルの添字を推奨します。後方互換の `Value.call` は一般テーブルの簡易呼び出しとして残っていますが、エンジンの call depth、call stack、実行量管理の対象外です。
 
 ### 3.3 D から空のモジュールを作る
 
-`newModule(name)` は、エンジンのグローバルとは別のトップレベル状態を持つ空の `ScriptModule` を作り、同時に import 可能にします。`bind`、`bindAuto`、`bindNative` で追加した値はモジュールの export として公開されます。
+`newModule(name)` は、エンジンのグローバルとは別のトップレベル状態を持つ空の `ModuleHandle` を作り、同時に import 可能にします。`bind`、`bindAuto`、`bindNative` で追加した値はモジュールの export として公開されます。
+
+`ScriptEngine.globalModule` はグローバル環境を表す特殊な `ModuleHandle` です。`ScriptEngine` はこのハンドルを composition で所有し、従来の `bind`、`bindAuto`、`bindNative`、添字、`run`、`load`、`call` API は同じグローバルハンドルへ転送する互換ファサードです。エンジン自体がハンドルを継承するわけではありません。
+
+グローバルハンドルでは bind 値と `load` のトップレベル宣言が通常のグローバルとして公開されます。通常モジュールでは専用環境を使い、D の bind 値と明示的な `export` だけを import 側へ公開します。非 export 宣言はハンドルの添字や `get` から見えませんが、export 関数のクロージャからは参照できます。
+
+両方のハンドルで `run` は永続環境を親とする一時的な子環境を使うため、宣言を永続化しません。`load` はハンドルの永続トップレベル環境で評価し、通常宣言をそのスコープに保持します。
 
 ```d
 auto gameModule = engine.newModule("game.module");
@@ -105,11 +114,11 @@ auto pl = gm.player;
 auto score = gm.score(32);
 ```
 
-`ScriptModule` は `run` / `runSafe`、`load` / `loadSafe`、`loadFile` / `loadFileSafe`、`call`、添字アクセスも提供します。ロードしたソースの通常の宣言はそのモジュール内だけに保持され、`export` 宣言だけが import 経由で公開されます。同名モジュールは重複作成できません。`clearModuleCache()` を呼んでも D で作成したモジュールは登録されたままです。
+`ModuleHandle` は `run` / `runSafe`、`load` / `loadSafe`、`loadFile` / `loadFileSafe`、`call`、添字アクセスも提供します。ロードしたソースの通常の宣言はそのモジュール内だけに保持され、`export` 宣言だけが import 経由で公開されます。同名モジュールは重複作成できません。`clearModuleCache()` は評価済みソースモジュールだけをレジストリから除き、D で作成したモジュールは登録されたままにします。
 
-内部的に `ScriptModule` が別のインタプリタを持つわけではありません。字句解析、構文解析、評価、実行制限、import、export の処理は所有元の `ScriptEngine` に集約され、`ScriptModule` は専用の `Environment` と export テーブルを選択する薄いスコープファサードです。また、`bindAuto` と添字代入の型変換実装も両者で共通化されています。そのためエンジンとモジュールで Dua の評価規則が分岐せず、モジュールごとに分離されるのはトップレベルの状態だけです。
+内部的に `ModuleHandle` が別のインタプリタを持つわけではありません。字句解析、構文解析、評価、実行制限、import、export の処理は所有元の `ScriptEngine` に集約され、`ModuleHandle` は専用の `Environment` と export テーブルを選択する薄いスコープファサードです。また、`bindAuto` と添字代入の型変換実装も両者で共通化されています。そのためエンジンとモジュールで Dua の評価規則が分岐せず、モジュールごとに分離されるのはトップレベルの状態だけです。
 
-ファイルパスが既に分かっている場合は `loadModuleFile(path)` を使います。`runFile` が戻り値だけを返す一時実行、`loadFile` が共有グローバル環境へのロードであるのに対し、`loadModuleFile` はファイルを専用スコープで評価し、`export` された値のテーブルを返します。ファイルパスはキャッシュキーにもなります。Safe API は `loadModuleFileSafe(path)` です。
+ファイルパスが既に分かっている場合は `loadModuleFile(path)` を使います。`runFile` が戻り値だけを返す一時実行、`loadFile` が共有グローバル環境へのロードであるのに対し、`loadModuleFile` はファイルを専用スコープで評価し、その `ModuleHandle` を返します。ファイルパスはキャッシュキーにもなります。Safe API は `loadModuleFileSafe(path)` です。
 
 ### 3.4 RunOutcome
 
