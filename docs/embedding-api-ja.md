@@ -15,6 +15,7 @@ auto engine = new Dua.ScriptEngine();
 | 型 | 役割 |
 |---|---|
 | `Dua.ScriptEngine` | グローバル環境、モジュールキャッシュ、実行状態を持つエンジン |
+| `Dua.ScriptModule` | D から作成し、独立した状態と export を持たせるモジュール |
 | `Dua.Value`, `Dua.ValueKind`, `Dua.CallableValue` | D と Dua の境界値 |
 | `Dua.RunOutcome`, `Dua.RunErrorKind` | Safe API の結果と失敗分類 |
 | `Dua.ExecutionLimits`, `Dua.RunOptions` | 実行予算と事前検査設定 |
@@ -83,9 +84,34 @@ auto settings = engine.loadModuleFile("config/settings.dua");
 
 `loadModule` と `loadModuleFile` の返り値は `Value` ですが、モジュールの export テーブルには `ScriptEngine` と同じ形式の `call(name, args)` と `moduleValue["name"]` を使用できます。これにより、D 側では `moduleValue.call("calculate", args)` の形で export 関数を呼び、添字で export 値を取得できます。存在しない export や関数ではない export を指定すると例外になります。Safe API から取得する場合も、成功時の `outcome.value.call(...)` を使用できます。
 
+### 3.3 D から空のモジュールを作る
+
+`newModule(name)` は、エンジンのグローバルとは別のトップレベル状態を持つ空の `ScriptModule` を作り、同時に import 可能にします。`bind`、`bindAuto`、`bindNative` で追加した値はモジュールの export として公開されます。
+
+```d
+auto gameModule = engine.newModule("game.module");
+gameModule.bindAuto("player", player);
+gameModule.load(q{
+    auto privateBonus = 10;
+    export int score(int base) { return base + privateBonus; }
+});
+```
+
+Dua 側では通常のモジュールと同じ構文で参照できます。
+
+```dua
+import game.module as gm;
+auto pl = gm.player;
+auto score = gm.score(32);
+```
+
+`ScriptModule` は `run` / `runSafe`、`load` / `loadSafe`、`loadFile` / `loadFileSafe`、`call`、添字アクセスも提供します。ロードしたソースの通常の宣言はそのモジュール内だけに保持され、`export` 宣言だけが import 経由で公開されます。同名モジュールは重複作成できません。`clearModuleCache()` を呼んでも D で作成したモジュールは登録されたままです。
+
+内部的に `ScriptModule` が別のインタプリタを持つわけではありません。字句解析、構文解析、評価、実行制限、import、export の処理は所有元の `ScriptEngine` に集約され、`ScriptModule` は専用の `Environment` と export テーブルを選択する薄いスコープファサードです。また、`bindAuto` と添字代入の型変換実装も両者で共通化されています。そのためエンジンとモジュールで Dua の評価規則が分岐せず、モジュールごとに分離されるのはトップレベルの状態だけです。
+
 ファイルパスが既に分かっている場合は `loadModuleFile(path)` を使います。`runFile` が戻り値だけを返す一時実行、`loadFile` が共有グローバル環境へのロードであるのに対し、`loadModuleFile` はファイルを専用スコープで評価し、`export` された値のテーブルを返します。ファイルパスはキャッシュキーにもなります。Safe API は `loadModuleFileSafe(path)` です。
 
-### 3.3 RunOutcome
+### 3.4 RunOutcome
 
 ```d
 auto out = engine.runSafe("return missing + 1;");
@@ -108,7 +134,7 @@ else
 | `errorKind` | `none`, `runtime`, `stepLimit`, `callDepthLimit` |
 | `stepsExecuted` | 今回消費した概算ステップ |
 
-### 3.4 実行制限と型検査
+### 3.5 実行制限と型検査
 
 ```d
 auto options = Dua.RunOptions();
