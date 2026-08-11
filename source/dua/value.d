@@ -195,6 +195,34 @@ struct Value
         return result;
     }
 
+    /// Calls a named function stored in this table value.
+    /// This lets module export values use the same call(name, args) shape as ScriptEngine.
+    Value call(string functionName, scope const(Value)[] args = [])
+    {
+        enforce(kind == ValueKind.table,
+            format("Cannot call member '%s' on %s value", functionName, kind));
+        auto member = functionName in tableValue;
+        enforce(member !is null, format("Undefined module export '%s'", functionName));
+        enforce(member.kind == ValueKind.function_,
+            format("Module export '%s' is not callable", functionName));
+
+        Value[] copiedArgs;
+        foreach (arg; args)
+        {
+            copiedArgs ~= cast(Value) arg;
+        }
+        return member.functionValue.invoke(copiedArgs);
+    }
+
+    /// Looks up a named entry in a table value (for example, a module export).
+    Value opIndex(string name)
+    {
+        enforce(kind == ValueKind.table, format("Cannot index %s value by name", kind));
+        auto member = name in tableValue;
+        enforce(member !is null, format("Undefined table member '%s'", name));
+        return *member;
+    }
+
     static Value native(T)(T value)
     {
         Value result;

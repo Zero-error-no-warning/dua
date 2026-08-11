@@ -88,6 +88,8 @@ final class Environment
 
     void define(string name, Value value)
     {
+        enforce((name in values) is null,
+            format("Variable '%s' is already defined in this scope", name));
         values[name] = value;
     }
 
@@ -462,6 +464,85 @@ final class ScriptEngine
     void clearModuleCache()
     {
         moduleCache = null;
+    }
+
+    /// Loads a registered or discoverable Dua module and returns its exports.
+    /// Modules are evaluated in their own file scope and cached by name.
+    Value loadModule(string name)
+    {
+        auto result = loadModuleSafe(name);
+        if (result.ok)
+        {
+            return result.value;
+        }
+
+        auto trace = result.stackTrace.length > 0
+            ? "\nStack:\n  " ~ result.stackTrace.join("\n  ")
+            : "";
+        enforce(false, result.errorMessage ~ trace);
+        assert(0);
+    }
+
+    /// Safe counterpart to loadModule. Module failures are returned as data.
+    RunOutcome loadModuleSafe(string name)
+    {
+        callStack.length = 0;
+        lastErrorStack.length = 0;
+        currentRunOptions = RunOptions.init;
+        executedSteps = 0;
+        RunOutcome outcome;
+        try
+        {
+            outcome.value = requireModule(name);
+            outcome.ok = true;
+            outcome.errorKind = RunErrorKind.none;
+        }
+        catch (Exception error)
+        {
+            outcome.ok = false;
+            outcome.errorMessage = error.msg;
+            outcome.stackTrace = lastErrorStack.length > 0 ? lastErrorStack.dup : callStack.dup;
+            outcome.errorKind = RunErrorKind.runtime;
+        }
+        outcome.stepsExecuted = executedSteps;
+        currentRunOptions = RunOptions.init;
+        return outcome;
+    }
+
+    /// Loads the file at path as a module, rather than as a shared global script.
+    /// The path is also the module cache key.
+    Value loadModuleFile(string path)
+    {
+        auto result = loadModuleFileSafe(path);
+        if (result.ok)
+        {
+            return result.value;
+        }
+
+        auto trace = result.stackTrace.length > 0
+            ? "\nStack:\n  " ~ result.stackTrace.join("\n  ")
+            : "";
+        enforce(false, result.errorMessage ~ trace);
+        assert(0);
+    }
+
+    /// Safe counterpart to loadModuleFile. File and module failures are returned as data.
+    RunOutcome loadModuleFileSafe(string path)
+    {
+        try
+        {
+            auto source = readScriptFile(path);
+            moduleSources[path] = source;
+            return loadModuleSafe(path);
+        }
+        catch (Exception error)
+        {
+            RunOutcome outcome;
+            outcome.ok = false;
+            outcome.errorMessage = error.msg;
+            outcome.errorKind = RunErrorKind.runtime;
+            return outcome;
+        }
     }
 
     Value run(string source)
@@ -3424,6 +3505,61 @@ unittest
     });
 
     assert(result.toInt() == 12);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.registerModule("first", q{
+        auto privateValue = 10;
+        export auto value = privateValue;
+        export any add(any amount) { return privateValue + amount; }
+    });
+    engine.registerModule("second", q{
+        auto privateValue = 20;
+        export auto value = privateValue;
+    });
+
+    auto first = engine.loadModule("first");
+    assert(first["value"].toInt() == 10);
+    assert(first.call("add", [Value.from(5)]).toInt() == 15);
+    assert(engine.loadModule("second").tableValue["value"].toInt() == 20);
+    auto missing = engine.loadModuleSafe("missing-module");
+    assert(!missing.ok);
+}
+
+unittest
+{
+    immutable modulePath = "__dua_module_file_test.dua";
+    scope (exit) if (exists(modulePath)) remove(modulePath);
+    write(modulePath, q{
+        auto privateValue = 40;
+        export auto answer = privateValue + 2;
+        export any add(any amount) { return privateValue + amount; }
+    });
+
+    auto engine = new ScriptEngine();
+    auto moduleValue = engine.loadModuleFile(modulePath);
+    assert(moduleValue["answer"].toInt() == 42);
+    assert(moduleValue.call("add", [Value.from(2)]).toInt() == 42);
+    auto hidden = engine.runSafe("return privateValue;");
+    assert(!hidden.ok);
+
+    auto missing = engine.loadModuleFileSafe("__missing_dua_module__.dua");
+    assert(!missing.ok);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto duplicateVariable = engine.runSafe("auto value = 1; auto value = 2;");
+    auto duplicateFunction = engine.runSafe("any value() {} any value() {}");
+    assert(!duplicateVariable.ok);
+    assert(duplicateVariable.errorMessage.canFind("already defined in this scope"));
+    assert(!duplicateFunction.ok);
+
+    // A nested scope may still deliberately shadow its parent.
+    assert(engine.run("auto value = 1; { auto value = 2; } return value;").toInt() == 1);
 }
 
 unittest
