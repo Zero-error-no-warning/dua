@@ -158,6 +158,140 @@ final class NativeCallable : CallableValue
     }
 }
 
+/// A host-created Dua module with an isolated top-level environment.
+/// Values bound through this facade are exposed as module exports.
+final class ScriptModule
+{
+    private ScriptEngine engine;
+    private string moduleName;
+    private Environment environment;
+    private Value moduleValue;
+
+    private this(ScriptEngine engine, string name, Environment environment)
+    {
+        this.engine = engine;
+        this.moduleName = name;
+        this.environment = environment;
+
+        // Ensure that the associative array backing the table is allocated so
+        // copies returned by import keep observing subsequently added exports.
+        Value[string] exports;
+        exports["__dua_module_placeholder"] = Value.nullValue();
+        exports.remove("__dua_module_placeholder");
+        moduleValue = Value.from(exports);
+    }
+
+    string name() const
+    {
+        return moduleName;
+    }
+
+    void bind(string name, Value value)
+    {
+        environment.define(name, value);
+        moduleValue.tableValue[name] = value;
+        engine.updateHostModule(this);
+    }
+
+    void bindAuto(T)(string name, auto ref T value)
+    {
+        static if (is(T == Value))
+            bind(name, value);
+        else static if (isAggregateType!T)
+            bind(name, Value.reflect(value));
+        else
+            bind(name, Value.from(value));
+    }
+
+    void bindNative(string name, NativeFunction callback)
+    {
+        bind(name, Value.fromFunction(new NativeCallable(moduleName ~ "." ~ name, callback)));
+    }
+
+    void opIndexAssign(T)(auto ref T value, string name)
+    {
+        bindAuto(name, value);
+    }
+
+    Value opIndex(string name)
+    {
+        return moduleValue[name];
+    }
+
+    Value get(string name)
+    {
+        return environment.get(name);
+    }
+
+    Value call(string functionName, scope const(Value)[] args = [])
+    {
+        return moduleValue.call(functionName, args);
+    }
+
+    Value run(string source)
+    {
+        return run(source, RunOptions.init);
+    }
+
+    Value run(string source, RunOptions options)
+    {
+        auto result = runSafe(source, options);
+        enforce(result.ok, result.errorMessage);
+        return result.value;
+    }
+
+    RunOutcome runSafe(string source)
+    {
+        return runSafe(source, RunOptions.init);
+    }
+
+    RunOutcome runSafe(string source, RunOptions options)
+    {
+        return engine.runInHostModuleSafe(this, source, new Environment(environment), options);
+    }
+
+    void load(string source)
+    {
+        auto result = loadSafe(source);
+        enforce(result.ok, result.errorMessage);
+    }
+
+    RunOutcome loadSafe(string source)
+    {
+        return loadSafe(source, RunOptions.init);
+    }
+
+    RunOutcome loadSafe(string source, RunOptions options)
+    {
+        return engine.runInHostModuleSafe(this, source, environment, options);
+    }
+
+    void loadFile(string path)
+    {
+        auto result = loadFileSafe(path);
+        enforce(result.ok, result.errorMessage);
+    }
+
+    RunOutcome loadFileSafe(string path)
+    {
+        return loadFileSafe(path, RunOptions.init);
+    }
+
+    RunOutcome loadFileSafe(string path, RunOptions options)
+    {
+        try
+            return loadSafe(engine.readScriptFile(path), options);
+        catch (Exception error)
+        {
+            RunOutcome outcome;
+            outcome.ok = false;
+            outcome.errorMessage = error.msg;
+            outcome.errorKind = RunErrorKind.runtime;
+            return outcome;
+        }
+    }
+}
+
 final class ScriptCallable : CallableValue
 {
     private ScriptEngine engine;
@@ -262,6 +396,7 @@ final class ScriptEngine
     private string[] lastErrorStack;
     private string[string] moduleSources;
     private Value[string] moduleCache;
+    private ScriptModule[string] hostModules;
     private Value[string][] moduleExportScopes;
     private string[] moduleSearchPaths;
     private Value[] moduleLoaders;
@@ -461,9 +596,29 @@ final class ScriptEngine
         moduleSources[name] = source;
     }
 
+    /// Creates an empty, independently scoped module that can be populated from D.
+    ScriptModule newModule(string name)
+    {
+        enforce(name.length > 0, "Module name must not be empty");
+        enforce((name in hostModules) is null && (name in moduleSources) is null
+                && (name in moduleCache) is null,
+            format("Module '%s' is already registered", name));
+        auto result = new ScriptModule(this, name, new Environment(globals));
+        hostModules[name] = result;
+        moduleCache[name] = result.moduleValue;
+        return result;
+    }
+
+    private void updateHostModule(ScriptModule hostModule)
+    {
+        moduleCache[hostModule.moduleName] = hostModule.moduleValue;
+    }
+
     void clearModuleCache()
     {
         moduleCache = null;
+        foreach (name, hostModule; hostModules)
+            moduleCache[name] = hostModule.moduleValue;
     }
 
     /// Loads a registered or discoverable Dua module and returns its exports.
@@ -938,6 +1093,17 @@ final class ScriptEngine
             outcome.stepsExecuted = executedSteps;
             return outcome;
         }
+    }
+
+    private RunOutcome runInHostModuleSafe(ScriptModule hostModule, string source,
+        Environment environment, RunOptions options)
+    {
+        moduleExportScopes ~= hostModule.moduleValue.tableValue;
+        auto outcome = runInEnvironmentSafe(source, environment, options);
+        hostModule.moduleValue.tableValue = moduleExportScopes[$ - 1];
+        moduleExportScopes.length -= 1;
+        updateHostModule(hostModule);
+        return outcome;
     }
 
     private void consumeStep()
@@ -3505,6 +3671,38 @@ unittest
     });
 
     assert(result.toInt() == 12);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto gameModule = engine.newModule("game.module");
+    auto otherModule = engine.newModule("other.module");
+    gameModule.bindAuto("player", 40);
+    otherModule.bindAuto("player", 2);
+    gameModule.load(q{
+        auto privateBonus = 1;
+        export int score(int amount) { return player + privateBonus + amount; }
+    });
+
+    assert(engine.run(q{
+        import game.module as gm;
+        import other.module as other;
+        return gm.player + other.player + gm.score(1);
+    }).toInt() == 84);
+    assert(gameModule["player"].toInt() == 40);
+    assert(gameModule.call("score", [Value.from(2)]).toInt() == 43);
+
+    auto imported = engine.run("import game.module as gm; return gm;");
+    gameModule.bindAuto("late", 7);
+    assert(imported["late"].toInt() == 7);
+
+    engine.clearModuleCache();
+    assert(engine.loadModule("game.module")["player"].toInt() == 40);
+    auto duplicate = false;
+    try engine.newModule("game.module");
+    catch (Exception) duplicate = true;
+    assert(duplicate);
 }
 
 unittest
