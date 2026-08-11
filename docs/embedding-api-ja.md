@@ -41,10 +41,14 @@ Dua のオブジェクトは D GC の管理下です。手動 GC API はあり�
 | `run(source[, options])` | `Value` | ソースを実行し、トップレベルの結果を返す |
 | `runFile(path[, options])` | `Value` | UTF-8 テキストファイルを読み実行する |
 | `load(source)` / `loadFile(path)` | `void` | 同じグローバル環境へ宣言をロードする |
+| `loadModule(name)` | `Value` | 登録済み、または検索可能なモジュールを独立スコープでロードする |
+| `loadModuleFile(path)` | `Value` | 指定した Dua ファイルを独立スコープのモジュールとしてロードする |
 | `call(name, args = [])` | `Value` | グローバル関数を D から呼ぶ |
 | `getGlobal(name)` / `engine[name]` | `Value` | グローバル値を取得する |
 | `runSafe`, `runFileSafe` | `RunOutcome` | 実行失敗を値として受け取る |
 | `loadSafe`, `loadFileSafe` | `RunOutcome` | ロード失敗を値として受け取る |
+| `loadModuleSafe(name)` | `RunOutcome` | モジュールのロード失敗を値として受け取る |
+| `loadModuleFileSafe(path)` | `RunOutcome` | ファイルをモジュールとしてロードした際の失敗を値として受け取る |
 
 非 Safe API は字句・構文・実行・ファイルエラーを例外として送出します。ユーザー提供ソースや通常運用で失敗し得る処理には Safe API を推奨します。
 
@@ -59,7 +63,26 @@ assert(answer.toInt() == 42);
 
 `load` もトップレベル文を実行しますが、結果を返す用途ではなく環境へのロード用途です。
 
-### 3.2 RunOutcome
+### 3.2 D からモジュールをロードする
+
+```d
+engine.registerModule("game.rules", q{
+    auto privateBase = 40;
+    export auto answer = privateBase + 2;
+});
+
+auto rules = engine.loadModule("game.rules");
+assert(rules.tableValue["answer"].toInt() == 42);
+
+// ファイルを直接モジュールとしてロードする場合
+auto settings = engine.loadModuleFile("config/settings.dua");
+```
+
+`loadModule` は `require` と同じ登録ソース、検索パス、ローダー、キャッシュを利用します。各モジュールは専用のファイルスコープで評価されるため、非 export 宣言は他のファイルへ漏れず、別モジュールで同名のローカル変数を宣言できます。失敗を例外ではなく `RunOutcome` で扱う場合は `loadModuleSafe` を使います。
+
+ファイルパスが既に分かっている場合は `loadModuleFile(path)` を使います。`runFile` が戻り値だけを返す一時実行、`loadFile` が共有グローバル環境へのロードであるのに対し、`loadModuleFile` はファイルを専用スコープで評価し、`export` された値のテーブルを返します。ファイルパスはキャッシュキーにもなります。Safe API は `loadModuleFileSafe(path)` です。
+
+### 3.3 RunOutcome
 
 ```d
 auto out = engine.runSafe("return missing + 1;");
@@ -82,7 +105,7 @@ else
 | `errorKind` | `none`, `runtime`, `stepLimit`, `callDepthLimit` |
 | `stepsExecuted` | 今回消費した概算ステップ |
 
-### 3.3 実行制限と型検査
+### 3.4 実行制限と型検査
 
 ```d
 auto options = Dua.RunOptions();
@@ -120,7 +143,7 @@ assert(engine["exact"].toInt() == 42);
 - `bind(name, Value)` は変換済みの値を公開します。
 - `bindAuto(name, value)` は `Value` をそのまま、aggregate を `Value.reflect`、その他を `Value.from` で変換します。
 - `engine[name] = value` は `bindAuto`、`engine[name]` はグローバル取得の短縮です。
-- 同名を再度 bind するとそのグローバル値を置き換えます。
+- 同じスコープにある名前を再度 bind または宣言するとエラーになります。明示的な代入には Dua の代入文を使います。子スコープで親スコープと同じ名前を宣言するシャドーイングは可能です。
 
 ### 4.2 bindNative
 
