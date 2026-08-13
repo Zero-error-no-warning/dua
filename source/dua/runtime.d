@@ -2223,6 +2223,33 @@ final class ScriptEngine
         return Value.from(measuredLength(cast(Value) args[0]));
     }
 
+    private Value iotaValue(scope const(Value)[] args)
+    {
+        enforce(args.length >= 1 && args.length <= 3,
+            "iota(end), iota(start, end), or iota(start, end, step) expects one to three arguments");
+        foreach (arg; args)
+        {
+            enforce(arg.kind == ValueKind.integer, "iota bounds must be integers");
+        }
+
+        auto start = args.length == 1 ? 0L : args[0].integerValue;
+        auto end = args.length == 1 ? args[0].integerValue : args[1].integerValue;
+        auto step = args.length == 3 ? args[2].integerValue : 1L;
+        enforce(step != 0, "iota step must not be zero");
+        Value[] values;
+        for (auto value = start; step > 0 ? value < end : value > end;)
+        {
+            values ~= Value.from(value);
+            if ((step > 0 && value > long.max - step)
+                || (step < 0 && value < long.min - step))
+            {
+                break;
+            }
+            value += step;
+        }
+        return Value.from(values);
+    }
+
     private Value[] extractTypeChain(Value value)
     {
         Value[] chain;
@@ -2796,6 +2823,9 @@ final class ScriptEngine
         bindNative("len", (scope const(Value)[] args) {
             return measureLengthValue(args);
         });
+        bindNative("iota", (scope const(Value)[] args) {
+            return iotaValue(args);
+        });
         bindNative("rawget", (scope const(Value)[] args) {
             enforce(args.length == 2, "rawget(table, key) expects two arguments");
             enforce(args[0].kind == ValueKind.table, "rawget first argument must be table");
@@ -3135,6 +3165,25 @@ private final class BindTypeFeatures
     {
         return -value;
     }
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run("return [iota(10), iota(5, 9), iota(3, 3), iota(1, 8, 3), iota(5, -2, -2)];");
+    assert(result.arrayValue[0].toScriptLiteral() == "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]");
+    assert(result.arrayValue[1].toScriptLiteral() == "[5, 6, 7, 8]");
+    assert(result.arrayValue[2].arrayValue.length == 0);
+    assert(result.arrayValue[3].toScriptLiteral() == "[1, 4, 7]");
+    assert(result.arrayValue[4].toScriptLiteral() == "[5, 3, 1, -1]");
+
+    auto invalidBounds = engine.runSafe("return iota(1.5);");
+    assert(!invalidBounds.ok);
+    assert(invalidBounds.errorMessage.canFind("iota bounds must be integers"));
+
+    auto zeroStep = engine.runSafe("return iota(1, 5, 0);");
+    assert(!zeroStep.ok);
+    assert(zeroStep.errorMessage.canFind("iota step must not be zero"));
 }
 
 unittest

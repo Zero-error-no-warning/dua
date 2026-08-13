@@ -14,6 +14,7 @@ Dua は、**D 言語アプリケーションへ組み込み可能な軽量スク
 - `RunOutcome` によるエラー情報とスタックトレース取得
 - `#` / `//` / `/+ ... +/`（ネスト可）によるコメント
 - 参照型の配列・テーブルと `[...array]` / `{...table}` による浅いコピー
+- `iota(end)` / `iota(start, end[, step])` による整数配列の生成
 - `auto` と `int` / `double` / `bool` / `string` による型付き宣言・関数
 - `delegate` 型と `=>` / `:>` による型付きラムダ
 - `alias` によるテーブル型、型spread、Union / Optional型
