@@ -113,6 +113,9 @@ default:
 
 ```D
 auto values = [10, 20, 30];
+auto indices = iota(10);   # [0, 1, ..., 9]
+auto section = iota(5, 9); # [5, 6, 7, 8]
+auto odds = iota(1, 8, 2); # [1, 3, 5, 7]
 auto first = values[0];
 auto tail = values[1 .. $]; # $ は対象の長さ
 
@@ -267,6 +270,7 @@ return rules.add(5);
 | `error(value[, level])` | スクリプトエラーを送出 |
 | `typeof(value)`, `typeinfo(value)` | `{ kind, chain }` を返す |
 | `length(value)`, `len(value)` | 文字列、配列、テーブル等の長さ |
+| `iota(end)`, `iota(start,end[,step])` | 終了値を含まない整数配列を生成。負の step で降順 |
 | `rawget(table,key)`, `rawset(table,key,value)` | 生のテーブルアクセス |
 | `setmetatable`, `getmetatable`, `setmetatableWithType` | メタ・型チェーン設定 |
 | `pcall`, `xpcall` | 保護呼び出し |
