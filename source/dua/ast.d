@@ -62,6 +62,8 @@ final class Statement
         continue_,
         yield_,
         alias_,
+        tableDecl,
+        structDecl,
         try_,
         import_,
         export_

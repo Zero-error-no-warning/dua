@@ -91,10 +91,10 @@ assert(engine.run("return clamp(120, 0, 100);").toInt() == 100);
 ## 6. スクリプトを段階的に書く
 
 ```D
-alias Character = {
+table Character {
     string name;
     int hp;
-};
+}
 
 int damage(Character target, int amount) {
     target.hp = target.hp - amount;

@@ -81,7 +81,7 @@
         },
         {
           "name": "storage.type.dua",
-          "match": "\\b(?:auto|delegate|alias)\\b"
+          "match": "\\b(?:auto|delegate|alias|table|struct)\\b"
         },
         {
           "name": "keyword.operator.word.dua",

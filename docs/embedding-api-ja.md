@@ -216,7 +216,7 @@ engine.bindNative("sum", (scope const(Dua.Value)[] args) {
 
 ### 5.1 ValueKind と格納フィールド
 
-`ValueKind` は `null_`, `integer`, `floating`, `boolean`, `string_`, `array`, `table`, `function_`, `native` です。`kind` を確認したうえで、必要に応じて `integerValue`, `floatingValue`, `booleanValue`, `stringValue`, `arrayValue`, `tableValue`, `functionValue` を参照できます。通常は変換メソッドを優先してください。
+`ValueKind` は `null_`, `integer`, `floating`, `boolean`, `string_`, `array`, `table`, `struct_`, `function_`, `native` です。`struct_` は値境界で浅くコピーされるフィールドaggregateで、`table` は参照型です。`kind` を確認したうえで、必要に応じて `integerValue`, `floatingValue`, `booleanValue`, `stringValue`, `arrayValue`, `tableValue`, `functionValue` を参照できます。通常は変換メソッドを優先してください。
 
 ### 5.2 D から Value を作る
 
@@ -307,7 +307,7 @@ auto value = engine.run(q{
 });
 ```
 
-`bindType!T(name)` は型テーブルを公開し、`Name.new(...)` と `Name(...)` を利用可能にします。
+`bindType!T(name)` は型テーブルを公開し、`Name.new(...)` と `Name(...)` を利用可能にします。D の struct は Dua の `struct_` 値型、class は従来どおり参照型として登録されるため、`Vec2 v = Vec2(...)` のような型付き宣言にも使えます。
 
 - D コンストラクタは引数個数で候補を選択します。同じ arity の候補が複数あると曖昧エラーです。
 - 対応するコンストラクタがなければ、struct はゼロ初期化または初期化テーブル、既定構築可能な class は既定構築後に初期化テーブルを適用します。

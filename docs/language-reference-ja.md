@@ -22,11 +22,11 @@ auto empty = null;
 - 数値は10進整数か小数です。負数はリテラルではなく単項 `-` を適用した式です。
 - 文字列はダブルクォートで1行に記述します。現在、文字列リテラル内のエスケープシーケンスは提供しません。
 - 文は原則 `;` で終わり、ブロックは `{ ... }` で囲みます。
-- キーワードは `auto delegate alias is try catch return if else while for foreach switch case default break continue yield true false null this import export as` です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。
+- キーワードは `auto delegate alias struct is try catch return if else while for foreach switch case default break continue yield true false null this import export as` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。
 
 ### 1.2 値の種類と真偽
 
-実行時の値は `null`、整数、浮動小数、真偽値、文字列、配列、テーブル、関数、native 値です。条件式では `null`、`false`、数値の `0`、空文字列が偽です。配列・テーブル・関数など、それ以外の値は真として扱われます。
+実行時の値は `null`、整数、浮動小数、真偽値、文字列、配列、参照型テーブル、値型struct、関数、native 値です。条件式では `null`、`false`、数値の `0`、空文字列が偽です。配列・テーブル・struct・関数など、それ以外の値は真として扱われます。
 
 ## 2. 変数、代入、スコープ
 
@@ -143,13 +143,19 @@ auto tableCopy = { ...user, hp = 50 };
 ## 6. 型、alias、Union
 
 ```D
-alias Named = {
+struct Vec2 {
+    double x;
+    double y;
+}
+Vec2 point = Vec2(1.0, 2.0);
+
+table Named {
     string name;
-};
-alias Player = {
+}
+table Player {
     ...Named;
     int hp;
-};
+}
 alias Target = Player | Enemy;
 alias MaybePlayer = Player | null;
 
@@ -158,6 +164,11 @@ if (hero is Named) {
     hero.hp = hero.hp - 1;
 }
 ```
+
+- `struct` はネイティブな値型です。代入、引数、戻り値、配列・テーブルへの格納時に浅くコピーされます。フィールド更新はそのコピーだけを変更します。
+- `Name(...)` は宣言順のフィールド引数を受け取り、`Name({ field = value })` も利用できます。等値比較はフィールドごとに行われ、`is` と `typeinfo` の型チェーンにも対応します。
+- `table Name { ... }` は参照セマンティクスの名前付きaggregateです。
+- `alias Name = T` と `alias Name = A | B` は純粋な型別名とUnion型に使用します。aggregateは宣言しません。
 
 - 名前付きテーブル型は宣言したフィールドを要求しますが、余分なフィールドは許可します。
 - 型内の `...BaseType;` は基底型のフィールドと型チェーンを取り込みます。

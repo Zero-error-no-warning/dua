@@ -49,6 +49,19 @@ private struct Parser
 
     Statement parseStatement()
     {
+        // `table` remains an ordinary identifier outside declaration context
+        // so the standard `table.map(...)` namespace stays source-compatible.
+        if (check(TokenKind.identifier) && peek().lexeme == "table"
+            && peekAt(1).kind == TokenKind.identifier && peekAt(2).kind == TokenKind.leftBrace)
+        {
+            auto start = advance();
+            return parseAggregateDeclaration(Statement.Kind.tableDecl, start, true);
+        }
+        if (match(TokenKind.keywordStruct))
+        {
+            return parseAggregateDeclaration(Statement.Kind.structDecl, previous(), false);
+        }
+
         if (match(TokenKind.keywordImport))
         {
             auto statement = locatedStatement(Statement.Kind.import_, previous());
@@ -68,38 +81,11 @@ private struct Parser
             auto statement = locatedStatement(Statement.Kind.alias_, previous());
             statement.name = consume(TokenKind.identifier, "Expected alias name").lexeme;
             consume(TokenKind.equal, "Expected '=' after alias name");
-            if (match(TokenKind.leftBrace))
-            {
-                statement.declaredType = "table";
-                auto fieldNames = appender!(string[])();
-                auto fieldTypes = appender!(string[])();
-                auto bases = appender!(string[])();
-                while (!check(TokenKind.rightBrace))
-                {
-                    if (match(TokenKind.ellipsis))
-                    {
-                        bases.put(consume(TokenKind.identifier, "Expected base table type after '...'").lexeme);
-                    }
-                    else
-                    {
-                        fieldTypes.put(parseTypeName());
-                        fieldNames.put(consume(TokenKind.identifier, "Expected table type field name").lexeme);
-                    }
-                    consume(TokenKind.semicolon, "Expected ';' after table type member");
-                }
-                consume(TokenKind.rightBrace, "Expected '}' after table type");
-                statement.parameters = fieldNames.data;
-                statement.parameterTypes = fieldTypes.data;
-                statement.names = bases.data;
-            }
-            else
-            {
-                statement.declaredType = "union";
-                auto members = appender!(string[])();
-                members.put(parseTypeName());
-                while (match(TokenKind.pipe)) members.put(parseTypeName());
-                statement.names = members.data;
-            }
+            statement.declaredType = "alias";
+            auto members = appender!(string[])();
+            members.put(parseTypeName());
+            while (match(TokenKind.pipe)) members.put(parseTypeName());
+            statement.names = members.data;
             consume(TokenKind.semicolon, "Expected ';' after alias declaration");
             return statement;
         }
@@ -368,6 +354,37 @@ private struct Parser
         enforce(targets.data.length == 1, "Comma-separated expressions require assignment");
         statement.expression = target;
         consume(TokenKind.semicolon, "Expected ';' after expression");
+        return statement;
+    }
+
+    Statement parseAggregateDeclaration(Statement.Kind kind, Token start, bool allowBases)
+    {
+        auto statement = locatedStatement(kind, start);
+        statement.declaredType = allowBases ? "table" : "struct";
+        statement.name = consume(TokenKind.identifier, "Expected aggregate name").lexeme;
+        consume(TokenKind.leftBrace, "Expected '{' after aggregate name");
+        auto fieldNames = appender!(string[])();
+        auto fieldTypes = appender!(string[])();
+        auto bases = appender!(string[])();
+        while (!check(TokenKind.rightBrace))
+        {
+            if (match(TokenKind.ellipsis))
+            {
+                enforce(allowBases, "Struct declarations do not support table spread bases");
+                bases.put(consume(TokenKind.identifier, "Expected base table type after '...'").lexeme);
+            }
+            else
+            {
+                fieldTypes.put(parseTypeName());
+                fieldNames.put(consume(TokenKind.identifier, "Expected aggregate field name").lexeme);
+            }
+            consume(TokenKind.semicolon, "Expected ';' after aggregate member");
+        }
+        consume(TokenKind.rightBrace, "Expected '}' after aggregate declaration");
+        match(TokenKind.semicolon);
+        statement.parameters = fieldNames.data;
+        statement.parameterTypes = fieldTypes.data;
+        statement.names = bases.data;
         return statement;
     }
 
