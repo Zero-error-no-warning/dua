@@ -136,6 +136,7 @@ enum ValueKind
     string_,
     array,
     table,
+    struct_,
     function_,
     native
 }
@@ -148,6 +149,7 @@ enum string internalFieldSetterPrefix = "__dua_set_";
 private final class TableStorage
 {
     Value[string] entries;
+    Value delegate() copier;
 }
 
 struct Value
@@ -221,7 +223,7 @@ struct Value
     {
         Value result;
         result.kind = ValueKind.array;
-        result.arrayValue = values.dup;
+        foreach (value; values) result.arrayValue ~= value.valueCopy();
         return result;
     }
 
@@ -230,8 +232,42 @@ struct Value
         Value result;
         result.kind = ValueKind.table;
         result.tableStorage = new TableStorage();
-        result.tableStorage.entries = entries.dup;
+        foreach (key, value; entries) result.tableStorage.entries[key] = value.valueCopy();
         return result;
+    }
+
+    /// Creates a native Dua value-aggregate. Its storage is copied at language
+    /// value boundaries, unlike a table's deliberately shared storage.
+    static Value fromStruct(Value[string] entries)
+    {
+        auto result = from(entries);
+        result.kind = ValueKind.struct_;
+        return result;
+    }
+
+    Value valueCopy() const
+    {
+        if (kind != ValueKind.struct_) return cast(Value) this;
+        if (tableStorage !is null && tableStorage.copier !is null)
+            return tableStorage.copier();
+        Value[string] copied;
+        foreach (key, value; tableValue) copied[key] = value.valueCopy();
+        return Value.fromStruct(copied);
+    }
+
+    void setTypeChain(Value[] chain)
+    {
+        tableValue["__typechain"] = Value.from(chain);
+        if (kind == ValueKind.struct_ && tableStorage.copier !is null)
+        {
+            auto previous = tableStorage.copier;
+            auto saved = chain.dup;
+            tableStorage.copier = () {
+                auto copied = previous();
+                copied.setTypeChain(saved);
+                return copied;
+            };
+        }
     }
 
     static Value fromFunction(CallableValue callable)
@@ -404,42 +440,56 @@ struct Value
         }}
         static if (is(T == struct) && staticIndexOf!("opEquals", __traits(allMembers, T)) >= 0
             && __traits(compiles, makeBoundEqualityOperator(
-            T.stringof ~ ".opEquals", value)))
+            T.stringof ~ ".opEquals", reflectedTarget.value, reflectedTarget)))
         {
             converted["__eq"] = Value.fromFunction(
-                makeBoundEqualityOperator(T.stringof ~ ".opEquals", value));
+                makeBoundEqualityOperator(T.stringof ~ ".opEquals", reflectedTarget.value, reflectedTarget));
         }
         static foreach (memberName; FieldNameTuple!T)
         {{
             static if (__traits(compiles, convertToValue(mixin("value." ~ memberName))))
             {
-                converted[memberName] = convertToValue(mixin("value." ~ memberName));
-                static if (is(T == class))
+                static if (is(T == struct))
+                    converted[memberName] = convertToValue(mixin("reflectedTarget.value." ~ memberName));
+                else
+                    converted[memberName] = convertToValue(mixin("value." ~ memberName));
+                static if (is(T == class) || is(T == struct))
                 {
                     converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
                         new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".getter", 0, (Value[] args) {
-                        return convertToValue(mixin("value." ~ memberName));
+                        static if (is(T == struct))
+                            return convertToValue(mixin("reflectedTarget.value." ~ memberName));
+                        else
+                            return convertToValue(mixin("value." ~ memberName));
                     }));
-                    static if (__traits(compiles, mixin("value." ~ memberName) = mixin("value." ~ memberName)))
+                    static if (__traits(compiles, mixin("reflectedTarget.value." ~ memberName) = mixin("reflectedTarget.value." ~ memberName))
+                        || __traits(compiles, mixin("value." ~ memberName) = mixin("value." ~ memberName)))
                     {
                         converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
                             new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".setter", 1, (Value[] args) {
-                            alias FieldType = typeof(mixin("value." ~ memberName));
-                            mixin("value." ~ memberName) = convertFromValue!FieldType(args[0]);
+                            static if (is(T == struct))
+                            {
+                                alias FieldType = typeof(mixin("reflectedTarget.value." ~ memberName));
+                                mixin("reflectedTarget.value." ~ memberName) = convertFromValue!FieldType(args[0]);
+                            }
+                            else
+                            {
+                                alias FieldType = typeof(mixin("value." ~ memberName));
+                                mixin("value." ~ memberName) = convertFromValue!FieldType(args[0]);
+                            }
                             return Value.nullValue();
                         }));
                     }
                 }
             }
         }}
-        static if (is(T == class))
+        static if (is(T == class) || is(T == struct))
         {
             Value[] typeChain;
             typeChain ~= Value.from(T.stringof);
-            static foreach (Base; BaseClassesTuple!T)
-            {
-                typeChain ~= Value.from(Base.stringof);
-            }
+            static if (is(T == class))
+                static foreach (Base; BaseClassesTuple!T)
+                    typeChain ~= Value.from(Base.stringof);
             converted["__typechain"] = Value.from(typeChain);
         }
         // Reflect alias-this targets last: the helper only fills missing slots,
@@ -454,12 +504,24 @@ struct Value
                 addAliasThisReflection!(T, T, "root", AliasSeq!T)(converted,
                     reflectedTarget);
         }
-        return Value.from(converted);
+        auto result = Value.from(converted);
+        static if (is(T == struct))
+        {
+            result.kind = ValueKind.struct_;
+            auto owner = reflectedTarget;
+            result.tableStorage.copier = () => Value.reflect(owner.value);
+        }
+        return result;
     }
 
     bool isNumber() const
     {
         return kind == ValueKind.integer || kind == ValueKind.floating;
+    }
+
+    bool isFieldAggregate() const
+    {
+        return kind == ValueKind.table || kind == ValueKind.struct_;
     }
 
     double toFloat() const
@@ -512,6 +574,7 @@ struct Value
             case ValueKind.array:
                 return "[" ~ arrayValue.map!(item => item.toHostString()).array.join(", ") ~ "]";
             case ValueKind.table:
+            case ValueKind.struct_:
                 string[] parts;
                 foreach (key, value; tableValue)
                 {
@@ -542,6 +605,7 @@ struct Value
             case ValueKind.array:
                 return "[" ~ arrayValue.map!(item => item.toScriptLiteral()).array.join(", ") ~ "]";
             case ValueKind.table:
+            case ValueKind.struct_:
                 string[] parts;
                 foreach (key, value; tableValue)
                 {
@@ -572,6 +636,7 @@ struct Value
             case ValueKind.array:
                 return arrayValue.length > 0;
             case ValueKind.table:
+            case ValueKind.struct_:
                 return tableValue.length > 0;
             case ValueKind.function_:
                 return true;
@@ -902,10 +967,11 @@ private ReflectedCallable makeBoundUnaryOperator(T, string operatorSymbol)(
     });
 }
 
-private ReflectedCallable makeBoundEqualityOperator(T)(string debugName, auto ref T value)
+private ReflectedCallable makeBoundEqualityOperator(T)(string debugName, auto ref T value,
+    Object lifetimeOwner = null)
 {
     auto callable = &value.opEquals;
-    auto bound = makeReflectedCallable(debugName, callable);
+    auto bound = makeReflectedCallable(debugName, callable, lifetimeOwner);
     return new ReflectedCallable(debugName, 2, (Value[] args) {
         return bound.invoke(args[1 .. $]);
     });
@@ -1011,11 +1077,11 @@ private int conversionScore(T)(const(Value) value)
     }
     else static if (isAssociativeArray!T && isSomeString!(KeyType!T))
     {
-        return value.kind == ValueKind.table ? 80 : -1;
+        return value.isFieldAggregate ? 80 : -1;
     }
     else static if (isAggregateType!T && !is(T == class))
     {
-        return value.kind == ValueKind.table ? 80 : -1;
+        return value.isFieldAggregate ? 80 : -1;
     }
     else
     {
@@ -1070,7 +1136,7 @@ private T convertFromValue(T)(const(Value) value)
     }
     else static if (isAggregateType!T && !is(T == class))
     {
-        enforce(value.kind == ValueKind.table,
+        enforce(value.isFieldAggregate,
             format("Expected table value to convert into '%s' but got %s", T.stringof, value.kind));
         alias MutableT = Unqual!T;
 
@@ -1083,7 +1149,7 @@ private T convertFromValue(T)(const(Value) value)
             if (firstField !in value.tableValue)
             {
                 foreach (candidate; value.tableValue)
-                    if (candidate.kind == ValueKind.table && firstField in candidate.tableValue)
+                    if (candidate.isFieldAggregate && firstField in candidate.tableValue)
                         return convertFromValue!T(candidate);
             }
         }
@@ -1142,6 +1208,7 @@ bool valuesEqual(Value left, Value right)
                 }
                 return true;
             case ValueKind.table:
+            case ValueKind.struct_:
                 if (left.tableValue.length != right.tableValue.length)
                 {
                     return false;

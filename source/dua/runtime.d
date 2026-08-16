@@ -49,6 +49,12 @@ private struct BindFuncOverloadedStruct
     string describe(string value) { return "struct-string:" ~ value; }
 }
 
+private struct BindTypeValueVec2
+{
+    int x;
+    int y;
+}
+
 private struct BindTypeEnumFixture
 {
     enum State
@@ -202,7 +208,7 @@ final class Environment
     {
         enforce((name in values) is null,
             format("Variable '%s' is already defined in this scope", name));
-        values[name] = value;
+        values[name] = value.valueCopy();
     }
 
     bool contains(string name) const
@@ -234,7 +240,7 @@ final class Environment
     {
         if (auto slot = name in values)
         {
-            *slot = value;
+            *slot = value.valueCopy();
             return;
         }
         if (parent !is null)
@@ -311,7 +317,7 @@ final class ModuleHandle
     {
         environment.define(name, value);
         if (visibility == ModuleVisibility.explicitExports)
-            moduleValue.tableValue[name] = value;
+            moduleValue.tableValue[name] = value.valueCopy();
     }
 
     mixin AutoBindingAPI;
@@ -554,7 +560,7 @@ final class ScriptEngine
         if (isAggregateType!T)
     {
         Value[] typeChain;
-        typeChain ~= Value.from(T.stringof);
+        typeChain ~= Value.from(name);
         static if (is(T == class))
         {
             static foreach (Base; BaseClassesTuple!T)
@@ -644,7 +650,9 @@ final class ScriptEngine
                     enforce(userArgs[0].kind == ValueKind.table, format("%s.new init argument must be table", name));
                     instance = (cast(Value) userArgs[0]).to!T();
                 }
-                return Value.reflect(instance);
+                auto reflected = Value.reflect(instance);
+                reflected.setTypeChain(typeChain);
+                return reflected;
             }
         }));
 
@@ -1097,7 +1105,7 @@ final class ScriptEngine
                 case Statement.Kind.expression:
                     inferExpressionType(statement.expression, variables, functions, diagnostics);
                     break;
-                case Statement.Kind.alias_, Statement.Kind.break_, Statement.Kind.continue_,
+                case Statement.Kind.alias_, Statement.Kind.tableDecl, Statement.Kind.structDecl, Statement.Kind.break_, Statement.Kind.continue_,
                      Statement.Kind.yield_, Statement.Kind.import_, Statement.Kind.export_:
                     break;
             }
@@ -1120,6 +1128,7 @@ final class ScriptEngine
                     case ValueKind.null_: return "null";
                     case ValueKind.array: return "array";
                     case ValueKind.table: return "table";
+                    case ValueKind.struct_: return "struct";
                     case ValueKind.function_: return "function";
                     case ValueKind.native: return "any";
                 }
@@ -1296,6 +1305,49 @@ final class ScriptEngine
         globals.define(registryName, Value.from(definition));
     }
 
+    private void registerStructType(Statement statement)
+    {
+        enforce(!globals.contains("__dua_type_" ~ statement.name),
+            format("Type '%s' is already defined", statement.name));
+        Value[string] fields;
+        foreach (index, fieldName; statement.parameters)
+            fields[fieldName] = Value.from(statement.parameterTypes[index]);
+        Value[] chain = [Value.from(statement.name)];
+        Value[string] definition;
+        definition["isTable"] = Value.from(true);
+        definition["isStruct"] = Value.from(true);
+        definition["fields"] = Value.from(fields);
+        definition["chain"] = Value.from(chain);
+        globals.define("__dua_type_" ~ statement.name, Value.from(definition));
+
+        auto typeName = statement.name;
+        auto names = statement.parameters.dup;
+        auto types = statement.parameterTypes.dup;
+        auto constructor = Value.fromFunction(new NativeCallable(typeName, (scope const(Value)[] args) {
+            enforce(args.length == names.length || (args.length == 1 && args[0].kind == ValueKind.table),
+                format("%s expects %s field arguments or one initializer table", typeName, names.length));
+            Value[string] entries;
+            if (args.length == 1 && args[0].kind == ValueKind.table)
+            {
+                foreach (index, fieldName; names)
+                {
+                    auto field = fieldName in args[0].tableValue;
+                    enforce(field !is null, format("%s initializer is missing '%s'", typeName, fieldName));
+                    enforce(valueMatchesType(cast(Value) *field, types[index]), format("%s.%s expected %s", typeName, fieldName, types[index]));
+                    entries[fieldName] = field.valueCopy();
+                }
+            }
+            else foreach (index, fieldName; names)
+            {
+                enforce(valueMatchesType(cast(Value) args[index], types[index]), format("%s.%s expected %s", typeName, fieldName, types[index]));
+                entries[fieldName] = args[index].valueCopy();
+            }
+            entries["__typechain"] = Value.from(chain);
+            return Value.fromStruct(entries);
+        }));
+        globals.define(typeName, constructor);
+    }
+
     private bool valueMatchesType(Value value, string typeName)
     {
         if (canFind(typeName, " delegate(")) return value.kind == ValueKind.function_;
@@ -1311,7 +1363,16 @@ final class ScriptEngine
         }
 
         auto definition = globals.find("__dua_type_" ~ typeName);
-        if (definition is null) return false;
+        if (definition is null)
+        {
+            if (value.isFieldAggregate)
+            {
+                if (auto chain = "__typechain" in value.tableValue)
+                    foreach (entry; chain.arrayValue)
+                        if (entry.toHostString() == typeName) return true;
+            }
+            return false;
+        }
         if (!definition.tableValue["isTable"].truthy())
         {
             foreach (alternative; definition.tableValue["alternatives"].arrayValue)
@@ -1320,7 +1381,7 @@ final class ScriptEngine
             }
             return false;
         }
-        if (value.kind != ValueKind.table) return false;
+        if (!value.isFieldAggregate) return false;
         foreach (fieldName, fieldType; definition.tableValue["fields"].tableValue)
         {
             auto field = fieldName in value.tableValue;
@@ -1342,7 +1403,7 @@ final class ScriptEngine
                 if (valueIsType(value, alternative.toHostString())) return true;
             return false;
         }
-        if (value.kind != ValueKind.table) return false;
+        if (!value.isFieldAggregate) return false;
         auto chain = "__typechain" in value.tableValue;
         if (chain is null || chain.kind != ValueKind.array) return false;
         foreach (entry; chain.arrayValue)
@@ -1402,6 +1463,14 @@ final class ScriptEngine
                     break;
                 case Statement.Kind.alias_:
                     registerTypeAlias(statement);
+                    result.lastValue = Value.nullValue();
+                    break;
+                case Statement.Kind.tableDecl:
+                    registerTypeAlias(statement);
+                    result.lastValue = Value.nullValue();
+                    break;
+                case Statement.Kind.structDecl:
+                    registerStructType(statement);
                     result.lastValue = Value.nullValue();
                     break;
                 case Statement.Kind.try_:
@@ -1733,7 +1802,7 @@ final class ScriptEngine
                     return;
                 case Expression.Kind.get:
                     auto container = evaluate(target.left, environment);
-                    enforce(container.kind == ValueKind.table,
+                    enforce(container.isFieldAggregate,
                         "Property assignment currently supports tables/reflected structs/classes");
                     if (auto property = target.identifier in container.tableValue)
                     {
@@ -1752,7 +1821,7 @@ final class ScriptEngine
                     }
                     if (!applyTableNewIndex(container, target.identifier, value))
                     {
-                        container.tableValue[target.identifier] = value;
+                        container.tableValue[target.identifier] = value.valueCopy();
                     }
                     return;
                 case Expression.Kind.index:
@@ -1763,15 +1832,15 @@ final class ScriptEngine
                     {
                         auto position = cast(size_t) index.toInt();
                         enforce(position < container.arrayValue.length, "Array index out of range");
-                        container.arrayValue[position] = value;
+                        container.arrayValue[position] = value.valueCopy();
                         return;
                     }
-                    if (container.kind == ValueKind.table)
+                    if (container.isFieldAggregate)
                     {
                         auto key = index.toHostString();
                         if (!applyTableNewIndex(container, key, value))
                         {
-                            container.tableValue[key] = value;
+                            container.tableValue[key] = value.valueCopy();
                         }
                         return;
                     }
@@ -1926,7 +1995,7 @@ final class ScriptEngine
                         null, expression.returnType));
                 case Expression.Kind.get:
                     auto container = evaluate(expression.left, environment);
-                    enforce(container.kind == ValueKind.table,
+                    enforce(container.isFieldAggregate,
                         "Property access currently supports tables/reflected structs/classes");
                     auto getterKey = internalFieldGetterPrefix ~ expression.identifier;
                     if (auto getter = getterKey in container.tableValue)
@@ -1993,7 +2062,7 @@ final class ScriptEngine
                         enforce(position < container.arrayValue.length, "Array index out of range");
                         return container.arrayValue[position];
                     }
-                    if (container.kind == ValueKind.table)
+                    if (container.isFieldAggregate)
                     {
                         auto key = index.toHostString();
                         Value resolved;
@@ -2144,7 +2213,7 @@ final class ScriptEngine
 
     private Value callMethodOrUfcs(Value receiver, string functionName, Value[] args, Environment environment)
     {
-        if (receiver.kind == ValueKind.table)
+        if (receiver.isFieldAggregate)
         {
             if (auto method = functionName in receiver.tableValue)
             {
@@ -2188,7 +2257,7 @@ final class ScriptEngine
 
     private Value* tryCallBinaryOverload(string operatorSymbol, Value left, Value right)
     {
-        if (left.kind == ValueKind.table)
+        if (left.isFieldAggregate)
         {
             auto slot = "opBinary" ~ operatorSymbol;
             Value functionValue;
@@ -2197,7 +2266,7 @@ final class ScriptEngine
                 return callTableBinaryOverload(functionValue, left, right);
             }
         }
-        if (right.kind == ValueKind.table)
+        if (right.isFieldAggregate)
         {
             auto slot = "opBinaryRight" ~ operatorSymbol;
             Value functionValue;
@@ -2211,7 +2280,7 @@ final class ScriptEngine
 
     private Value* tryCallUnaryOverload(string operatorSymbol, Value operand)
     {
-        if (operand.kind != ValueKind.table)
+        if (!operand.isFieldAggregate)
         {
             return null;
         }
@@ -2232,7 +2301,7 @@ final class ScriptEngine
 
     private Value* tryCallEqualityOverload(Value left, Value right)
     {
-        if (left.kind == ValueKind.table)
+        if (left.isFieldAggregate)
         {
             Value functionValue;
             if (lookupMetamethod(left, "__eq", functionValue))
@@ -2240,7 +2309,7 @@ final class ScriptEngine
                 return callTableBinaryOverload(functionValue, left, right);
             }
         }
-        if (right.kind == ValueKind.table)
+        if (right.isFieldAggregate)
         {
             Value functionValue;
             if (lookupMetamethod(right, "__eq", functionValue))
@@ -2278,7 +2347,9 @@ final class ScriptEngine
         }
         try
         {
-            return callable.functionValue.invoke(args);
+            Value[] copiedArgs;
+            foreach (arg; args) copiedArgs ~= arg.valueCopy();
+            return callable.functionValue.invoke(copiedArgs).valueCopy();
         }
         catch (Exception error)
         {
@@ -2289,7 +2360,7 @@ final class ScriptEngine
 
     private string stringify(Value value)
     {
-        if (value.kind == ValueKind.table)
+        if (value.isFieldAggregate)
         {
             Value toStringFunction;
             if (lookupMetamethod(value, "__tostring", toStringFunction))
@@ -2610,7 +2681,7 @@ final class ScriptEngine
             }
             if (directMeta.kind == ValueKind.table)
             {
-                directMeta.tableValue[key] = value;
+                directMeta.tableValue[key] = value.valueCopy();
                 return true;
             }
         }
@@ -2633,7 +2704,7 @@ final class ScriptEngine
                         {
                             if (nested.kind == ValueKind.table)
                             {
-                                nested.tableValue[key] = value;
+                                nested.tableValue[key] = value.valueCopy();
                                 return true;
                             }
                         }
@@ -2781,7 +2852,7 @@ final class ScriptEngine
     private void exportSymbol(string name, Value value)
     {
         enforce(moduleExportScopes.length > 0, "export can only be used inside module source");
-        moduleExportScopes[$ - 1][name] = value;
+        moduleExportScopes[$ - 1][name] = value.valueCopy();
     }
 
     private string resolveModuleSource(string moduleName)
@@ -3286,6 +3357,56 @@ private final class BindTypeFeatures
 unittest
 {
     auto engine = new ScriptEngine();
+    auto aliases = engine.run(q{
+        alias Health = int;
+        alias MaybeHealth = Health | null;
+        Health hp = 10;
+        MaybeHealth maybe = hp;
+        return maybe;
+    });
+    assert(aliases.toInt() == 10);
+
+    auto removedSyntax = engine.runSafe(q{
+        alias Old = { int value; };
+        return 0;
+    });
+    assert(!removedSyntax.ok);
+
+    auto result = engine.run(q{
+        struct Vec2 { int x; int y; }
+        Vec2 original = Vec2(2, 3);
+        Vec2 assigned = original;
+        assigned.x = 9;
+        auto boxed = [original];
+        boxed[0].y = 8;
+        int touch(Vec2 value) { value.x = 99; return value.x; }
+        auto touched = touch(original);
+        Vec2 make() { Vec2 v = Vec2({ x = 4, y = 5 }); return v; }
+        auto made = make();
+        return original.x == 2 && original.y == 3 && assigned.x == 9
+            && boxed[0].y == 8 && touched == 99 && made == Vec2(4, 5)
+            && original is Vec2 && typeinfo(original).kind == "struct_";
+    });
+    assert(result.kind == ValueKind.boolean && result.booleanValue);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindType!BindTypeValueVec2("Vec2");
+    auto result = engine.run(q{
+        Vec2 v = Vec2({ x = 1, y = 2 });
+        Vec2 copied = v;
+        copied.x = 7;
+        return v.x == 1 && copied.x == 7 && v is Vec2
+            && typeinfo(v).kind == "struct_";
+    });
+    assert(result.truthy());
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
     auto result = engine.run("return [iota(10), iota(5, 9), iota(3, 3), iota(1, 8, 3), iota(5, -2, -2)];");
     assert(result.arrayValue[0].toScriptLiteral() == "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]");
     assert(result.arrayValue[1].toScriptLiteral() == "[5, 6, 7, 8]");
@@ -3532,13 +3653,13 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
-        alias BaseObject = {
+        table BaseObject {
             string name;
         };
-        alias LivingObject = {
+        table LivingObject {
             int hp;
         };
-        alias Player = {
+        table Player {
             ...BaseObject;
             ...LivingObject;
             int level;
@@ -3562,15 +3683,15 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto collision = engine.runSafe(q{
-        alias Base = { int value; };
-        alias Invalid = { ...Base; double value; };
+        table Base { int value; }
+        table Invalid { ...Base; double value; }
         return 0;
     });
     assert(!collision.ok);
     assert(collision.errorMessage.canFind("conflicts"));
 
     auto missingField = engine.runSafe(q{
-        alias Player = { string name; int hp; };
+        table Player { string name; int hp; };
         Player player = { name = "hero" };
         return player;
     });
