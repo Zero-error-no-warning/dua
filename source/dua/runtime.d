@@ -49,6 +49,26 @@ private struct BindFuncOverloadedStruct
     string describe(string value) { return "struct-string:" ~ value; }
 }
 
+private struct BindTypeEnumFixture
+{
+    enum State
+    {
+        idle = 3,
+        running = 7
+    }
+
+    enum maxRetries = 5;
+}
+
+private final class BindTypeStringEnumFixture
+{
+    enum Label : string
+    {
+        primary = "main",
+        secondary = "sub"
+    }
+}
+
 /// Shared implementation of the automatically converting binding APIs.
 /// The containing type only has to provide bind(string, Value).
 private mixin template AutoBindingAPI()
@@ -636,6 +656,28 @@ final class ScriptEngine
         {{
             static if (memberName != "this" && memberName != "__ctor")
             {
+                static if (__traits(compiles, is(__traits(getMember, T, memberName) == enum))
+                    && is(__traits(getMember, T, memberName) == enum))
+                {
+                    alias EnumType = __traits(getMember, T, memberName);
+                    Value[string] enumTable;
+                    static foreach (enumMemberName; __traits(allMembers, EnumType))
+                    {
+                        static if (__traits(compiles,
+                            Value.fromAuto(__traits(getMember, EnumType, enumMemberName))))
+                        {
+                            enumTable[enumMemberName] = Value.fromAuto(
+                                __traits(getMember, EnumType, enumMemberName));
+                        }
+                    }
+                    typeTable[memberName] = Value.from(enumTable);
+                }
+                else static if (__traits(compiles,
+                    Value.fromAuto(__traits(getMember, T, memberName))))
+                {
+                    typeTable[memberName] = Value.fromAuto(
+                        __traits(getMember, T, memberName));
+                }
                 static if (__traits(compiles, __traits(getOverloads, T, memberName)))
                 {
                     ReflectedCallable[] staticOverloads;
@@ -4085,6 +4127,22 @@ unittest
     });
 
     assert(result.toInt() == 19);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindType!BindTypeEnumFixture("Job");
+    engine.bindType!BindTypeStringEnumFixture("Labels");
+
+    auto result = engine.run(q{
+        if (Job.State.idle != 3 || Job.State.running != 7) return -1;
+        if (Job.maxRetries != 5) return -2;
+        if (Labels.Label.primary != "main") return -3;
+        return Job.State.running + Job.maxRetries;
+    });
+
+    assert(result.toInt() == 12);
 }
 
 unittest

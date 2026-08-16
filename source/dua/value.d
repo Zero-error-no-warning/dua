@@ -7,7 +7,7 @@ import std.exception : enforce;
 import std.format : format;
 import std.string : join;
 import std.meta : AliasSeq, staticIndexOf, staticMap;
-import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, KeyType, Parameters, ReturnType, Unqual, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
+import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, KeyType, OriginalType, Parameters, ReturnType, Unqual, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
 import std.typecons : Tuple;
 
 abstract class CallableValue
@@ -240,6 +240,12 @@ struct Value
         result.kind = ValueKind.function_;
         result.functionValue = callable;
         return result;
+    }
+
+    /// Converts any value supported by the D/Dua reflection boundary.
+    static Value fromAuto(T)(auto ref T value)
+    {
+        return convertToValue(value);
     }
 
     /// Calls a named function stored in this table value.
@@ -910,6 +916,12 @@ private Value convertToValue(T)(auto ref T value)
     static if (is(T == Value))
     {
         return value;
+    }
+    else static if (is(T == enum))
+    {
+        alias BaseType = OriginalType!T;
+        BaseType baseValue = cast(BaseType) value;
+        return convertToValue(baseValue);
     }
     else static if (isSomeString!T)
     {
