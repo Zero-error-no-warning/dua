@@ -14,11 +14,40 @@ import std.file : exists, readText, remove, write;
 import std.format : format;
 import std.math : floor;
 import std.string : join, replace, startsWith;
-import std.traits : BaseClassesTuple, isAggregateType;
+import std.traits : BaseClassesTuple, isAggregateType, isCallable;
 import std.uni : toLower, toUpper;
 import std.utf : byDchar;
 
 alias NativeFunction = Value delegate(scope const(Value)[] args);
+
+private string bindFuncOverload(long value)
+{
+    return "integer:" ~ value.to!string;
+}
+
+private string bindFuncOverload(string value)
+{
+    return "string:" ~ value;
+}
+
+private long bindFuncVariadic(long initial, long[] rest...)
+{
+    foreach (value; rest)
+        initial += value;
+    return initial;
+}
+
+private final class BindFuncOverloadedClass
+{
+    string describe(long value) { return "class-integer:" ~ value.to!string; }
+    string describe(string value) { return "class-string:" ~ value; }
+}
+
+private struct BindFuncOverloadedStruct
+{
+    string describe(long value) { return "struct-integer:" ~ value.to!string; }
+    string describe(string value) { return "struct-string:" ~ value; }
+}
 
 /// Shared implementation of the automatically converting binding APIs.
 /// The containing type only has to provide bind(string, Value).
@@ -37,6 +66,49 @@ private mixin template AutoBindingAPI()
     void opIndexAssign(T)(auto ref T value, string name)
     {
         bindAuto(name, value);
+    }
+}
+
+/// Shared typed-function binding API. Named functions retain their complete
+/// overload set because FUN is received as an alias rather than as an already
+/// resolved function pointer. Typed lambdas use the single-callable fallback.
+private mixin template FunctionBindingAPI()
+{
+    void bindFunc(alias FUN)(string name)
+    {
+        ReflectedCallable[] overloads;
+        static if (__traits(compiles,
+            __traits(getOverloads, __traits(parent, FUN), __traits(identifier, FUN))))
+        {
+            static foreach (overload;
+                __traits(getOverloads, __traits(parent, FUN), __traits(identifier, FUN)))
+            {
+                static if (__traits(compiles, makeStaticReflectedCallable!overload(name)))
+                    overloads ~= makeStaticReflectedCallable!overload(name);
+            }
+        }
+        else static if (__traits(compiles, makeAliasReflectedCallable!FUN(name)))
+        {
+            overloads ~= makeAliasReflectedCallable!FUN(name);
+        }
+        else
+        {
+            static assert(0,
+                "bindFunc requires a concrete D function or a typed lambda");
+        }
+
+        if (overloads.length == 1)
+            bind(name, Value.fromFunction(overloads[0]));
+        else
+            bind(name, Value.fromFunction(new OverloadedReflectedCallable(name, overloads)));
+    }
+
+    /// Runtime delegate form, used in particular when a lambda captures local
+    /// state and therefore cannot be a member-template alias on LDC.
+    void bindFunc(C)(string name, auto ref C callable)
+        if (isCallable!C)
+    {
+        bind(name, Value.fromFunction(makeReflectedCallable(name, callable)));
     }
 }
 
@@ -223,6 +295,7 @@ final class ModuleHandle
     }
 
     mixin AutoBindingAPI;
+    mixin FunctionBindingAPI;
 
     void bindNative(string name, NativeFunction callback)
     {
@@ -450,6 +523,7 @@ final class ScriptEngine
     }
 
     mixin AutoBindingAPI;
+    mixin FunctionBindingAPI;
 
     Value opIndex(string name)
     {
@@ -3200,6 +3274,42 @@ unittest
         return sum;
     });
     assert(result.toInt() == 11);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindFunc!bindFuncOverload("describe");
+    engine.bindFunc!bindFuncVariadic("sumAll");
+    engine.bindFunc!((long value) => value + 1)("plusOne");
+    long offset = 2;
+    engine.bindFunc("addOffset", (long value) => value + offset);
+    engine.bindAuto("classValue", new BindFuncOverloadedClass());
+    engine.bindAuto("structValue", BindFuncOverloadedStruct());
+
+    auto result = engine.run(q{
+        return [
+            describe(42),
+            describe("dua"),
+            plusOne(41),
+            addOffset(40),
+            sumAll(10, 20, 12),
+            classValue.describe(7),
+            classValue.describe("member"),
+            structValue.describe(8),
+            structValue.describe("member")
+        ];
+    });
+
+    assert(result.arrayValue[0].toHostString() == "integer:42");
+    assert(result.arrayValue[1].toHostString() == "string:dua");
+    assert(result.arrayValue[2].toInt() == 42);
+    assert(result.arrayValue[3].toInt() == 42);
+    assert(result.arrayValue[4].toInt() == 42);
+    assert(result.arrayValue[5].toHostString() == "class-integer:7");
+    assert(result.arrayValue[6].toHostString() == "class-string:member");
+    assert(result.arrayValue[7].toHostString() == "struct-integer:8");
+    assert(result.arrayValue[8].toHostString() == "struct-string:member");
 }
 
 private struct AliasNumberFixture

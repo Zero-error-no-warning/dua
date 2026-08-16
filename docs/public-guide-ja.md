@@ -67,6 +67,13 @@ engine.bind("tags", Dua.Value.from(["safe", "fast"]));
 
 `bindNative` のコールバックは `scope const(Dua.Value)[]` を受け取り、`Dua.Value` を返します。引数の個数と型はホスト側で検査してください。
 
+固定シグネチャのD関数、delegate、型付きlambdaには `bindFunc` を使用できます。同名のオーバーロードはDuaの実引数型から選択され、reflectされたクラス・構造体のメンバー関数にも同じ選択規則が適用されます。
+
+```d
+engine.bindFunc!plusOne("plusOne");
+engine.bindFunc!((long value) => value + 1)("inlinePlusOne");
+```
+
 ```d
 engine.bindNative("clamp", (scope const(Dua.Value)[] args) {
     assert(args.length == 3);

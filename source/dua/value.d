@@ -7,7 +7,7 @@ import std.exception : enforce;
 import std.format : format;
 import std.string : join;
 import std.meta : AliasSeq, staticIndexOf, staticMap;
-import std.traits : BaseClassesTuple, FieldNameTuple, KeyType, Parameters, ReturnType, Unqual, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray;
+import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, KeyType, Parameters, ReturnType, Unqual, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
 import std.typecons : Tuple;
 
 abstract class CallableValue
@@ -36,18 +36,24 @@ abstract class CallableValue
 final class ReflectedCallable : CallableValue
 {
     private Value delegate(Value[] args) invoker;
+    private int delegate(scope const(Value)[] args) argumentMatcher;
     private size_t arity;
+    private bool variadic;
     // Keeps a heap-backed struct receiver alive for the lifetime of its bound
     // delegate. Class receivers do not need a separate owner.
     private Object lifetimeOwner;
 
     this(string debugName, size_t arity, Value delegate(Value[] args) invoker,
-        Object lifetimeOwner = null)
+        Object lifetimeOwner = null,
+        int delegate(scope const(Value)[] args) argumentMatcher = null,
+        bool variadic = false)
     {
         super(debugName);
         this.arity = arity;
         this.invoker = invoker;
         this.lifetimeOwner = lifetimeOwner;
+        this.argumentMatcher = argumentMatcher;
+        this.variadic = variadic;
     }
 
     override Value invoke(Value[] args)
@@ -57,7 +63,19 @@ final class ReflectedCallable : CallableValue
 
     override size_t expectedArity() const
     {
+        return variadic ? size_t.max : arity;
+    }
+
+    override size_t minimumArity() const
+    {
         return arity;
+    }
+
+    int matchArguments(scope const(Value)[] args) const
+    {
+        if (variadic ? args.length < arity : args.length != arity)
+            return -1;
+        return argumentMatcher is null ? 0 : argumentMatcher(args);
     }
 
 }
@@ -75,17 +93,26 @@ final class OverloadedReflectedCallable : CallableValue
     override Value invoke(Value[] args)
     {
         ReflectedCallable match;
+        int bestScore = -1;
+        bool ambiguous;
         foreach (overload; overloads)
         {
-            if (overload.expectedArity() == args.length)
+            auto score = overload.matchArguments(args);
+            if (score > bestScore)
             {
-                enforce(match is null,
-                    format("Function '%s' has multiple overloads with %s arguments", debugName, args.length));
                 match = overload;
+                bestScore = score;
+                ambiguous = false;
+            }
+            else if (score >= 0 && score == bestScore)
+            {
+                ambiguous = true;
             }
         }
         enforce(match !is null,
-            format("Function '%s' has no overload taking %s arguments", debugName, args.length));
+            format("Function '%s' has no overload matching %s arguments", debugName, args.length));
+        enforce(!ambiguous,
+            format("Function '%s' has multiple matching overloads for %s arguments", debugName, args.length));
         return match.invoke(args);
     }
 }
@@ -625,21 +652,35 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
     }
 }
 
-private ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C callable,
+package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C callable,
     Object lifetimeOwner = null)
     if (isCallable!C)
 {
     alias Params = Parameters!C;
     alias MutableParams = staticMap!(Unqual, Params);
+    enum isTypesafeVariadic = variadicFunctionStyle!C == Variadic.typesafe;
+    enum fixedArity = isTypesafeVariadic ? Params.length - 1 : Params.length;
     auto storedCallable = callable;
-    return new ReflectedCallable(debugName, Params.length, (Value[] args) {
-        enforce(args.length == Params.length,
-            format("Function '%s' expected %s arguments but got %s", debugName, Params.length, args.length));
+    return new ReflectedCallable(debugName, fixedArity, (Value[] args) {
+        static if (isTypesafeVariadic)
+            enforce(args.length >= fixedArity,
+                format("Function '%s' expected at least %s arguments but got %s",
+                    debugName, fixedArity, args.length));
+        else
+            enforce(args.length == Params.length,
+                format("Function '%s' expected %s arguments but got %s", debugName, Params.length, args.length));
 
         auto converted = Tuple!MutableParams();
-        static foreach (index, Param; Params)
+        static foreach (index; 0 .. fixedArity)
         {
-            converted[index] = convertFromValue!(Unqual!Param)(args[index]);
+            converted[index] = convertFromValue!(MutableParams[index])(args[index]);
+        }
+        static if (isTypesafeVariadic)
+        {
+            alias VariadicArray = MutableParams[$ - 1];
+            alias Element = ForeachType!VariadicArray;
+            foreach (arg; args[fixedArity .. $])
+                converted[$ - 1] ~= convertFromValue!Element(arg);
         }
 
         static if (is(ReturnType!C == void))
@@ -651,7 +692,39 @@ private ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C 
         {
             return convertToValue(storedCallable(converted.expand));
         }
-    }, lifetimeOwner);
+    }, lifetimeOwner, (scope const(Value)[] args) {
+        static if (isTypesafeVariadic)
+        {
+            if (args.length < fixedArity)
+                return -1;
+        }
+        else if (args.length != Params.length)
+        {
+            return -1;
+        }
+        int score;
+        static foreach (index; 0 .. fixedArity)
+        {{
+            auto parameterScore = conversionScore!(MutableParams[index])(args[index]);
+            if (parameterScore < 0)
+                return -1;
+            score += parameterScore;
+        }}
+        static if (isTypesafeVariadic)
+        {
+            alias Element = ForeachType!(MutableParams[$ - 1]);
+            foreach (arg; args[fixedArity .. $])
+            {
+                auto parameterScore = conversionScore!Element(arg);
+                if (parameterScore < 0)
+                    return -1;
+                score += parameterScore;
+            }
+            // Prefer a fixed-arity overload when both otherwise match.
+            score -= 1;
+        }
+        return score;
+    }, isTypesafeVariadic);
 }
 
 private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string debugName,
@@ -774,6 +847,12 @@ ReflectedCallable makeStaticReflectedCallable(alias overload)(string debugName)
     return makeReflectedCallable(debugName, callable);
 }
 
+ReflectedCallable makeAliasReflectedCallable(alias callable)(string debugName)
+{
+    auto storedCallable = callable;
+    return makeReflectedCallable(debugName, storedCallable);
+}
+
 ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugName)
 {
     alias Params = Parameters!constructor;
@@ -863,6 +942,72 @@ private Value convertToValue(T)(auto ref T value)
     else
     {
         return Value.native(value);
+    }
+}
+
+/// Returns a non-negative overload ranking when a Value can be converted to T.
+/// Exact Dua representations outrank the permissive conversions retained by
+/// convertFromValue (for example, stringification and boolean truthiness).
+private int conversionScore(T)(const(Value) value)
+{
+    static if (is(T == Value))
+    {
+        return 1;
+    }
+    else static if (isSomeString!T)
+    {
+        return value.kind == ValueKind.string_ ? 100 : 10;
+    }
+    else static if (is(T == bool))
+    {
+        return value.kind == ValueKind.boolean ? 100 : 10;
+    }
+    else static if (isIntegral!T)
+    {
+        if (value.kind != ValueKind.integer)
+            return -1;
+        // long is Dua's native integer representation. Other integral types
+        // remain equally ranked so narrowing overloads are not chosen by luck.
+        return is(Unqual!T == long) ? 100 : 90;
+    }
+    else static if (isFloatingPoint!T)
+    {
+        if (value.kind == ValueKind.floating)
+            return is(Unqual!T == double) ? 100 : 90;
+        return value.kind == ValueKind.integer ? 50 : -1;
+    }
+    else static if (isDelegate!T)
+    {
+        return value.kind == ValueKind.function_ ? 100 : -1;
+    }
+    else static if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
+    {
+        if (value.kind != ValueKind.array)
+            return -1;
+        static if (isStaticArray!T)
+            if (value.arrayValue.length != T.length)
+                return -1;
+        int score = 80;
+        foreach (element; value.arrayValue)
+        {
+            auto elementScore = conversionScore!(ForeachType!T)(element);
+            if (elementScore < 0)
+                return -1;
+            score += elementScore;
+        }
+        return score;
+    }
+    else static if (isAssociativeArray!T && isSomeString!(KeyType!T))
+    {
+        return value.kind == ValueKind.table ? 80 : -1;
+    }
+    else static if (isAggregateType!T && !is(T == class))
+    {
+        return value.kind == ValueKind.table ? 80 : -1;
+    }
+    else
+    {
+        return -1;
     }
 }
 
