@@ -8,7 +8,7 @@ Dua は、**D 言語アプリケーションへ組み込み可能な軽量スク
 - D から簡単に埋め込める `Dua.ScriptEngine` API
 - 値の橋渡しを行う `Dua.Value`（数値、文字列、配列、テーブル、関数など）
 - `run/runSafe`, `load/loadSafe`, `runFile/runFileSafe`, `loadFile/loadFileSafe` による実行導線
-- `bind` / `bindNative` による D 側データと関数の公開
+- `bind` / `bindFunc` / `bindNative` による D 側データと型付き・動的関数の公開
 - `bindAuto` / `engine["name"] = value` による自動変換バインド（aggregate は reflect）
 - `registerModule` + `require(...)` によるモジュール読み込み
 - `RunOutcome` によるエラー情報とスタックトレース取得

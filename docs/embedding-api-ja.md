@@ -183,7 +183,23 @@ assert(engine["exact"].toInt() == 42);
 - `engine[name] = value` は `bindAuto`、`engine[name]` はグローバル取得の短縮です。
 - 同じスコープにある名前を再度 bind または宣言するとエラーになります。明示的な代入には Dua の代入文を使います。子スコープで親スコープと同じ名前を宣言するシャドーイングは可能です。
 
-### 4.2 bindNative
+### 4.2 bindFunc
+
+型付きの D 関数、delegate、lambda はalias template parameterとして登録します。
+
+```d
+long plusOne(long value) { return value + 1; }
+
+engine.bindFunc!plusOne("plusOne");
+engine.bindFunc!((long value) => value * 2)("twice");
+
+long offset = 2;
+engine.bindFunc("addOffset", (long value) => value + offset);
+```
+
+同名関数のオーバーロード集合もそのまま渡せます。Duaの実引数に対して、完全一致する型、損失のない数値変換、その他の変換の順で最適な候補を選びます。同じ優先度の候補が複数残る場合は曖昧エラーになります。クラス・構造体のreflectされたメンバー関数と `bindType` で公開されるstatic関数にも同じ規則を適用します。Dの型安全な可変長引数にも対応しますが、C形式variadicと引数型を省略したgeneric lambdaは対象外です。
+
+### 4.3 bindNative
 
 ```d
 engine.bindNative("sum", (scope const(Dua.Value)[] args) {
@@ -350,7 +366,8 @@ if (!out.ok)
 | 関数群を環境へ定義して後で呼ぶ | `load` + `call` |
 | primitive / 配列 / AA を公開 | `bindAuto` |
 | 変換済み値を公開 | `bind` |
-| D callback を公開 | `bindNative` |
+| 型付き D function / delegate / lambda を公開 | `bindFunc!FUN` |
+| 動的な D callback を公開 | `bindNative` |
 | class / struct インスタンスを公開 | `bindAuto` / `Value.reflect` |
 | D 型の構築機能を公開 | `bindType!T` |
 | 実行せず型診断 | `check` |
