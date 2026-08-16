@@ -312,6 +312,7 @@ auto value = engine.run(q{
 - D コンストラクタは引数個数で候補を選択します。同じ arity の候補が複数あると曖昧エラーです。
 - 対応するコンストラクタがなければ、struct はゼロ初期化または初期化テーブル、既定構築可能な class は既定構築後に初期化テーブルを適用します。
 - 公開可能な static メンバーも型テーブルへ反映されます。
+- 構造体・クラス内の名前付き `enum` は `Name.EnumName.member`、manifest enum 定数は `Name.member` で参照できます。整数型と文字列型の enum 値に対応します。
 - `typeinfo(Name)` と `typeinfo(instance)` で型チェーンを確認できます。
 
 ## 7. モジュール API
