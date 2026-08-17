@@ -3506,6 +3506,29 @@ private struct AliasGetterFixture
     alias number this;
 }
 
+private struct CallableAliasTargetFixture
+{
+    double value;
+}
+
+private struct CallableAliasWrapperFixture
+{
+    CallableAliasTargetFixture stored;
+
+    CallableAliasTargetFixture raw() const { return stored; }
+    alias raw this;
+
+    // These deliberately shadow CallableAliasTargetFixture.value in the
+    // reflected table, just like a property getter/setter on a proxy type.
+    double value() const { return stored.value; }
+    void value(double newValue) { stored.value = newValue; }
+}
+
+private double callableAliasRotationFixture(CallableAliasTargetFixture angle)
+{
+    return angle.value;
+}
+
 private struct AliasGenericNumberFixture
 {
     int value;
@@ -3546,6 +3569,16 @@ unittest
     engine.bindAuto("getter", AliasGetterFixture(&current));
     current = 20;
     assert(engine.run("return getter + 2;").toInt() == 22);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindAuto("proxy", CallableAliasWrapperFixture(CallableAliasTargetFixture(42.5)));
+    engine.bindFunc!callableAliasRotationFixture("rot");
+
+    assert(engine["proxy"].tableValue["value"].kind == ValueKind.function_);
+    assert(engine.run("return rot(proxy);").toFloat() == 42.5);
 }
 
 unittest
