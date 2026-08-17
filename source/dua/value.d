@@ -5,9 +5,9 @@ import std.array : array;
 import std.conv : convTo = to;
 import std.exception : enforce;
 import std.format : format;
-import std.string : join;
+import std.string : indexOf, join;
 import std.meta : AliasSeq, staticIndexOf, staticMap;
-import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, KeyType, OriginalType, Parameters, ReturnType, Unqual, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
+import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, KeyType, OriginalType, ParameterDefaults, Parameters, ReturnType, Unqual, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
 import std.typecons : Tuple;
 
 abstract class CallableValue
@@ -31,29 +31,40 @@ abstract class CallableValue
         auto arity = expectedArity();
         return arity == size_t.max ? 0 : arity;
     }
+
+    size_t maximumArity() const
+    {
+        return expectedArity();
+    }
+
+    final bool acceptsArity(size_t arity) const
+    {
+        return arity >= minimumArity() && arity <= maximumArity();
+    }
 }
 
 final class ReflectedCallable : CallableValue
 {
     private Value delegate(Value[] args) invoker;
     private int delegate(scope const(Value)[] args) argumentMatcher;
-    private size_t arity;
-    private bool variadic;
+    private size_t minimum;
+    private size_t maximum;
     // Keeps a heap-backed struct receiver alive for the lifetime of its bound
     // delegate. Class receivers do not need a separate owner.
     private Object lifetimeOwner;
 
-    this(string debugName, size_t arity, Value delegate(Value[] args) invoker,
+    this(string debugName, size_t minimum, Value delegate(Value[] args) invoker,
         Object lifetimeOwner = null,
         int delegate(scope const(Value)[] args) argumentMatcher = null,
-        bool variadic = false)
+        size_t maximum = size_t.max, bool unbounded = false)
     {
         super(debugName);
-        this.arity = arity;
+        this.minimum = minimum;
+        this.maximum = unbounded ? size_t.max
+            : maximum == size_t.max ? minimum : maximum;
         this.invoker = invoker;
         this.lifetimeOwner = lifetimeOwner;
         this.argumentMatcher = argumentMatcher;
-        this.variadic = variadic;
     }
 
     override Value invoke(Value[] args)
@@ -63,19 +74,33 @@ final class ReflectedCallable : CallableValue
 
     override size_t expectedArity() const
     {
-        return variadic ? size_t.max : arity;
+        return minimum == maximum ? minimum : size_t.max;
     }
 
     override size_t minimumArity() const
     {
-        return arity;
+        return minimum;
+    }
+
+    override size_t maximumArity() const
+    {
+        return maximum;
     }
 
     int matchArguments(scope const(Value)[] args) const
     {
-        if (variadic ? args.length < arity : args.length != arity)
+        if (!acceptsArity(args.length))
             return -1;
         return argumentMatcher is null ? 0 : argumentMatcher(args);
+    }
+
+    string arityDescription() const
+    {
+        if (minimum == maximum)
+            return format("%s", minimum);
+        if (maximum == size_t.max)
+            return format("at least %s", minimum);
+        return format("%s to %s", minimum, maximum);
     }
 
 }
@@ -109,8 +134,12 @@ final class OverloadedReflectedCallable : CallableValue
                 ambiguous = true;
             }
         }
+        string[] allowed;
+        foreach (overload; overloads)
+            allowed ~= overload.arityDescription();
         enforce(match !is null,
-            format("Function '%s' has no overload matching %s arguments", debugName, args.length));
+            format("Function '%s' has no overload matching %s arguments (allowed: %s)",
+                debugName, args.length, allowed.join(", ")));
         enforce(!ambiguous,
             format("Function '%s' has multiple matching overloads for %s arguments", debugName, args.length));
         return match.invoke(args);
@@ -397,11 +426,11 @@ struct Value
                     {
                         foreach (overload; overloads)
                         {
-                            if (overload.expectedArity() == 0)
+                            if (overload.acceptsArity(0))
                             {
                                 converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(overload);
                             }
-                            else if (overload.expectedArity() == 1)
+                            if (overload.acceptsArity(1))
                             {
                                 converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(overload);
                             }
@@ -733,7 +762,19 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
     }
 }
 
-package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C callable,
+private template RequiredDefaultArity(Defaults...)
+{
+    static if (Defaults.length == 0 || !is(Defaults[0] == void))
+        enum RequiredDefaultArity = 0;
+    else
+        enum RequiredDefaultArity = 1 + RequiredDefaultArity!(Defaults[1 .. $]);
+}
+
+private enum reflectedMinimumArity(alias declaration) =
+    RequiredDefaultArity!(ParameterDefaults!declaration);
+
+private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C)(string debugName,
+    auto ref C callable,
     Object lifetimeOwner = null)
     if (isCallable!C)
 {
@@ -741,20 +782,24 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
     alias MutableParams = staticMap!(Unqual, Params);
     enum isTypesafeVariadic = variadicFunctionStyle!C == Variadic.typesafe;
     enum fixedArity = isTypesafeVariadic ? Params.length - 1 : Params.length;
+    enum minimum = isTypesafeVariadic ? fixedArity : reflectedMinimumArity!declaration;
+    enum maximum = isTypesafeVariadic ? size_t.max : fixedArity;
     auto storedCallable = callable;
-    return new ReflectedCallable(debugName, fixedArity, (Value[] args) {
-        static if (isTypesafeVariadic)
-            enforce(args.length >= fixedArity,
-                format("Function '%s' expected at least %s arguments but got %s",
-                    debugName, fixedArity, args.length));
-        else
-            enforce(args.length == Params.length,
-                format("Function '%s' expected %s arguments but got %s", debugName, Params.length, args.length));
+    return new ReflectedCallable(debugName, minimum, (Value[] args) {
+        enforce(args.length >= minimum && args.length <= maximum,
+            minimum == maximum
+                ? format("Function '%s' expected %s arguments but got %s", debugName, minimum, args.length)
+                : maximum == size_t.max
+                    ? format("Function '%s' expected at least %s arguments but got %s", debugName, minimum, args.length)
+                    : format("Function '%s' expected %s to %s arguments but got %s", debugName, minimum, maximum, args.length));
 
         auto converted = Tuple!MutableParams();
         static foreach (index; 0 .. fixedArity)
         {
-            converted[index] = convertFromValue!(MutableParams[index])(args[index]);
+            if (index < args.length)
+                converted[index] = convertFromValue!(MutableParams[index])(args[index]);
+            else static if (!is(ParameterDefaults!declaration[index] == void))
+                converted[index] = ParameterDefaults!declaration[index];
         }
         static if (isTypesafeVariadic)
         {
@@ -770,26 +815,27 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
             return Value.nullValue();
         }
         else
-        {
             return convertToValue(storedCallable(converted.expand));
-        }
     }, lifetimeOwner, (scope const(Value)[] args) {
         static if (isTypesafeVariadic)
         {
             if (args.length < fixedArity)
                 return -1;
         }
-        else if (args.length != Params.length)
+        else if (args.length < minimum || args.length > maximum)
         {
             return -1;
         }
         int score;
         static foreach (index; 0 .. fixedArity)
         {{
-            auto parameterScore = conversionScore!(MutableParams[index])(args[index]);
-            if (parameterScore < 0)
-                return -1;
-            score += parameterScore;
+            if (index < args.length)
+            {
+                auto parameterScore = conversionScore!(MutableParams[index])(args[index]);
+                if (parameterScore < 0)
+                    return -1;
+                score += parameterScore;
+            }
         }}
         static if (isTypesafeVariadic)
         {
@@ -804,8 +850,67 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
             // Prefer a fixed-arity overload when both otherwise match.
             score -= 1;
         }
+        else
+        {
+            // Prefer an overload for which fewer default arguments are omitted.
+            score -= cast(int) (fixedArity - args.length);
+        }
         return score;
-    }, isTypesafeVariadic);
+    }, maximum, isTypesafeVariadic);
+}
+
+package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C callable,
+    Object lifetimeOwner = null)
+    if (isCallable!C)
+{
+    alias Params = Parameters!C;
+    alias MutableParams = staticMap!(Unqual, Params);
+    enum variadic = variadicFunctionStyle!C == Variadic.typesafe;
+    enum fixedArity = variadic ? Params.length - 1 : Params.length;
+    auto storedCallable = callable;
+    return new ReflectedCallable(debugName, fixedArity, (Value[] args) {
+        enforce(variadic ? args.length >= fixedArity : args.length == fixedArity,
+            format("Function '%s' expected %s%s arguments but got %s", debugName,
+                variadic ? "at least " : "", fixedArity, args.length));
+        auto converted = Tuple!MutableParams();
+        static foreach (index; 0 .. fixedArity)
+            converted[index] = convertFromValue!(MutableParams[index])(args[index]);
+        static if (variadic)
+        {
+            alias Element = ForeachType!(MutableParams[$ - 1]);
+            foreach (arg; args[fixedArity .. $])
+                converted[$ - 1] ~= convertFromValue!Element(arg);
+        }
+        static if (is(ReturnType!C == void))
+        {
+            storedCallable(converted.expand);
+            return Value.nullValue();
+        }
+        else
+            return convertToValue(storedCallable(converted.expand));
+    }, lifetimeOwner, (scope const(Value)[] args) {
+        if (variadic ? args.length < fixedArity : args.length != fixedArity)
+            return -1;
+        int score;
+        static foreach (index; 0 .. fixedArity)
+        {
+            auto parameterScore = conversionScore!(MutableParams[index])(args[index]);
+            if (parameterScore < 0) return -1;
+            score += parameterScore;
+        }
+        static if (variadic)
+        {
+            alias Element = ForeachType!(MutableParams[$ - 1]);
+            foreach (arg; args[fixedArity .. $])
+            {
+                auto parameterScore = conversionScore!Element(arg);
+                if (parameterScore < 0) return -1;
+                score += parameterScore;
+            }
+            --score;
+        }
+        return score;
+    }, size_t.max, variadic);
 }
 
 private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string debugName,
@@ -814,7 +919,7 @@ private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string d
     alias Function = typeof(overload);
     alias Delegate = ReturnType!Function delegate(Parameters!Function);
     Delegate callable = &__traits(getMember, value, __traits(identifier, overload));
-    return makeReflectedCallable(debugName, callable, lifetimeOwner);
+    return makeReflectedCallableWithDefaults!overload(debugName, callable, lifetimeOwner);
 }
 
 private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string expression)(
@@ -823,19 +928,29 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
     alias Function = typeof(overload);
     alias Params = Parameters!Function;
     alias MutableParams = staticMap!(Unqual, Params);
-    return new ReflectedCallable(debugName, Params.length, (Value[] args) {
+    enum minimum = reflectedMinimumArity!overload;
+    return new ReflectedCallable(debugName, minimum, (Value[] args) {
         auto converted = Tuple!MutableParams();
         static foreach (index, Param; Params)
+            if (index < args.length)
             converted[index] = convertFromValue!(Unqual!Param)(args[index]);
         static if (is(ReturnType!Function == void))
         {
-            __traits(getMember, mixin(expression), __traits(identifier, overload))(converted.expand);
+            static foreach (count; minimum .. Params.length + 1)
+                if (args.length == count)
+                    __traits(getMember, mixin(expression),
+                        __traits(identifier, overload))(converted[0 .. count]);
             return Value.nullValue();
         }
         else
-            return convertToValue(__traits(getMember, mixin(expression),
-                __traits(identifier, overload))(converted.expand));
-    }, lifetimeOwner);
+        {
+            static foreach (count; minimum .. Params.length + 1)
+                if (args.length == count)
+                    return convertToValue(__traits(getMember, mixin(expression),
+                        __traits(identifier, overload))(converted[0 .. count]));
+            assert(0);
+        }
+    }, lifetimeOwner, null, Params.length);
 }
 
 private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
@@ -924,7 +1039,7 @@ private ReflectedCallable makeLazyAliasEquality(Root, Target, string expression)
 ReflectedCallable makeStaticReflectedCallable(alias overload)(string debugName)
 {
     auto callable = &overload;
-    return makeReflectedCallable(debugName, callable);
+    return makeReflectedCallableWithDefaults!overload(debugName, callable);
 }
 
 ReflectedCallable makeAliasReflectedCallable(alias callable)(string debugName)
@@ -937,23 +1052,28 @@ ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugNam
 {
     alias Params = Parameters!constructor;
     alias MutableParams = staticMap!(Unqual, Params);
-    return new ReflectedCallable(debugName, Params.length, (Value[] args) {
+    enum minimum = reflectedMinimumArity!constructor;
+    return new ReflectedCallable(debugName, minimum, (Value[] args) {
         auto converted = Tuple!MutableParams();
         static foreach (index, Param; Params)
         {
-            converted[index] = convertFromValue!(Unqual!Param)(args[index]);
+            if (index < args.length)
+                converted[index] = convertFromValue!(Unqual!Param)(args[index]);
         }
         static if (is(T == class))
         {
-            auto instance = new T(converted.expand);
-            return Value.reflect(instance);
+            static foreach (count; minimum .. Params.length + 1)
+                if (args.length == count)
+                    return Value.reflect(new T(converted[0 .. count]));
         }
         else
         {
-            auto instance = T(converted.expand);
-            return Value.reflect(instance);
+            static foreach (count; minimum .. Params.length + 1)
+                if (args.length == count)
+                    return Value.reflect(T(converted[0 .. count]));
         }
-    });
+        assert(0);
+    }, null, null, Params.length);
 }
 
 private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string operatorSymbol)(
@@ -1398,6 +1518,96 @@ private class ReflectionMemberFilteringFixture
 private int applyDelegateFixture(int value, int delegate(int) transform)
 {
     return transform(value);
+}
+
+private int reflectedDefaultStatic(int required, int first = 10, int second = 20)
+{
+    return required + first + second;
+}
+
+private int reflectedDefaultOverload()
+{
+    return 100;
+}
+
+private int reflectedDefaultOverload(int value = 7)
+{
+    return value;
+}
+
+private struct ReflectedDefaultFixture
+{
+    int base;
+
+    int mod(int value = 6)
+    {
+        return base + value;
+    }
+
+    int combine(int required, int first = 2, int second = 3)
+    {
+        return base + required + first + second;
+    }
+}
+
+private struct ReflectedDefaultConstructorFixture
+{
+    int value;
+
+    this(int required, int optional = 4)
+    {
+        value = required + optional;
+    }
+}
+
+unittest
+{
+    auto reflected = Value.reflect(ReflectedDefaultFixture(1));
+    auto mod = reflected.tableValue["mod"].functionValue;
+    assert(mod.minimumArity() == 0);
+    assert(mod.maximumArity() == 1);
+    assert(mod.invoke([]).toInt() == 7);
+    assert(mod.invoke([Value.from(4)]).toInt() == 5);
+    assert(reflected.tableValue[internalFieldGetterPrefix ~ "mod"]
+        .functionValue.invoke([]).toInt() == 7);
+
+    auto combine = reflected.tableValue["combine"].functionValue;
+    assert(combine.minimumArity() == 1);
+    assert(combine.maximumArity() == 3);
+    assert(combine.invoke([Value.from(4)]).toInt() == 10);
+    assert(combine.invoke([Value.from(4), Value.from(5), Value.from(6)]).toInt() == 16);
+
+    alias constructor = __traits(getOverloads, ReflectedDefaultConstructorFixture, "__ctor")[0];
+    auto ctor = makeReflectedConstructor!(constructor,
+        ReflectedDefaultConstructorFixture)("DefaultConstructor.new");
+    assert(ctor.minimumArity() == 1 && ctor.maximumArity() == 2);
+    assert(ctor.invoke([Value.from(3)]).tableValue["value"].toInt() == 7);
+    assert(ctor.invoke([Value.from(3), Value.from(6)]).tableValue["value"].toInt() == 9);
+
+    auto staticCallable = makeStaticReflectedCallable!reflectedDefaultStatic("defaults");
+    assert(staticCallable.invoke([Value.from(1)]).toInt() == 31);
+    assert(staticCallable.invoke([Value.from(1), Value.from(2)]).toInt() == 23);
+
+    ReflectedCallable[] overloads;
+    static foreach (overload; __traits(getOverloads, __traits(parent, reflectedDefaultOverload),
+        "reflectedDefaultOverload"))
+        overloads ~= makeStaticReflectedCallable!overload("overloadedDefaults");
+    auto overloaded = new OverloadedReflectedCallable("overloadedDefaults", overloads);
+    assert(overloaded.invoke([]).toInt() == 100);
+    assert(overloaded.invoke([Value.from(9)]).toInt() == 9);
+
+    foreach (badArgs; [Value[].init, [Value.from(1), Value.from(2), Value.from(3), Value.from(4)]])
+    {
+        bool rejected;
+        try
+            staticCallable.invoke(badArgs);
+        catch (Exception error)
+        {
+            rejected = true;
+            assert(error.msg.indexOf("1 to 3 arguments") >= 0);
+        }
+        assert(rejected);
+    }
 }
 
 unittest

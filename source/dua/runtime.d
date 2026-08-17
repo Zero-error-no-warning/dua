@@ -638,7 +638,7 @@ final class ScriptEngine
             ReflectedCallable matchedConstructor;
             foreach (candidate; reflectedConstructors)
             {
-                if (candidate.expectedArity() == userArgs.length)
+                if (candidate.acceptsArity(userArgs.length))
                 {
                     enforce(matchedConstructor is null,
                         format("%s.new has multiple constructors taking %s arguments", name, userArgs.length));
@@ -755,9 +755,9 @@ final class ScriptEngine
                     ReflectedCallable[] staticSetters;
                     foreach (overload; staticOverloads)
                     {
-                        if (overload.expectedArity() == 0)
+                        if (overload.acceptsArity(0))
                             staticGetters ~= overload;
-                        else if (overload.expectedArity() == 1)
+                        if (overload.acceptsArity(1))
                             staticSetters ~= overload;
                     }
                     if (staticGetters.length == 1)
@@ -1874,7 +1874,7 @@ final class ScriptEngine
                     if (auto property = target.identifier in container.tableValue)
                     {
                         if (property.kind == ValueKind.function_
-                            && property.functionValue.expectedArity() == 1)
+                            && property.functionValue.acceptsArity(1))
                         {
                             invokeFunctionValueWithThis(*property, [value], container);
                             return;
@@ -2078,7 +2078,7 @@ final class ScriptEngine
                     if (auto value = expression.identifier in container.tableValue)
                     {
                         if (value.kind == ValueKind.function_
-                            && value.functionValue.expectedArity() == 0)
+                            && value.functionValue.acceptsArity(0))
                         {
                             return invokeFunctionValueWithThis(*value, [], container);
                         }
@@ -4467,6 +4467,27 @@ unittest
 
     assert(result.toInt() == 77);
     assert(stats.hp == 12);
+}
+
+unittest
+{
+    struct DefaultMethod
+    {
+        int value(int increment = 5)
+        {
+            return 10 + increment;
+        }
+    }
+
+    auto engine = new ScriptEngine();
+    engine.bind("item", Value.reflect(DefaultMethod()));
+    auto result = engine.run(q{
+        auto getterStyle = item.value;
+        auto omitted = item.value();
+        auto explicitValue = item.value(2);
+        return getterStyle + omitted + explicitValue;
+    });
+    assert(result.toInt() == 42);
 }
 
 unittest
