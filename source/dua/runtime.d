@@ -14,7 +14,7 @@ import std.file : exists, readText, remove, write;
 import std.format : format;
 import std.math : floor;
 import std.string : join, replace, startsWith;
-import std.traits : BaseClassesTuple, isAggregateType, isCallable;
+import std.traits : BaseClassesTuple, isAggregateType, isCallable, isNumeric;
 import std.uni : toLower, toUpper;
 import std.utf : byDchar;
 
@@ -53,6 +53,50 @@ private struct BindTypeValueVec2
 {
     int x;
     int y;
+}
+
+private struct StaticPropertyFixture
+{
+    private static double stored;
+    static double p() { return stored; }
+    static void p(long value) { stored = value; }
+    static void p(double value) { stored = value + 0.5; }
+}
+
+private struct MixedBinaryFixture
+{
+    double value;
+    string opBinary(string op)(MixedBinaryFixture rhs) const
+        if (op == "+" || op == "-" || op == "*" || op == "/")
+    {
+        return "aggregate";
+    }
+    string opBinary(string op, R)(R rhs) const
+        if (!is(R : MixedBinaryFixture) && isNumeric!R && (op == "*" || op == "/"))
+    {
+        return "scalar";
+    }
+}
+
+private struct MixedBinaryRightFixture
+{
+    double value;
+    string opBinaryRight(string op)(MixedBinaryRightFixture lhs) const
+        if (op == "+" || op == "-" || op == "*" || op == "/")
+    {
+        return "aggregate-right";
+    }
+    string opBinaryRight(string op, L)(L lhs) const
+        if (!is(L : MixedBinaryRightFixture) && isNumeric!L && (op == "*" || op == "/"))
+    {
+        return "scalar-right";
+    }
+}
+
+private struct MixedBinaryAliasFixture
+{
+    MixedBinaryFixture target;
+    alias target this;
 }
 
 private struct BindTypeEnumFixture
@@ -707,6 +751,29 @@ final class ScriptEngine
                         typeTable[memberName] = Value.fromFunction(
                             new OverloadedReflectedCallable(name ~ "." ~ memberName, staticOverloads));
                     }
+                    ReflectedCallable[] staticGetters;
+                    ReflectedCallable[] staticSetters;
+                    foreach (overload; staticOverloads)
+                    {
+                        if (overload.expectedArity() == 0)
+                            staticGetters ~= overload;
+                        else if (overload.expectedArity() == 1)
+                            staticSetters ~= overload;
+                    }
+                    if (staticGetters.length == 1)
+                        typeTable[internalFieldGetterPrefix ~ memberName] =
+                            Value.fromFunction(staticGetters[0]);
+                    else if (staticGetters.length > 1)
+                        typeTable[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
+                            new OverloadedReflectedCallable(name ~ "." ~ memberName ~ ".getter",
+                                staticGetters));
+                    if (staticSetters.length == 1)
+                        typeTable[internalFieldSetterPrefix ~ memberName] =
+                            Value.fromFunction(staticSetters[0]);
+                    else if (staticSetters.length > 1)
+                        typeTable[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
+                            new OverloadedReflectedCallable(name ~ "." ~ memberName ~ ".setter",
+                                staticSetters));
                 }
             }
         }}
@@ -3402,6 +3469,51 @@ unittest
             && typeinfo(v).kind == "struct_";
     });
     assert(result.truthy());
+}
+
+unittest
+{
+    StaticPropertyFixture.stored = 3;
+    auto engine = new ScriptEngine();
+    engine.bindType!StaticPropertyFixture("StaticProperty");
+    auto result = engine.run(q{
+        auto initial = StaticProperty.p;
+        StaticProperty.p = 7;
+        auto integerSet = StaticProperty.p;
+        StaticProperty.p(2.0);
+        auto explicitSet = StaticProperty.p();
+        return [initial, integerSet, explicitSet];
+    });
+    assert(result.arrayValue[0].toFloat() == 3);
+    assert(result.arrayValue[1].toFloat() == 7);
+    assert(result.arrayValue[2].toFloat() == 2.5);
+
+    auto failed = engine.runSafe(`StaticProperty.p = "invalid";`);
+    assert(!failed.ok);
+    // A failed property assignment must leave the callable in the type table.
+    assert(engine.run(`return StaticProperty.p();`).toFloat() == 2.5);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindAuto("vector", MixedBinaryFixture(2));
+    engine.bindAuto("otherVector", MixedBinaryFixture(3));
+    engine.bindAuto("rightVector", MixedBinaryRightFixture(4));
+    engine.bindAuto("otherRightVector", MixedBinaryRightFixture(5));
+    engine.bindAuto("aliased", MixedBinaryAliasFixture(MixedBinaryFixture(6)));
+    engine.bindAuto("otherAliased", MixedBinaryAliasFixture(MixedBinaryFixture(7)));
+    auto result = engine.run(q{
+        return [vector - otherVector, vector / 5.0, vector * 2,
+            otherRightVector - rightVector, 5.0 / rightVector, 2 * rightVector,
+            aliased - otherAliased, aliased / 5.0, aliased * 2];
+    });
+    assert(result.toScriptLiteral() ==
+        `["aggregate", "scalar", "scalar", "aggregate-right", "scalar-right", "scalar-right", "aggregate", "scalar", "scalar"]`);
+
+    auto mismatch = engine.runSafe(`return vector / "nope";`);
+    assert(!mismatch.ok);
+    assert(mismatch.errorMessage.canFind("no overload matching RHS kind"));
 }
 
 unittest
