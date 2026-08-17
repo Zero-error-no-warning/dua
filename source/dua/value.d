@@ -143,6 +143,7 @@ enum ValueKind
 
 enum string internalFieldGetterPrefix = "__dua_get_";
 enum string internalFieldSetterPrefix = "__dua_set_";
+enum string internalAliasThisTargets = "__dua_alias_this_targets";
 
 /// Reference storage makes table identity explicit. Copies of Value (including
 /// module exports already handed to an importer) therefore observe additions.
@@ -668,6 +669,15 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
         // mutually recursive types and keeps reflection compilation bounded.
         static if (isAggregateType!Next && staticIndexOf!(Next, Seen) < 0)
         {
+            // Keep the actual alias-this value available to host conversions.
+            // Reflected members alone are insufficient when an outer method
+            // shadows a field of the aliased aggregate.
+            Value aliasTarget = convertToValue(mixin(nextExpression));
+            if (internalAliasThisTargets in converted)
+                converted[internalAliasThisTargets].arrayValue ~= aliasTarget;
+            else
+                converted[internalAliasThisTargets] = Value.from([aliasTarget]);
+
             static foreach (memberName; __traits(allMembers, Next))
             {{
                 static if (memberName != "this" && memberName != "__ctor"
@@ -1081,7 +1091,40 @@ private int conversionScore(T)(const(Value) value)
     }
     else static if (isAggregateType!T && !is(T == class))
     {
-        return value.isFieldAggregate ? 80 : -1;
+        if (!value.isFieldAggregate)
+            return -1;
+
+        int directScore = 80;
+        static foreach (memberName; FieldNameTuple!(Unqual!T))
+        {{
+            static if (__traits(compiles,
+                __traits(getMember, Unqual!T.init, memberName)))
+            {
+                alias FieldType = typeof(__traits(getMember, Unqual!T.init, memberName));
+                if (auto fieldValue = memberName in value.tableValue)
+                {
+                    auto fieldScore = conversionScore!FieldType(*fieldValue);
+                    if (fieldScore < 0)
+                        directScore = -1;
+                    else if (directScore >= 0)
+                        directScore += fieldScore;
+                }
+            }
+        }}
+
+        int bestScore = directScore;
+        if (auto targets = internalAliasThisTargets in value.tableValue)
+        {
+            foreach (target; targets.arrayValue)
+            {
+                auto targetScore = conversionScore!T(target);
+                // Preserve the established outer-member preference whenever
+                // both the wrapper and its alias target are convertible.
+                if (targetScore >= 0 && targetScore - 1 > bestScore)
+                    bestScore = targetScore - 1;
+            }
+        }
+        return bestScore;
     }
     else
     {
@@ -1139,6 +1182,28 @@ private T convertFromValue(T)(const(Value) value)
         enforce(value.isFieldAggregate,
             format("Expected table value to convert into '%s' but got %s", T.stringof, value.kind));
         alias MutableT = Unqual!T;
+
+        // A callable alias-this target is reflected separately because its
+        // fields can be shadowed by outer getters/setters.  Only peel the
+        // wrapper when its own visible fields cannot form the requested type.
+        bool directFieldsCompatible = true;
+        static foreach (memberName; FieldNameTuple!MutableT)
+        {{
+            static if (__traits(compiles, __traits(getMember, MutableT.init, memberName)))
+            {
+                alias FieldType = typeof(__traits(getMember, MutableT.init, memberName));
+                if (auto fieldValue = memberName in value.tableValue)
+                    if (conversionScore!FieldType(*fieldValue) < 0)
+                        directFieldsCompatible = false;
+            }
+        }}
+        if (!directFieldsCompatible)
+        {
+            if (auto targets = internalAliasThisTargets in value.tableValue)
+                foreach (target; targets.arrayValue)
+                    if (conversionScore!T(target) >= 0)
+                        return convertFromValue!T(target);
+        }
 
         // A reflected alias-this wrapper retains its outer fields.  When an
         // operator expects the target type, peel the single structural layer
