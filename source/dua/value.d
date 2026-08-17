@@ -173,6 +173,7 @@ enum ValueKind
 enum string internalFieldGetterPrefix = "__dua_get_";
 enum string internalFieldSetterPrefix = "__dua_set_";
 enum string internalAliasThisTargets = "__dua_alias_this_targets";
+enum string internalAliasThisChain = "__dua_alias_this_chain";
 
 /// Reference storage makes table identity explicit. Copies of Value (including
 /// module exports already handed to an importer) therefore observe additions.
@@ -697,17 +698,37 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
         }
         // D rejects direct alias-this cycles, but this guard also handles
         // mutually recursive types and keeps reflection compilation bounded.
-        static if (isAggregateType!Next && staticIndexOf!(Next, Seen) < 0)
+        static if (staticIndexOf!(Next, Seen) < 0)
         {
             // Keep the actual alias-this value available to host conversions.
             // Reflected members alone are insufficient when an outer method
             // shadows a field of the aliased aggregate.
-            Value aliasTarget = convertToValue(mixin(nextExpression));
+            Value aliasTarget = Value.fromFunction(new ReflectedCallable(
+                Root.stringof ~ ".alias this -> " ~ Next.stringof, 0,
+                (Value[] args) => convertToValue(mixin(nextExpression)), lifetimeOwner));
             if (internalAliasThisTargets in converted)
                 converted[internalAliasThisTargets].arrayValue ~= aliasTarget;
             else
                 converted[internalAliasThisTargets] = Value.from([aliasTarget]);
 
+            Value[] aliasChain;
+            if (auto existing = internalAliasThisChain in converted)
+                aliasChain = existing.arrayValue.dup;
+            void appendAliasType(string name)
+            {
+                foreach (entry; aliasChain)
+                    if (entry.toHostString() == name)
+                        return;
+                aliasChain ~= Value.from(name);
+            }
+            appendAliasType(Next.stringof);
+            static if (is(Next == class))
+                static foreach (Base; BaseClassesTuple!Next)
+                    appendAliasType(Base.stringof);
+            converted[internalAliasThisChain] = Value.from(aliasChain);
+
+            static if (isAggregateType!Next)
+            {
             static foreach (memberName; __traits(allMembers, Next))
             {{
                 static if (memberName != "this" && memberName != "__ctor"
@@ -759,6 +780,7 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
             }
             addAliasThisReflection!(Root, Next, nextExpression, Seen, Next)(converted,
                 root, lifetimeOwner);
+            }
         }
     }
 }
@@ -1228,16 +1250,18 @@ private int conversionScore(T)(const(Value) value)
     }
     else static if (isSomeString!T)
     {
-        return value.kind == ValueKind.string_ ? 100 : 10;
+        if (value.kind == ValueKind.string_) return 100;
+        return aliasThisConversionScore!T(value, 10);
     }
     else static if (is(T == bool))
     {
-        return value.kind == ValueKind.boolean ? 100 : 10;
+        if (value.kind == ValueKind.boolean) return 100;
+        return aliasThisConversionScore!T(value, 10);
     }
     else static if (isIntegral!T)
     {
         if (value.kind != ValueKind.integer)
-            return -1;
+            return aliasThisConversionScore!T(value);
         // long is Dua's native integer representation. Other integral types
         // remain equally ranked so narrowing overloads are not chosen by luck.
         return is(Unqual!T == long) ? 100 : 90;
@@ -1246,7 +1270,8 @@ private int conversionScore(T)(const(Value) value)
     {
         if (value.kind == ValueKind.floating)
             return is(Unqual!T == double) ? 100 : 90;
-        return value.kind == ValueKind.integer ? 50 : -1;
+        if (value.kind == ValueKind.integer) return 50;
+        return aliasThisConversionScore!T(value);
     }
     else static if (isDelegate!T)
     {
@@ -1301,7 +1326,10 @@ private int conversionScore(T)(const(Value) value)
         {
             foreach (target; targets.arrayValue)
             {
-                auto targetScore = conversionScore!T(target);
+                auto resolved = cast(Value) target;
+                if (resolved.kind == ValueKind.function_ && resolved.functionValue.acceptsArity(0))
+                    resolved = (cast(CallableValue) resolved.functionValue).invoke([]);
+                auto targetScore = conversionScore!T(resolved);
                 // Preserve the established outer-member preference whenever
                 // both the wrapper and its alias target are convertible.
                 if (targetScore >= 0 && targetScore - 1 > bestScore)
@@ -1316,6 +1344,41 @@ private int conversionScore(T)(const(Value) value)
     }
 }
 
+private int aliasThisConversionScore(T)(const(Value) value, int fallback = -1)
+{
+    if (!value.isFieldAggregate) return fallback;
+    if (auto targets = internalAliasThisTargets in value.tableValue)
+    {
+        foreach (stored; targets.arrayValue)
+        {
+            auto target = cast(Value) stored;
+            if (target.kind == ValueKind.function_ && target.functionValue.acceptsArity(0))
+                target = (cast(CallableValue) target.functionValue).invoke([]);
+            auto score = conversionScore!T(target);
+            if (score >= 0) return score - 1;
+        }
+    }
+    return fallback;
+}
+
+private bool convertAliasThisTarget(T)(const(Value) value, out T result)
+{
+    if (!value.isFieldAggregate) return false;
+    if (auto targets = internalAliasThisTargets in value.tableValue)
+        foreach (stored; targets.arrayValue)
+        {
+            auto target = cast(Value) stored;
+            if (target.kind == ValueKind.function_ && target.functionValue.acceptsArity(0))
+                target = (cast(CallableValue) target.functionValue).invoke([]);
+            if (conversionScore!T(target) >= 0)
+            {
+                result = convertFromValue!T(target);
+                return true;
+            }
+        }
+    return false;
+}
+
 private T convertFromValue(T)(const(Value) value)
 {
     static if (is(T == Value))
@@ -1324,18 +1387,38 @@ private T convertFromValue(T)(const(Value) value)
     }
     else static if (isSomeString!T)
     {
+        if (value.kind != ValueKind.string_)
+        {
+            T aliased;
+            if (convertAliasThisTarget!T(value, aliased)) return aliased;
+        }
         return convTo!T(value.toHostString());
     }
     else static if (is(T == bool))
     {
+        if (value.kind != ValueKind.boolean)
+        {
+            T aliased;
+            if (convertAliasThisTarget!T(value, aliased)) return aliased;
+        }
         return value.truthy();
     }
     else static if (isIntegral!T)
     {
+        if (value.kind != ValueKind.integer)
+        {
+            T aliased;
+            if (convertAliasThisTarget!T(value, aliased)) return aliased;
+        }
         return cast(T) value.toInt();
     }
     else static if (isFloatingPoint!T)
     {
+        if (!value.isNumber)
+        {
+            T aliased;
+            if (convertAliasThisTarget!T(value, aliased)) return aliased;
+        }
         return cast(T) value.toFloat();
     }
     else static if (isDelegate!T)
@@ -1384,10 +1467,8 @@ private T convertFromValue(T)(const(Value) value)
         }}
         if (!directFieldsCompatible)
         {
-            if (auto targets = internalAliasThisTargets in value.tableValue)
-                foreach (target; targets.arrayValue)
-                    if (conversionScore!T(target) >= 0)
-                        return convertFromValue!T(target);
+            T aliased;
+            if (convertAliasThisTarget!T(value, aliased)) return aliased;
         }
 
         // A reflected alias-this wrapper retains its outer fields.  When an
@@ -1658,4 +1739,75 @@ unittest
     auto hostFunction = makeStaticReflectedCallable!applyDelegateFixture("applyDelegateFixture");
     auto result = hostFunction.invoke([Value.from(21), scriptDelegate]);
     assert(result.toInt() == 42);
+}
+
+private struct AliasAngleFixture
+{
+    double value;
+    alias value this;
+}
+
+private struct AliasWrapperFixture
+{
+    AliasAngleFixture value;
+    alias value this;
+}
+
+private struct AliasCallableFixture
+{
+    int current;
+    double scalar() const { return current + 0.5; }
+    alias scalar this;
+}
+
+private struct AliasAggregateTargetFixture { int amount; }
+private struct AliasAggregateFixture
+{
+    AliasAggregateTargetFixture target;
+    alias target this;
+}
+
+private class AliasBaseFixture { }
+private class AliasDerivedFixture : AliasBaseFixture { }
+private struct AliasClassFixture
+{
+    AliasDerivedFixture target;
+    alias target this;
+}
+
+private int acceptAliasScalar(double value) { return cast(int)(value * 2); }
+
+unittest
+{
+    auto angle = Value.reflect(AliasAngleFixture(2.5));
+    assert(angle.tableValue["__typechain"].arrayValue.length == 1);
+    assert(angle.tableValue["__typechain"].arrayValue[0].toHostString() == "AliasAngleFixture");
+    assert(angle.tableValue[internalAliasThisChain].arrayValue[0].toHostString() == "double");
+    assert(angle.to!double() == 2.5);
+
+    auto wrapper = Value.reflect(AliasWrapperFixture(AliasAngleFixture(3.5)));
+    auto aliasChain = wrapper.tableValue[internalAliasThisChain].arrayValue;
+    assert(aliasChain.length == 2);
+    assert(aliasChain[0].toHostString() == "AliasAngleFixture");
+    assert(aliasChain[1].toHostString() == "double");
+    assert(wrapper.to!double() == 3.5);
+    assert(wrapper.valueCopy().tableValue[internalAliasThisChain].arrayValue.length == 2);
+
+    auto aggregate = Value.reflect(AliasAggregateFixture(AliasAggregateTargetFixture(7)));
+    assert(aggregate.to!AliasAggregateTargetFixture().amount == 7);
+
+    auto callable = Value.reflect(AliasCallableFixture(4));
+    assert(callable.to!double() == 4.5);
+
+    auto classAlias = Value.reflect(AliasClassFixture(new AliasDerivedFixture()));
+    auto classChain = classAlias.tableValue[internalAliasThisChain].arrayValue;
+    assert(classChain[0].toHostString() == "AliasDerivedFixture");
+    assert(classChain[1].toHostString() == "AliasBaseFixture");
+
+    auto host = makeStaticReflectedCallable!acceptAliasScalar("acceptAliasScalar");
+    assert(host.invoke([wrapper]).toInt() == 7);
+
+    // Alias targets are evaluated lazily instead of retaining a stale snapshot.
+    angle.tableValue[internalFieldSetterPrefix ~ "value"].functionValue.invoke([Value.from(8.0)]);
+    assert(angle.to!double() == 8.0);
 }

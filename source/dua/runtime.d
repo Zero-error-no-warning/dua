@@ -1418,6 +1418,14 @@ final class ScriptEngine
     private bool valueMatchesType(Value value, string typeName)
     {
         if (canFind(typeName, " delegate(")) return value.kind == ValueKind.function_;
+        if (value.isFieldAggregate)
+        {
+            foreach (metadataName; ["__typechain", internalAliasThisChain])
+                if (auto chain = metadataName in value.tableValue)
+                    if (chain.kind == ValueKind.array)
+                        foreach (entry; chain.arrayValue)
+                            if (entry.toHostString() == typeName) return true;
+        }
         switch (typeName)
         {
             case "auto", "any": return true;
@@ -1434,9 +1442,7 @@ final class ScriptEngine
         {
             if (value.isFieldAggregate)
             {
-                if (auto chain = "__typechain" in value.tableValue)
-                    foreach (entry; chain.arrayValue)
-                        if (entry.toHostString() == typeName) return true;
+                // Nominal and alias-this metadata were checked above.
             }
             return false;
         }
@@ -1471,10 +1477,11 @@ final class ScriptEngine
             return false;
         }
         if (!value.isFieldAggregate) return false;
-        auto chain = "__typechain" in value.tableValue;
-        if (chain is null || chain.kind != ValueKind.array) return false;
-        foreach (entry; chain.arrayValue)
-            if (entry.toHostString() == typeName) return true;
+        foreach (metadataName; ["__typechain", internalAliasThisChain])
+            if (auto chain = metadataName in value.tableValue)
+                if (chain.kind == ValueKind.array)
+                    foreach (entry; chain.arrayValue)
+                        if (entry.toHostString() == typeName) return true;
         return false;
     }
 
@@ -2035,6 +2042,8 @@ final class ScriptEngine
                             foreach (spreadKey, spreadValue; spread.tableValue)
                             {
                                 if (spreadKey == "__meta" || spreadKey == "__typechain"
+                                    || spreadKey == internalAliasThisChain
+                                    || spreadKey == internalAliasThisTargets
                                     || startsWith(spreadKey, internalFieldGetterPrefix)
                                     || startsWith(spreadKey, internalFieldSetterPrefix))
                                 {
@@ -2507,7 +2516,7 @@ final class ScriptEngine
     private Value[] extractTypeChain(Value value)
     {
         Value[] chain;
-        if (value.kind == ValueKind.table)
+        if (value.isFieldAggregate)
         {
             if (auto reflected = "__typechain" in value.tableValue)
             {
@@ -2526,9 +2535,16 @@ final class ScriptEngine
     private Value buildTypeInfo(Value value)
     {
         auto chain = extractTypeChain(value);
+        Value[] aliasThisChain;
+        if (value.isFieldAggregate)
+            if (auto reflected = internalAliasThisChain in value.tableValue)
+                if (reflected.kind == ValueKind.array)
+                    foreach (name; reflected.arrayValue)
+                        aliasThisChain ~= Value.from(name.toHostString());
         Value[string] info;
         info["kind"] = Value.from(value.kind.to!string);
         info["chain"] = Value.from(chain.dup);
+        info["aliasThisChain"] = Value.from(aliasThisChain);
         return Value.from(info);
     }
 
@@ -4821,7 +4837,7 @@ unittest
         if (length(info.chain) != 0) {
             return -20;
         }
-        if (length(info) != 2) {
+        if (length(info) != 3) {
             return -30;
         }
         return 0;
@@ -5087,6 +5103,43 @@ unittest
             ~ ":" ~ left[0] ~ combined[0] ~ combined[2] ~ combined[4];
     });
     assert(result.toHostString() == "hero:100:9:8135");
+}
+
+private struct RuntimeAliasAngleFixture
+{
+    double value;
+    alias value this;
+}
+
+private struct RuntimeAliasWrapperFixture
+{
+    RuntimeAliasAngleFixture value;
+    alias value this;
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto wrapper = RuntimeAliasWrapperFixture(RuntimeAliasAngleFixture(6.25));
+    engine.bind("wrapper", Value.reflect(wrapper));
+    engine.bindType!RuntimeAliasWrapperFixture("NamedWrapper");
+
+    auto result = engine.run(q{
+        auto reflected = typeinfo(wrapper);
+        auto constructed = NamedWrapper({ value = { value = 2.5 } });
+        auto constructedInfo = typeinfo(constructed);
+        return [
+            reflected.chain[0], length(reflected.aliasThisChain),
+            wrapper is RuntimeAliasAngleFixture, wrapper is double,
+            constructedInfo.chain[0], length(constructedInfo.aliasThisChain)
+        ];
+    });
+
+    assert(result.arrayValue[0].toHostString() == "RuntimeAliasWrapperFixture");
+    assert(result.arrayValue[1].toInt() == 2);
+    assert(result.arrayValue[2].truthy() && result.arrayValue[3].truthy());
+    assert(result.arrayValue[4].toHostString() == "NamedWrapper");
+    assert(result.arrayValue[5].toInt() == 2);
 }
 
 unittest
