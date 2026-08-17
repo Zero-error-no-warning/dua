@@ -396,7 +396,7 @@ struct Value
                 {
                     ReflectedCallable[] overloads;
                     static foreach (overload; __traits(getOverloads, T, memberName))
-                    {
+                    {{
                         static if (__traits(compiles, makeBoundReflectedCallable!overload(
                             T.stringof ~ "." ~ memberName, value)))
                         {
@@ -412,7 +412,7 @@ struct Value
                                     T.stringof ~ "." ~ memberName, reflectedTarget);
                             }
                         }
-                    }
+                    }}
                     if (overloads.length == 1)
                     {
                         converted[memberName] = Value.fromFunction(overloads[0]);
@@ -518,8 +518,9 @@ struct Value
             Value[] typeChain;
             typeChain ~= Value.from(T.stringof);
             static if (is(T == class))
-                static foreach (Base; BaseClassesTuple!T)
+                static foreach (Base; BaseClassesTuple!T){{
                     typeChain ~= Value.from(Base.stringof);
+            }}
             converted["__typechain"] = Value.from(typeChain);
         }
         // Reflect alias-this targets last: the helper only fills missing slots,
@@ -716,14 +717,14 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
                     {
                         ReflectedCallable[] overloads;
                         static foreach (overload; __traits(getOverloads, Next, memberName))
-                        {
+                        {{
                             static if (__traits(compiles, makeLazyAliasCallable!(overload,
                                 Root, nextExpression)(Root.stringof ~ "." ~ memberName,
                                     root, lifetimeOwner)))
                                 overloads ~= makeLazyAliasCallable!(overload, Root,
                                     nextExpression)(Root.stringof ~ "." ~ memberName,
                                         root, lifetimeOwner);
-                        }
+                        }}
                         if (memberName !in converted && overloads.length == 1)
                             converted[memberName] = Value.fromFunction(overloads[0]);
                         else if (memberName !in converted && overloads.length > 1)
@@ -795,12 +796,12 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
 
         auto converted = Tuple!MutableParams();
         static foreach (index; 0 .. fixedArity)
-        {
+        {{
             if (index < args.length)
                 converted[index] = convertFromValue!(MutableParams[index])(args[index]);
             else static if (!is(ParameterDefaults!declaration[index] == void))
                 converted[index] = ParameterDefaults!declaration[index];
-        }
+        }}
         static if (isTypesafeVariadic)
         {
             alias VariadicArray = MutableParams[$ - 1];
@@ -873,8 +874,9 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
             format("Function '%s' expected %s%s arguments but got %s", debugName,
                 variadic ? "at least " : "", fixedArity, args.length));
         auto converted = Tuple!MutableParams();
-        static foreach (index; 0 .. fixedArity)
+        static foreach (index; 0 .. fixedArity){{
             converted[index] = convertFromValue!(MutableParams[index])(args[index]);
+        }}
         static if (variadic)
         {
             alias Element = ForeachType!(MutableParams[$ - 1]);
@@ -893,11 +895,11 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
             return -1;
         int score;
         static foreach (index; 0 .. fixedArity)
-        {
+        {{
             auto parameterScore = conversionScore!(MutableParams[index])(args[index]);
             if (parameterScore < 0) return -1;
             score += parameterScore;
-        }
+        }}
         static if (variadic)
         {
             alias Element = ForeachType!(MutableParams[$ - 1]);
@@ -931,23 +933,26 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
     enum minimum = reflectedMinimumArity!overload;
     return new ReflectedCallable(debugName, minimum, (Value[] args) {
         auto converted = Tuple!MutableParams();
-        static foreach (index, Param; Params)
+        static foreach (index, Param; Params){{
             if (index < args.length)
             converted[index] = convertFromValue!(Unqual!Param)(args[index]);
+        }}
         static if (is(ReturnType!Function == void))
         {
-            static foreach (count; minimum .. Params.length + 1)
+            static foreach (count; minimum .. Params.length + 1){{
                 if (args.length == count)
                     __traits(getMember, mixin(expression),
                         __traits(identifier, overload))(converted[0 .. count]);
+            }}
             return Value.nullValue();
         }
         else
         {
-            static foreach (count; minimum .. Params.length + 1)
+            static foreach (count; minimum .. Params.length + 1){{
                 if (args.length == count)
                     return convertToValue(__traits(getMember, mixin(expression),
                         __traits(identifier, overload))(converted[0 .. count]));
+            }}
             assert(0);
         }
     }, lifetimeOwner, null, Params.length);
@@ -1056,21 +1061,23 @@ ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugNam
     return new ReflectedCallable(debugName, minimum, (Value[] args) {
         auto converted = Tuple!MutableParams();
         static foreach (index, Param; Params)
-        {
+        {{
             if (index < args.length)
                 converted[index] = convertFromValue!(Unqual!Param)(args[index]);
-        }
+        }}
         static if (is(T == class))
         {
-            static foreach (count; minimum .. Params.length + 1)
+            static foreach (count; minimum .. Params.length + 1){{
                 if (args.length == count)
                     return Value.reflect(new T(converted[0 .. count]));
+            }}
         }
         else
         {
-            static foreach (count; minimum .. Params.length + 1)
+            static foreach (count; minimum .. Params.length + 1){{
                 if (args.length == count)
                     return Value.reflect(T(converted[0 .. count]));
+            }}
         }
         assert(0);
     }, null, null, Params.length);
@@ -1342,8 +1349,9 @@ private T convertFromValue(T)(const(Value) value)
         ReturnType!T converted(Parameters!T args)
         {
             Value[] convertedArgs;
-            static foreach (index; 0 .. Parameters!T.length)
+            static foreach (index; 0 .. Parameters!T.length){{
                 convertedArgs ~= convertToValue(args[index]);
+            }}
 
             auto result = callable.invoke(convertedArgs);
             static if (is(ReturnType!T == void))
@@ -1590,8 +1598,9 @@ unittest
 
     ReflectedCallable[] overloads;
     static foreach (overload; __traits(getOverloads, __traits(parent, reflectedDefaultOverload),
-        "reflectedDefaultOverload"))
+        "reflectedDefaultOverload")){{
         overloads ~= makeStaticReflectedCallable!overload("overloadedDefaults");
+    }}
     auto overloaded = new OverloadedReflectedCallable("overloadedDefaults", overloads);
     assert(overloaded.invoke([]).toInt() == 100);
     assert(overloaded.invoke([Value.from(9)]).toInt() == 9);
