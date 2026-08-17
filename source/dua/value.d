@@ -1889,10 +1889,14 @@ private AliasCaptureAngleFixture aliasCaptureDeg(double degrees)
     return AliasCaptureAngleFixture(degrees * PI / 180.0);
 }
 
-private struct AliasCaptureRepoxyFixture
+// This is deliberately only a minimal generic alias-this proxy. Repoxy is an
+// external library and is not modelled here; the regression needs only the D
+// language shape that exposed the capture bug: a temporary struct whose alias
+// target is obtained through a callable returning a ref to its stored value.
+private struct AliasCaptureProxyFixture(T)
 {
-    AliasCaptureAngleFixture stored;
-    ref AliasCaptureAngleFixture raw() return { return stored; }
+    T stored;
+    ref T raw() return { return stored; }
     alias raw this;
 }
 
@@ -1900,7 +1904,10 @@ private class AliasCaptureOwnerFixture
 {
     AliasCaptureAngleFixture stored;
     this(AliasCaptureAngleFixture value) { stored = value; }
-    AliasCaptureRepoxyFixture a() { return AliasCaptureRepoxyFixture(stored); }
+    AliasCaptureProxyFixture!AliasCaptureAngleFixture a()
+    {
+        return AliasCaptureProxyFixture!AliasCaptureAngleFixture(stored);
+    }
 }
 
 unittest
@@ -1983,8 +1990,10 @@ unittest
     assert(chain[1].toHostString() == "double");
     assert(abs(proxy.to!double() - PI / 4) < tolerance);
 
-    // Reflection of both an Angle and a proxy temporary remains callable.
-    auto temporary = Value.reflect(AliasCaptureRepoxyFixture(aliasCaptureDeg(45)));
+    // Reflection of both an Angle and a generic alias-this proxy temporary
+    // remains callable without assuming behavior from an external proxy library.
+    auto temporary = Value.reflect(
+        AliasCaptureProxyFixture!AliasCaptureAngleFixture(aliasCaptureDeg(45)));
     GC.collect();
     auto temporaryVector = temporary.tableValue["toVec2"].functionValue.invoke([])
         .to!AliasCaptureVectorFixture();
