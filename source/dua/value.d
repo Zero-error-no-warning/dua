@@ -446,17 +446,29 @@ struct Value
                 && __traits(compiles, makeBoundBinaryOperator!(T, "opBinary", operatorSymbol)(
                 T.stringof ~ ".opBinary" ~ operatorSymbol, value)))
             {
-                converted["opBinary" ~ operatorSymbol] = Value.fromFunction(
-                    makeBoundBinaryOperator!(T, "opBinary", operatorSymbol)(
-                        T.stringof ~ ".opBinary" ~ operatorSymbol, value));
+                static if (is(T == struct))
+                    converted["opBinary" ~ operatorSymbol] = Value.fromFunction(
+                        makeBoundBinaryOperator!(T, "opBinary", operatorSymbol)(
+                            T.stringof ~ ".opBinary" ~ operatorSymbol,
+                            reflectedTarget.value, reflectedTarget));
+                else
+                    converted["opBinary" ~ operatorSymbol] = Value.fromFunction(
+                        makeBoundBinaryOperator!(T, "opBinary", operatorSymbol)(
+                            T.stringof ~ ".opBinary" ~ operatorSymbol, reflectedTarget));
             }
             static if (staticIndexOf!("opBinaryRight", __traits(allMembers, T)) >= 0
                 && __traits(compiles, makeBoundBinaryOperator!(T, "opBinaryRight", operatorSymbol)(
                 T.stringof ~ ".opBinaryRight" ~ operatorSymbol, value)))
             {
-                converted["opBinaryRight" ~ operatorSymbol] = Value.fromFunction(
-                    makeBoundBinaryOperator!(T, "opBinaryRight", operatorSymbol)(
-                        T.stringof ~ ".opBinaryRight" ~ operatorSymbol, value));
+                static if (is(T == struct))
+                    converted["opBinaryRight" ~ operatorSymbol] = Value.fromFunction(
+                        makeBoundBinaryOperator!(T, "opBinaryRight", operatorSymbol)(
+                            T.stringof ~ ".opBinaryRight" ~ operatorSymbol,
+                            reflectedTarget.value, reflectedTarget));
+                else
+                    converted["opBinaryRight" ~ operatorSymbol] = Value.fromFunction(
+                        makeBoundBinaryOperator!(T, "opBinaryRight", operatorSymbol)(
+                            T.stringof ~ ".opBinaryRight" ~ operatorSymbol, reflectedTarget));
             }
         }}
         static foreach (operatorSymbol; ["-", "!"])
@@ -464,9 +476,15 @@ struct Value
             static if (__traits(compiles, makeBoundUnaryOperator!(T, operatorSymbol)(
                 T.stringof ~ ".opUnary" ~ operatorSymbol, value)))
             {
-                converted["opUnary" ~ operatorSymbol] = Value.fromFunction(
-                    makeBoundUnaryOperator!(T, operatorSymbol)(
-                        T.stringof ~ ".opUnary" ~ operatorSymbol, value));
+                static if (is(T == struct))
+                    converted["opUnary" ~ operatorSymbol] = Value.fromFunction(
+                        makeBoundUnaryOperator!(T, operatorSymbol)(
+                            T.stringof ~ ".opUnary" ~ operatorSymbol,
+                            reflectedTarget.value, reflectedTarget));
+                else
+                    converted["opUnary" ~ operatorSymbol] = Value.fromFunction(
+                        makeBoundUnaryOperator!(T, operatorSymbol)(
+                            T.stringof ~ ".opUnary" ~ operatorSymbol, reflectedTarget));
             }
         }}
         static if (is(T == struct) && staticIndexOf!("opEquals", __traits(allMembers, T)) >= 0
@@ -488,25 +506,27 @@ struct Value
                 {
                     converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
                         new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".getter", 0, (Value[] args) {
+                        auto actualTarget = reflectedTarget;
                         static if (is(T == struct))
-                            return convertToValue(mixin("reflectedTarget.value." ~ memberName));
+                            return convertToValue(mixin("actualTarget.value." ~ memberName));
                         else
-                            return convertToValue(mixin("value." ~ memberName));
+                            return convertToValue(mixin("actualTarget." ~ memberName));
                     }));
                     static if (__traits(compiles, mixin("reflectedTarget.value." ~ memberName) = mixin("reflectedTarget.value." ~ memberName))
                         || __traits(compiles, mixin("value." ~ memberName) = mixin("value." ~ memberName)))
                     {
                         converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
                             new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".setter", 1, (Value[] args) {
+                            auto actualTarget = reflectedTarget;
                             static if (is(T == struct))
                             {
-                                alias FieldType = typeof(mixin("reflectedTarget.value." ~ memberName));
-                                mixin("reflectedTarget.value." ~ memberName) = convertFromValue!FieldType(args[0]);
+                                alias FieldType = typeof(mixin("actualTarget.value." ~ memberName));
+                                mixin("actualTarget.value." ~ memberName) = convertFromValue!FieldType(args[0]);
                             }
                             else
                             {
-                                alias FieldType = typeof(mixin("value." ~ memberName));
-                                mixin("value." ~ memberName) = convertFromValue!FieldType(args[0]);
+                                alias FieldType = typeof(mixin("actualTarget." ~ memberName));
+                                mixin("actualTarget." ~ memberName) = convertFromValue!FieldType(args[0]);
                             }
                             return Value.nullValue();
                         }));
@@ -681,6 +701,12 @@ struct Value
 private void addAliasThisReflection(Root, Current, string expression, Seen...)(
     ref Value[string] converted, auto ref Root root, Object lifetimeOwner = null)
 {
+    // A string mixin is invisible to closure analysis.  Keep the receiver in a
+    // normally referenced local so every escaping delegate captures it.
+    static if (is(Root == struct))
+        auto receiver = &root;
+    else
+        auto receiver = root;
     static if (__traits(getAliasThis, Current).length)
     {
         enum aliasName = __traits(getAliasThis, Current)[0];
@@ -705,7 +731,14 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
             // shadows a field of the aliased aggregate.
             Value aliasTarget = Value.fromFunction(new ReflectedCallable(
                 Root.stringof ~ ".alias this -> " ~ Next.stringof, 0,
-                (Value[] args) => convertToValue(mixin(nextExpression)), lifetimeOwner));
+                (Value[] args) {
+                    static if (is(Root == struct))
+                        auto ref actualRoot = *receiver;
+                    else
+                        auto actualRoot = receiver;
+                    enum actualExpression = "actualRoot" ~ nextExpression[4 .. $];
+                    return convertToValue(mixin(actualExpression));
+                }, lifetimeOwner));
             if (internalAliasThisTargets in converted)
                 converted[internalAliasThisTargets].arrayValue ~= aliasTarget;
             else
@@ -953,7 +986,16 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
     alias Params = Parameters!Function;
     alias MutableParams = staticMap!(Unqual, Params);
     enum minimum = reflectedMinimumArity!overload;
+    static if (is(Root == struct))
+        auto receiver = &root;
+    else
+        auto receiver = root;
     return new ReflectedCallable(debugName, minimum, (Value[] args) {
+        static if (is(Root == struct))
+            auto ref actualRoot = *receiver;
+        else
+            auto actualRoot = receiver;
+        enum actualExpression = "actualRoot" ~ expression[4 .. $];
         auto converted = Tuple!MutableParams();
         static foreach (index, Param; Params){{
             if (index < args.length)
@@ -963,7 +1005,7 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
         {
             static foreach (count; minimum .. Params.length + 1){{
                 if (args.length == count)
-                    __traits(getMember, mixin(expression),
+                    __traits(getMember, mixin(actualExpression),
                         __traits(identifier, overload))(converted[0 .. count]);
             }}
             return Value.nullValue();
@@ -972,7 +1014,7 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
         {
             static foreach (count; minimum .. Params.length + 1){{
                 if (args.length == count)
-                    return convertToValue(__traits(getMember, mixin(expression),
+                    return convertToValue(__traits(getMember, mixin(actualExpression),
                         __traits(identifier, overload))(converted[0 .. count]));
             }}
             assert(0);
@@ -984,7 +1026,16 @@ private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
     string methodName, string operatorSymbol)(string debugName, auto ref Root root,
         Object lifetimeOwner = null)
 {
+    static if (is(Root == struct))
+        auto receiver = &root;
+    else
+        auto receiver = root;
     return new ReflectedCallable(debugName, 2, (Value[] args) {
+        static if (is(Root == struct))
+            auto ref actualRoot = *receiver;
+        else
+            auto actualRoot = receiver;
+        enum actualExpression = "actualRoot" ~ expression[4 .. $];
         auto rhsValue = args[1];
         int bestScore = -1;
         Value delegate() invocation;
@@ -999,8 +1050,12 @@ private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
             {
                 bestScore = score;
                 invocation = () {
+                    static if (is(Root == struct))
+                        auto ref actualRoot = *receiver;
+                    else
+                        auto actualRoot = receiver;
                     auto rhs = convertFromValue!Rhs(rhsValue);
-                    return convertToValue(mixin(expression ~ "." ~ methodName
+                    return convertToValue(mixin(actualExpression ~ "." ~ methodName
                         ~ "!(\"" ~ operatorSymbol ~ "\")(rhs)"));
                 };
             }
@@ -1020,8 +1075,12 @@ private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
                 {
                     bestScore = genericScore;
                     invocation = () {
+                        static if (is(Root == struct))
+                            auto ref actualRoot = *receiver;
+                        else
+                            auto actualRoot = receiver;
                         auto rhs = convertFromValue!R(rhsValue);
-                        auto ref target = mixin(expression);
+                        auto ref target = mixin(actualExpression);
                         static if (methodName == "opBinary")
                             return convertToValue(target.opBinary!(operatorSymbol, R)(rhs));
                         else
@@ -1055,11 +1114,20 @@ private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
 private ReflectedCallable makeLazyAliasEquality(Root, Target, string expression)(
     string debugName, auto ref Root root, Object lifetimeOwner = null)
 {
+    static if (is(Root == struct))
+        auto receiver = &root;
+    else
+        auto receiver = root;
     auto callable = mixin("&" ~ expression ~ ".opEquals");
     alias Rhs = Unqual!(Parameters!(typeof(callable))[0]);
     return new ReflectedCallable(debugName, 2, (Value[] args) {
+        static if (is(Root == struct))
+            auto ref actualRoot = *receiver;
+        else
+            auto actualRoot = receiver;
+        enum actualExpression = "actualRoot" ~ expression[4 .. $];
         auto rhs = convertFromValue!Rhs(args[1]);
-        return convertToValue(mixin(expression ~ ".opEquals(rhs)"));
+        return convertToValue(mixin(actualExpression ~ ".opEquals(rhs)"));
     }, lifetimeOwner);
 }
 
@@ -1106,9 +1174,17 @@ ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugNam
 }
 
 private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string operatorSymbol)(
-    string debugName, auto ref T value)
+    string debugName, auto ref T value, Object lifetimeOwner = null)
 {
+    static if (is(T == struct))
+        auto receiver = &value;
+    else
+        auto receiver = value;
     return new ReflectedCallable(debugName, 2, (Value[] args) {
+        static if (is(T == struct))
+            auto ref actualValue = *receiver;
+        else
+            auto actualValue = receiver;
         auto rhsValue = args[1];
         int bestScore = -1;
         Value delegate() invocation;
@@ -1119,7 +1195,7 @@ private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string o
         static if (__traits(compiles,
             mixin("&value." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")")))
         {
-            auto concrete = mixin("&value." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")");
+            auto concrete = mixin("&actualValue." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")");
             alias ConcreteRhs = Unqual!(Parameters!(typeof(concrete))[0]);
             auto score = conversionScore!ConcreteRhs(rhsValue);
             if (score >= 0)
@@ -1147,11 +1223,15 @@ private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string o
                 {
                     bestScore = genericScore;
                     invocation = () {
+                        static if (is(T == struct))
+                            auto ref actualValue = *receiver;
+                        else
+                            auto actualValue = receiver;
                         auto rhs = convertFromValue!R(rhsValue);
                         static if (methodName == "opBinary")
-                            return convertToValue(value.opBinary!(operatorSymbol, R)(rhs));
+                            return convertToValue(actualValue.opBinary!(operatorSymbol, R)(rhs));
                         else
-                            return convertToValue(value.opBinaryRight!(operatorSymbol, R)(rhs));
+                            return convertToValue(actualValue.opBinaryRight!(operatorSymbol, R)(rhs));
                     };
                 }
             }
@@ -1170,17 +1250,17 @@ private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string o
             format("Operator '%s' has no overload matching RHS kind %s",
                 operatorSymbol, rhsValue.kind));
         return invocation();
-    });
+    }, lifetimeOwner);
 }
 
 private ReflectedCallable makeBoundUnaryOperator(T, string operatorSymbol)(
-    string debugName, auto ref T value)
+    string debugName, auto ref T value, Object lifetimeOwner = null)
 {
     auto callable = mixin("&value.opUnary!(\"" ~ operatorSymbol ~ "\")");
-    auto bound = makeReflectedCallable(debugName, callable);
+    auto bound = makeReflectedCallable(debugName, callable, lifetimeOwner);
     return new ReflectedCallable(debugName, 1, (Value[] args) {
         return bound.invoke(args[1 .. $]);
-    });
+    }, lifetimeOwner);
 }
 
 private ReflectedCallable makeBoundEqualityOperator(T)(string debugName, auto ref T value,
@@ -1777,6 +1857,59 @@ private struct AliasClassFixture
 
 private int acceptAliasScalar(double value) { return cast(int)(value * 2); }
 
+private struct AliasCaptureVectorFixture
+{
+    double x;
+    double y;
+}
+
+private struct AliasCaptureAngleFixture
+{
+    import std.math : PI, cos, sin;
+
+    double radians;
+    alias radians this;
+
+    double rad() const { return radians; }
+    double deg() const { return radians * 180.0 / PI; }
+    AliasCaptureAngleFixture flip() const { return AliasCaptureAngleFixture(-radians); }
+    AliasCaptureAngleFixture mod(double divisor = 2.0 * PI) const
+    {
+        import std.math : fmod;
+        return AliasCaptureAngleFixture(fmod(radians, divisor));
+    }
+    AliasCaptureVectorFixture toVec2() const { return AliasCaptureVectorFixture(cos(radians), sin(radians)); }
+    double opBinary(string op)(double rhs) const if (op == "+") { return radians + rhs; }
+    double opBinaryRight(string op)(double lhs) const if (op == "+") { return lhs + radians; }
+}
+
+private AliasCaptureAngleFixture aliasCaptureDeg(double degrees)
+{
+    import std.math : PI;
+    return AliasCaptureAngleFixture(degrees * PI / 180.0);
+}
+
+// This is deliberately only a minimal generic alias-this proxy. Repoxy is an
+// external library and is not modelled here; the regression needs only the D
+// language shape that exposed the capture bug: a temporary struct whose alias
+// target is obtained through a callable returning a ref to its stored value.
+private struct AliasCaptureProxyFixture(T)
+{
+    T stored;
+    ref T raw() return { return stored; }
+    alias raw this;
+}
+
+private class AliasCaptureOwnerFixture
+{
+    AliasCaptureAngleFixture stored;
+    this(AliasCaptureAngleFixture value) { stored = value; }
+    AliasCaptureProxyFixture!AliasCaptureAngleFixture a()
+    {
+        return AliasCaptureProxyFixture!AliasCaptureAngleFixture(stored);
+    }
+}
+
 unittest
 {
     auto angle = Value.reflect(AliasAngleFixture(2.5));
@@ -1810,4 +1943,60 @@ unittest
     // Alias targets are evaluated lazily instead of retaining a stale snapshot.
     angle.tableValue[internalFieldSetterPrefix ~ "value"].functionValue.invoke([Value.from(8.0)]);
     assert(angle.to!double() == 8.0);
+}
+
+unittest
+{
+    import core.memory : GC;
+    import std.math : PI, abs, sqrt;
+
+    enum tolerance = 1e-9;
+    auto expected = sqrt(0.5);
+    auto direct = Value.reflect(aliasCaptureDeg(45));
+    auto directVector = direct.tableValue["toVec2"].functionValue.invoke([])
+        .to!AliasCaptureVectorFixture();
+    assert(abs(directVector.x - expected) < tolerance);
+    assert(abs(directVector.y - expected) < tolerance);
+
+    auto owner = new AliasCaptureOwnerFixture(aliasCaptureDeg(45));
+    // The getter returns a temporary proxy. Reflection must move that value to
+    // ReflectedStructStorage rather than retaining the getter's stack frame.
+    auto proxy = Value.reflect(owner.a);
+    GC.collect();
+    GC.minimize();
+
+    foreach (_; 0 .. 3)
+    {
+        auto vector = proxy.tableValue["toVec2"].functionValue.invoke([])
+            .to!AliasCaptureVectorFixture();
+        assert(abs(vector.x - directVector.x) < tolerance);
+        assert(abs(vector.y - directVector.y) < tolerance);
+        assert(abs(proxy.tableValue["rad"].functionValue.invoke([]).toFloat() - PI / 4) < tolerance);
+        assert(abs(proxy.tableValue["deg"].functionValue.invoke([]).toFloat() - 45) < tolerance);
+        assert(abs(proxy.tableValue["flip"].functionValue.invoke([])
+            .to!AliasCaptureAngleFixture().radians + PI / 4) < tolerance);
+        assert(abs(proxy.tableValue["mod"].functionValue.invoke([])
+            .to!AliasCaptureAngleFixture().radians - PI / 4) < tolerance);
+    }
+
+    auto left = proxy.tableValue["opBinary+"].functionValue.invoke([proxy, Value.from(1.0)]);
+    auto right = proxy.tableValue["opBinaryRight+"].functionValue.invoke([proxy, Value.from(1.0)]);
+    assert(abs(left.toFloat() - (1.0 + PI / 4)) < tolerance);
+    assert(abs(right.toFloat() - left.toFloat()) < tolerance);
+
+    auto chain = proxy.tableValue[internalAliasThisChain].arrayValue;
+    assert(chain.length == 2);
+    assert(chain[0].toHostString() == "AliasCaptureAngleFixture");
+    assert(chain[1].toHostString() == "double");
+    assert(abs(proxy.to!double() - PI / 4) < tolerance);
+
+    // Reflection of both an Angle and a generic alias-this proxy temporary
+    // remains callable without assuming behavior from an external proxy library.
+    auto temporary = Value.reflect(
+        AliasCaptureProxyFixture!AliasCaptureAngleFixture(aliasCaptureDeg(45)));
+    GC.collect();
+    auto temporaryVector = temporary.tableValue["toVec2"].functionValue.invoke([])
+        .to!AliasCaptureVectorFixture();
+    assert(abs(temporaryVector.x - expected) < tolerance);
+    assert(abs(temporaryVector.y - expected) < tolerance);
 }
