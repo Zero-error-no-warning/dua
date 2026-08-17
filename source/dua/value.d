@@ -842,73 +842,72 @@ private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
     string methodName, string operatorSymbol)(string debugName, auto ref Root root,
         Object lifetimeOwner = null)
 {
-    // Prefer the traditional partially-instantiated operator.  This preserves
-    // concrete RHS overloads and their exact conversion behavior.
-    static if (__traits(compiles, mixin("&" ~ expression ~ "." ~ methodName
-        ~ "!(\"" ~ operatorSymbol ~ "\")")))
-    {
-        alias Callable = typeof(mixin("&" ~ expression ~ "." ~ methodName
-            ~ "!(\"" ~ operatorSymbol ~ "\")"));
-        alias Params = Parameters!Callable;
-        alias Rhs = Unqual!(Params[0]);
-        return new ReflectedCallable(debugName, 2, (Value[] args) {
-            auto rhs = convertFromValue!Rhs(args[1]);
-            return convertToValue(mixin(expression ~ "." ~ methodName
-                ~ "!(\"" ~ operatorSymbol ~ "\")(rhs)"));
-        }, lifetimeOwner);
-    }
-    else static if (__traits(compiles, mixin(expression ~ "." ~ methodName
-        ~ "!(\"" ~ operatorSymbol ~ "\", long)(long.init)")))
-    {
-        return new ReflectedCallable(debugName, 2, (Value[] args) {
-            switch (args[1].kind)
+    return new ReflectedCallable(debugName, 2, (Value[] args) {
+        auto rhsValue = args[1];
+        int bestScore = -1;
+        Value delegate() invocation;
+        static if (__traits(compiles, mixin("&" ~ expression ~ "." ~ methodName
+            ~ "!(\"" ~ operatorSymbol ~ "\")")))
+        {
+            alias Callable = typeof(mixin("&" ~ expression ~ "." ~ methodName
+                ~ "!(\"" ~ operatorSymbol ~ "\")"));
+            alias Rhs = Unqual!(Parameters!Callable[0]);
+            auto score = conversionScore!Rhs(rhsValue);
+            if (score >= 0)
             {
-                case ValueKind.integer:
-                    auto rhs = convertFromValue!long(args[1]);
+                bestScore = score;
+                invocation = () {
+                    auto rhs = convertFromValue!Rhs(rhsValue);
                     return convertToValue(mixin(expression ~ "." ~ methodName
-                        ~ "!(\"" ~ operatorSymbol ~ "\", long)(rhs)"));
-                case ValueKind.floating:
-                    static if (__traits(compiles, mixin(expression ~ "." ~ methodName
-                        ~ "!(\"" ~ operatorSymbol ~ "\", double)(double.init)")))
-                    {
-                        auto rhs = convertFromValue!double(args[1]);
-                        return convertToValue(mixin(expression ~ "." ~ methodName
-                            ~ "!(\"" ~ operatorSymbol ~ "\", double)(rhs)"));
-                    }
-                    else { enforce(false, "Operator does not accept a floating RHS"); assert(0); }
-                case ValueKind.boolean:
-                    static if (__traits(compiles, mixin(expression ~ "." ~ methodName
-                        ~ "!(\"" ~ operatorSymbol ~ "\", bool)(bool.init)")))
-                    {
-                        auto rhs = convertFromValue!bool(args[1]);
-                        return convertToValue(mixin(expression ~ "." ~ methodName
-                            ~ "!(\"" ~ operatorSymbol ~ "\", bool)(rhs)"));
-                    }
-                    else { enforce(false, "Operator does not accept a boolean RHS"); assert(0); }
-                case ValueKind.string_:
-                    static if (__traits(compiles, mixin(expression ~ "." ~ methodName
-                        ~ "!(\"" ~ operatorSymbol ~ "\", string)(string.init)")))
-                    {
-                        auto rhs = convertFromValue!string(args[1]);
-                        return convertToValue(mixin(expression ~ "." ~ methodName
-                            ~ "!(\"" ~ operatorSymbol ~ "\", string)(rhs)"));
-                    }
-                    else { enforce(false, "Operator does not accept a string RHS"); assert(0); }
-                case ValueKind.table:
-                    static if (__traits(compiles, mixin(expression ~ "." ~ methodName
-                        ~ "!(\"" ~ operatorSymbol ~ "\", Target)(Target.init)")))
-                    {
-                        auto rhs = convertFromValue!Target(args[1]);
-                        return convertToValue(mixin(expression ~ "." ~ methodName
-                            ~ "!(\"" ~ operatorSymbol ~ "\", Target)(rhs)"));
-                    }
-                    else { enforce(false, "Operator does not accept an aggregate RHS"); assert(0); }
-                default: enforce(false, "Unsupported RHS value kind for templated operator"); assert(0);
+                        ~ "!(\"" ~ operatorSymbol ~ "\")(rhs)"));
+                };
             }
-            assert(0);
-        }, lifetimeOwner);
-    }
-    else static assert(0, "No supported binary operator");
+        }
+        void considerGeneric(R)()
+        {
+            static if (methodName == "opBinary")
+                enum acceptsGeneric = __traits(compiles,
+                    Target.init.opBinary!(operatorSymbol, R)(R.init));
+            else
+                enum acceptsGeneric = __traits(compiles,
+                    Target.init.opBinaryRight!(operatorSymbol, R)(R.init));
+            static if (acceptsGeneric)
+            {
+                auto genericScore = conversionScore!R(rhsValue);
+                if (genericScore > bestScore)
+                {
+                    bestScore = genericScore;
+                    invocation = () {
+                        auto rhs = convertFromValue!R(rhsValue);
+                        auto ref target = mixin(expression);
+                        static if (methodName == "opBinary")
+                            return convertToValue(target.opBinary!(operatorSymbol, R)(rhs));
+                        else
+                            return convertToValue(target.opBinaryRight!(operatorSymbol, R)(rhs));
+                    };
+                }
+            }
+        }
+        static if (__traits(compiles, mixin("&" ~ expression ~ "." ~ methodName
+            ~ "!(\"" ~ operatorSymbol ~ "\")")))
+        {
+            static if (variadicFunctionStyle!(typeof(mixin("&" ~ expression ~ "."
+                    ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")"))) == Variadic.no)
+            {
+                considerGeneric!long();
+                considerGeneric!double();
+            }
+        }
+        else
+        {
+            considerGeneric!long();
+            considerGeneric!double();
+        }
+        enforce(invocation !is null,
+            format("Operator '%s' has no overload matching RHS kind %s",
+                operatorSymbol, rhsValue.kind));
+        return invocation();
+    }, lifetimeOwner);
 }
 
 private ReflectedCallable makeLazyAliasEquality(Root, Target, string expression)(
@@ -960,10 +959,68 @@ ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugNam
 private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string operatorSymbol)(
     string debugName, auto ref T value)
 {
-    auto callable = mixin("&value." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")");
-    auto bound = makeReflectedCallable(debugName, callable);
     return new ReflectedCallable(debugName, 2, (Value[] args) {
-        return bound.invoke(args[1 .. $]);
+        auto rhsValue = args[1];
+        int bestScore = -1;
+        Value delegate() invocation;
+
+        // A partially instantiated overload represents every concrete RHS
+        // declaration.  Do not let its mere existence hide a second overload
+        // whose RHS remains a template parameter.
+        static if (__traits(compiles,
+            mixin("&value." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")")))
+        {
+            auto concrete = mixin("&value." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")");
+            alias ConcreteRhs = Unqual!(Parameters!(typeof(concrete))[0]);
+            auto score = conversionScore!ConcreteRhs(rhsValue);
+            if (score >= 0)
+            {
+                bestScore = score;
+                invocation = () {
+                    auto rhs = convertFromValue!ConcreteRhs(rhsValue);
+                    return convertToValue(concrete(rhs));
+                };
+            }
+        }
+
+        void considerGeneric(R)()
+        {
+            static if (methodName == "opBinary")
+                enum acceptsGeneric = __traits(compiles,
+                    value.opBinary!(operatorSymbol, R)(R.init));
+            else
+                enum acceptsGeneric = __traits(compiles,
+                    value.opBinaryRight!(operatorSymbol, R)(R.init));
+            static if (acceptsGeneric)
+            {
+                auto genericScore = conversionScore!R(rhsValue);
+                if (genericScore > bestScore)
+                {
+                    bestScore = genericScore;
+                    invocation = () {
+                        auto rhs = convertFromValue!R(rhsValue);
+                        static if (methodName == "opBinary")
+                            return convertToValue(value.opBinary!(operatorSymbol, R)(rhs));
+                        else
+                            return convertToValue(value.opBinaryRight!(operatorSymbol, R)(rhs));
+                    };
+                }
+            }
+        }
+        static if (__traits(compiles,
+            mixin("&value." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")")))
+        {
+            static if (variadicFunctionStyle!(typeof(mixin("&value." ~ methodName
+                    ~ "!(\"" ~ operatorSymbol ~ "\")"))) == Variadic.no)
+            {
+                considerGeneric!long();
+                considerGeneric!double();
+            }
+        }
+        enforce(invocation !is null,
+            format("Operator '%s' has no overload matching RHS kind %s",
+                operatorSymbol, rhsValue.kind));
+        return invocation();
     });
 }
 
