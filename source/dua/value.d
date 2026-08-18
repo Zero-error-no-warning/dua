@@ -181,6 +181,10 @@ private final class TableStorage
 {
     Value[string] entries;
     Value delegate() copier;
+    // Keeps the concrete reflected receiver alive without exposing its type in
+    // Value.  Conversion performs a checked cast to ReflectedStructStorage!T,
+    // so reflection metadata such as type chains is never treated as identity.
+    Object nativeOwner;
 }
 
 struct Value
@@ -561,6 +565,7 @@ struct Value
         {
             result.kind = ValueKind.struct_;
             auto owner = reflectedTarget;
+            result.tableStorage.nativeOwner = owner;
             result.tableStorage.copier = () => Value.reflect(owner.value);
         }
         return result;
@@ -1383,8 +1388,13 @@ private int conversionScore(T)(const(Value) value)
         if (!value.isFieldAggregate)
             return -1;
 
+        alias MutableT = Unqual!T;
+        if (value.tableStorage !is null
+            && cast(ReflectedStructStorage!MutableT) value.tableStorage.nativeOwner !is null)
+            return 1_000_000;
+
         int directScore = 80;
-        static foreach (memberName; FieldNameTuple!(Unqual!T))
+        static foreach (memberName; FieldNameTuple!MutableT)
         {{
             static if (__traits(compiles,
                 __traits(getMember, Unqual!T.init, memberName)))
@@ -1525,11 +1535,40 @@ private T convertFromValue(T)(const(Value) value)
 
         return &converted;
     }
+    else static if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
+    {
+        enforce(value.kind == ValueKind.array,
+            format("Expected array value to convert into '%s' but got %s", T.stringof, value.kind));
+        static if (isStaticArray!T)
+            enforce(value.arrayValue.length == T.length,
+                format("Expected %s elements to convert into '%s' but got %s",
+                    T.length, T.stringof, value.arrayValue.length));
+
+        alias Element = ForeachType!T;
+        static if (isDynamicArray!T)
+        {
+            Element[] result;
+            result.length = value.arrayValue.length;
+        }
+        else
+            T result;
+        foreach (index, element; value.arrayValue)
+            result[index] = convertFromValue!Element(element);
+        return result;
+    }
     else static if (isAggregateType!T && !is(T == class))
     {
         enforce(value.isFieldAggregate,
             format("Expected table value to convert into '%s' but got %s", T.stringof, value.kind));
         alias MutableT = Unqual!T;
+
+        // This is deliberately checked before inspecting visible fields.  The
+        // owner is the only proof that the Value came from this exact D type,
+        // and its current value includes mutations made through reflected
+        // setters and methods as well as state that was never reflectable.
+        if (value.tableStorage !is null)
+            if (auto owner = cast(ReflectedStructStorage!MutableT) value.tableStorage.nativeOwner)
+                return owner.value;
 
         // A callable alias-this target is reflected separately because its
         // fields can be shadowed by outer getters/setters.  Only peel the
@@ -1908,6 +1947,65 @@ private class AliasCaptureOwnerFixture
     {
         return AliasCaptureProxyFixture!AliasCaptureAngleFixture(stored);
     }
+}
+
+private struct NativeRoundTripItemFixture
+{
+    int value;
+}
+
+private struct NativeRoundTripContainerFixture
+{
+    NativeRoundTripItemFixture[] items;
+    private int hidden = 42;
+
+    int hiddenValue() const { return hidden; }
+    void setHidden(int value) { hidden = value; }
+}
+
+unittest
+{
+    alias Item = NativeRoundTripItemFixture;
+    alias Container = NativeRoundTripContainerFixture;
+
+    auto reflected = Value.reflect(Container([Item(1), Item(2)]));
+    auto roundTrip = reflected.to!Container();
+    assert(roundTrip.items == [Item(1), Item(2)]);
+    assert(roundTrip.hiddenValue() == 42);
+
+    reflected.tableValue[internalFieldSetterPrefix ~ "items"].functionValue.invoke(
+        [Value.from([Value.fromStruct(["value": Value.from(9)])])]);
+    assert(reflected.to!Container().items == [Item(9)]);
+    assert(reflected.to!Container().hiddenValue() == 42);
+    reflected.tableValue["setHidden"].functionValue.invoke([Value.from(88)]);
+    assert(reflected.to!Container().hiddenValue() == 88);
+
+    auto copied = reflected.valueCopy();
+    reflected.tableValue[internalFieldSetterPrefix ~ "items"].functionValue.invoke(
+        [Value.from([Value.fromStruct(["value": Value.from(10)])])]);
+    assert(reflected.to!Container().items == [Item(10)]);
+    assert(copied.to!Container().items == [Item(9)]);
+    assert(copied.to!Container().hiddenValue() == 88);
+
+    auto scriptInts = Value.from([Value.from(3), Value.from(4)]);
+    assert(scriptInts.to!(int[]) == [3, 4]);
+    assert(scriptInts.to!(int[2]) == [3, 4]);
+
+    auto scriptItems = Value.from([
+        Value.fromStruct(["value": Value.from(5)]),
+        Value.fromStruct(["value": Value.from(6)])
+    ]);
+    assert(scriptItems.to!(Item[]) == [Item(5), Item(6)]);
+
+    // With no native owner, conversion continues to use visible fields.
+    auto scriptContainer = Value.fromStruct([
+        "items": scriptItems,
+        "hidden": Value.from(7)
+    ]);
+    assert(conversionScore!Container(reflected) > conversionScore!Container(scriptContainer));
+    auto structural = scriptContainer.to!Container();
+    assert(structural.items == [Item(5), Item(6)]);
+    assert(structural.hiddenValue() == 7);
 }
 
 unittest
