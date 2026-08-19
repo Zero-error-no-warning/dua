@@ -16,6 +16,51 @@ Program parse(Token[] tokens)
     return parser.parseProgram();
 }
 
+// Parser-focused regression tests intentionally inspect the AST without
+// involving ScriptEngine.  This keeps syntax regressions distinguishable from
+// evaluator failures.
+unittest
+{
+    import dua.lexer : lex;
+
+    auto program = parse(lex("integer answer = 40 + 2; return answer;"));
+    assert(program.statements.length == 2);
+    auto declaration = program.statements[0];
+    assert(declaration.kind == Statement.Kind.variableDecl);
+    assert(declaration.name == "answer");
+    assert(declaration.declaredType == "integer");
+    assert(declaration.expression.kind == Expression.Kind.binary);
+    assert(declaration.expression.operatorSymbol == "+");
+    assert(program.statements[1].kind == Statement.Kind.return_);
+}
+
+unittest
+{
+    import dua.lexer : lex;
+
+    auto program = parse(lex(q{
+        integer choose(integer value) {
+            if (value > 0) { return value; }
+            return 0;
+        }
+    }));
+    assert(program.statements.length == 1);
+    auto functionDeclaration = program.statements[0];
+    assert(functionDeclaration.kind == Statement.Kind.functionDecl);
+    assert(functionDeclaration.parameters == ["value"]);
+    assert(functionDeclaration.parameterTypes == ["integer"]);
+    assert(functionDeclaration.returnType == "integer");
+    assert(functionDeclaration.body[0].kind == Statement.Kind.if_);
+}
+
+unittest
+{
+    import dua.lexer : lex;
+    import std.exception : assertThrown;
+
+    assertThrown!Exception(parse(lex("auto missing = ;")));
+}
+
 private struct Parser
 {
     Token[] tokens;
