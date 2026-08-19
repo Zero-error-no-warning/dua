@@ -1,6 +1,7 @@
 module dua;
 
 public import dua.runtime;
+public import dua.execution;
 public import dua.value;
 
 /// Namespaced facade for embedding APIs.

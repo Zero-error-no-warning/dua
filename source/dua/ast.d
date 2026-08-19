@@ -43,7 +43,16 @@ final class SwitchCase
     }
 }
 
-final class Statement
+/// Common source information shared by every syntax node.  New expression
+/// forms can derive from this node contract without adding more generic
+/// location fields to each AST container.
+abstract class AstNode
+{
+    size_t line;
+    size_t column;
+}
+
+final class Statement : AstNode
 {
     enum Kind
     {
@@ -70,8 +79,6 @@ final class Statement
     }
 
     Kind kind;
-    size_t line;
-    size_t column;
     string name;
     string declaredType;
     string returnType;
@@ -101,7 +108,7 @@ final class Statement
     }
 }
 
-final class Expression
+final class Expression : AstNode
 {
     enum Kind
     {
@@ -119,8 +126,6 @@ final class Expression
     }
 
     Kind kind;
-    size_t line;
-    size_t column;
     Value literalValue;
     string identifier;
     string operatorSymbol;

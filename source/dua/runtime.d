@@ -1,8 +1,10 @@
 module dua.runtime;
 
 import dua.ast;
+public import dua.execution;
 import dua.lexer : lex;
 import dua.parser : parse;
+import dua.stdlib.json : encodeJson;
 import dua.value;
 import core.thread : Fiber;
 import std.algorithm : canFind, map;
@@ -191,45 +193,6 @@ private final class ScriptThrownException : Exception
         super(message);
         thrownValue = value;
     }
-}
-
-enum RunErrorKind
-{
-    none,
-    runtime,
-    stepLimit,
-    callDepthLimit
-}
-
-struct ExecutionLimits
-{
-    /// Zero means unlimited.
-    size_t maxSteps;
-    /// Zero means unlimited.
-    size_t maxCallDepth;
-}
-
-struct RunOptions
-{
-    ExecutionLimits limits;
-    bool typeCheck;
-}
-
-struct RunOutcome
-{
-    bool ok;
-    Value value;
-    string errorMessage;
-    string[] stackTrace;
-    RunErrorKind errorKind;
-    size_t stepsExecuted;
-}
-
-struct CheckDiagnostic
-{
-    size_t line;
-    size_t column;
-    string message;
 }
 
 private struct StaticFunctionInfo
@@ -1289,11 +1252,10 @@ final class ScriptEngine
             outcome.ok = false;
             outcome.errorMessage = error.msg;
             outcome.stackTrace = lastErrorStack.length > 0 ? lastErrorStack.dup : callStack.dup;
-            outcome.errorKind = canFind(error.msg, "[limit:steps]")
+            outcome.errorKind = cast(StepLimitException) error !is null
                 ? RunErrorKind.stepLimit
-                : canFind(error.msg, "[limit:call-depth]")
-                    ? RunErrorKind.callDepthLimit
-                    : RunErrorKind.runtime;
+                : cast(CallDepthLimitException) error !is null
+                    ? RunErrorKind.callDepthLimit : RunErrorKind.runtime;
             outcome.stepsExecuted = executedSteps;
             return outcome;
         }
@@ -1321,8 +1283,8 @@ final class ScriptEngine
     {
         ++executedSteps;
         auto maximum = currentRunOptions.limits.maxSteps;
-        enforce(maximum == 0 || executedSteps <= maximum,
-            format("[limit:steps] Execution step limit exceeded (%s)", maximum));
+        if (maximum != 0 && executedSteps > maximum)
+            throw new StepLimitException(maximum);
     }
 
     private void registerTypeAlias(Statement statement)
@@ -1554,8 +1516,7 @@ final class ScriptEngine
                     }
                     catch (Exception error)
                     {
-                        if (canFind(error.msg, "[limit:steps]")
-                            || canFind(error.msg, "[limit:call-depth]"))
+                        if (cast(ExecutionLimitException) error !is null)
                         {
                             throw error;
                         }
@@ -1832,6 +1793,10 @@ final class ScriptEngine
         {
             throw error;
         }
+        catch (ExecutionLimitException error)
+        {
+            throw error;
+        }
         catch (Exception error)
         {
             auto location = statementLocation(statement);
@@ -1926,6 +1891,10 @@ final class ScriptEngine
             enforce(false, "Invalid assignment target");
         }
         catch (ScriptThrownException error)
+        {
+            throw error;
+        }
+        catch (ExecutionLimitException error)
         {
             throw error;
         }
@@ -2153,6 +2122,10 @@ final class ScriptEngine
             }
         }
         catch (ScriptThrownException error)
+        {
+            throw error;
+        }
+        catch (ExecutionLimitException error)
         {
             throw error;
         }
@@ -2410,8 +2383,8 @@ final class ScriptEngine
     {
         enforce(callable.kind == ValueKind.function_, "Only functions are callable");
         auto maximumDepth = currentRunOptions.limits.maxCallDepth;
-        enforce(maximumDepth == 0 || callStack.length < maximumDepth,
-            format("[limit:call-depth] Function call depth limit exceeded (%s)", maximumDepth));
+        if (maximumDepth != 0 && callStack.length >= maximumDepth)
+            throw new CallDepthLimitException(maximumDepth);
         auto name = callable.functionValue.debugName;
         callStack ~= name;
         scope (exit)
@@ -3383,7 +3356,7 @@ final class ScriptEngine
         Value[string] jsonLib;
         jsonLib["encode"] = Value.fromFunction(new NativeCallable("json.encode", (scope const(Value)[] args) {
             enforce(args.length == 1, "json.encode(value) expects one argument");
-            return Value.from(args[0].toScriptLiteral());
+            return Value.from(encodeJson(args[0]));
         }));
         globals.define("json", Value.from(jsonLib));
         globals.define("_ENV", Value.fromFunction(new NativeCallable("_ENV", (scope const(Value)[] args) {
@@ -3737,6 +3710,35 @@ unittest
     assert(!result.ok);
     assert(result.errorKind == RunErrorKind.callDepthLimit);
     assert(result.stackTrace.length > 0);
+}
+
+unittest
+{
+    // Limit-like user diagnostics must not be mistaken for interpreter limits.
+    Value fakeLimit(scope const(Value)[] args)
+    {
+        throw new Exception("[limit:steps] application message");
+    }
+    auto engine = new ScriptEngine();
+    engine.bind("fakeLimit", Value.fromFunction(new NativeCallable("fakeLimit", &fakeLimit)));
+    auto result = engine.runSafe("return fakeLimit();");
+    assert(!result.ok);
+    assert(result.errorKind == RunErrorKind.runtime);
+}
+
+unittest
+{
+    import std.json : parseJSON;
+
+    auto engine = new ScriptEngine();
+    Value[string] payload;
+    payload["text"] = Value.from("line\n\"quoted\"");
+    payload["ok"] = Value.from(true);
+    engine.bind("payload", Value.from(payload));
+    auto encoded = engine.run("return json.encode(payload);");
+    auto decoded = parseJSON(encoded.toHostString());
+    assert(decoded["text"].str == "line\n\"quoted\"");
+    assert(decoded["ok"].boolean);
 }
 
 unittest
