@@ -189,13 +189,11 @@ final class CallExpression : Expression
 {
     Expression callee;
     Expression[] arguments;
-    bool[] argumentSpreads;
-    this(Expression callee, Expression[] arguments, bool[] argumentSpreads = null)
+    this(Expression callee, Expression[] arguments)
     {
         super(Kind.call);
         this.callee = callee;
         this.arguments = arguments;
-        this.argumentSpreads = argumentSpreads;
     }
 }
 

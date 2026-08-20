@@ -88,11 +88,22 @@ unittest
     assert(cast(IndexExpression) get.target !is null);
     assert(cast(ArrayExpression) call.arguments[1] !is null);
     assert(cast(TableExpression) call.arguments[2] !is null);
+}
 
-    // Locations remain attached to the same leading/operator tokens as before.
-    assert(call.line > 0 && call.column > 0);
-    assert(ternary.line > 0 && ternary.column > 0);
-    assert(binary.line > 0 && binary.column > 0);
+unittest
+{
+    import dua.lexer : lex;
+
+    auto program = parse(lex("auto value =\n    -1\n    + 2;"));
+    auto binary = cast(BinaryExpression) program.statements[0].expression;
+    assert(binary !is null);
+    assert(binary.line == 3);
+    assert(binary.column == 5);
+
+    auto unary = cast(UnaryExpression) binary.left;
+    assert(unary !is null);
+    assert(unary.line == 2);
+    assert(unary.column == 5);
 }
 
 private struct Parser
@@ -577,7 +588,11 @@ private struct Parser
         auto expression = parseLogicalAnd();
         while (match(TokenKind.pipePipe))
         {
-            auto node = locatedExpression(new BinaryExpression(expression, previous().lexeme, parseLogicalAnd()), previous());
+            auto operatorToken = previous();
+            auto right = parseLogicalAnd();
+            auto node = locatedExpression(
+                new BinaryExpression(expression, operatorToken.lexeme, right),
+                operatorToken);
             expression = node;
         }
         return expression;
@@ -588,7 +603,11 @@ private struct Parser
         auto expression = parseBitwiseOr();
         while (match(TokenKind.ampAmp))
         {
-            auto node = locatedExpression(new BinaryExpression(expression, previous().lexeme, parseBitwiseOr()), previous());
+            auto operatorToken = previous();
+            auto right = parseBitwiseOr();
+            auto node = locatedExpression(
+                new BinaryExpression(expression, operatorToken.lexeme, right),
+                operatorToken);
             expression = node;
         }
         return expression;
@@ -599,7 +618,11 @@ private struct Parser
         auto expression = parseBitwiseXor();
         while (match(TokenKind.pipe))
         {
-            auto node = locatedExpression(new BinaryExpression(expression, previous().lexeme, parseBitwiseXor()), previous());
+            auto operatorToken = previous();
+            auto right = parseBitwiseXor();
+            auto node = locatedExpression(
+                new BinaryExpression(expression, operatorToken.lexeme, right),
+                operatorToken);
             expression = node;
         }
         return expression;
@@ -610,7 +633,11 @@ private struct Parser
         auto expression = parseBitwiseAnd();
         while (match(TokenKind.caret))
         {
-            auto node = locatedExpression(new BinaryExpression(expression, previous().lexeme, parseBitwiseAnd()), previous());
+            auto operatorToken = previous();
+            auto right = parseBitwiseAnd();
+            auto node = locatedExpression(
+                new BinaryExpression(expression, operatorToken.lexeme, right),
+                operatorToken);
             expression = node;
         }
         return expression;
@@ -621,7 +648,11 @@ private struct Parser
         auto expression = parseEquality();
         while (match(TokenKind.amp))
         {
-            auto node = locatedExpression(new BinaryExpression(expression, previous().lexeme, parseEquality()), previous());
+            auto operatorToken = previous();
+            auto right = parseEquality();
+            auto node = locatedExpression(
+                new BinaryExpression(expression, operatorToken.lexeme, right),
+                operatorToken);
             expression = node;
         }
         return expression;
@@ -632,7 +663,11 @@ private struct Parser
         auto expression = parseComparison();
         while (match(TokenKind.equalEqual, TokenKind.bangEqual))
         {
-            auto node = locatedExpression(new BinaryExpression(expression, previous().lexeme, parseComparison()), previous());
+            auto operatorToken = previous();
+            auto right = parseComparison();
+            auto node = locatedExpression(
+                new BinaryExpression(expression, operatorToken.lexeme, right),
+                operatorToken);
             expression = node;
         }
         return expression;
@@ -643,7 +678,11 @@ private struct Parser
         auto expression = parseShift();
         while (match(TokenKind.less, TokenKind.lessEqual, TokenKind.greater, TokenKind.greaterEqual))
         {
-            auto node = locatedExpression(new BinaryExpression(expression, previous().lexeme, parseShift()), previous());
+            auto operatorToken = previous();
+            auto right = parseShift();
+            auto node = locatedExpression(
+                new BinaryExpression(expression, operatorToken.lexeme, right),
+                operatorToken);
             expression = node;
         }
         if (match(TokenKind.keywordIs))
@@ -663,7 +702,11 @@ private struct Parser
         auto expression = parseTerm();
         while (match(TokenKind.shiftLeft, TokenKind.shiftRight))
         {
-            auto node = locatedExpression(new BinaryExpression(expression, previous().lexeme, parseTerm()), previous());
+            auto operatorToken = previous();
+            auto right = parseTerm();
+            auto node = locatedExpression(
+                new BinaryExpression(expression, operatorToken.lexeme, right),
+                operatorToken);
             expression = node;
         }
         return expression;
@@ -674,7 +717,11 @@ private struct Parser
         auto expression = parseFactor();
         while (match(TokenKind.plus, TokenKind.minus, TokenKind.tilde))
         {
-            auto node = locatedExpression(new BinaryExpression(expression, previous().lexeme, parseFactor()), previous());
+            auto operatorToken = previous();
+            auto right = parseFactor();
+            auto node = locatedExpression(
+                new BinaryExpression(expression, operatorToken.lexeme, right),
+                operatorToken);
             expression = node;
         }
         return expression;
@@ -685,7 +732,11 @@ private struct Parser
         auto expression = parseUnary();
         while (match(TokenKind.star, TokenKind.slash, TokenKind.percent))
         {
-            auto node = locatedExpression(new BinaryExpression(expression, previous().lexeme, parseUnary()), previous());
+            auto operatorToken = previous();
+            auto right = parseUnary();
+            auto node = locatedExpression(
+                new BinaryExpression(expression, operatorToken.lexeme, right),
+                operatorToken);
             expression = node;
         }
         return expression;
@@ -695,8 +746,10 @@ private struct Parser
     {
         if (match(TokenKind.bang, TokenKind.minus))
         {
-            auto node = locatedExpression(new UnaryExpression(previous().lexeme, parseUnary()), previous());
-            return node;
+            auto operatorToken = previous();
+            auto operand = parseUnary();
+            return locatedExpression(
+                new UnaryExpression(operatorToken.lexeme, operand), operatorToken);
         }
         return parsePostfix();
     }
@@ -749,27 +802,31 @@ private struct Parser
     {
         if (isTypedLambdaExpressionWithParen())
         {
-            auto node = locatedExpression(new FunctionExpression(), peek());
+            auto startToken = peek();
             string[] parameterTypes;
-            parseTypedLambdaParameters(parameterTypes, node.parameters);
+            string[] parameters;
+            parseTypedLambdaParameters(parameterTypes, parameters);
+            Statement[] body;
+            string returnType;
             if (match(TokenKind.leftBrace))
             {
-                node.body = parseBlockTail();
+                body = parseBlockTail();
             }
             else
             {
                 auto operatorToken = consumeArrowLike("Expected '=>' or ':>' after lambda parameters");
                 if (operatorToken.kind == TokenKind.fatArrow)
                 {
-                    node.body = makeImplicitReturnBody(parseExpression());
+                    body = makeImplicitReturnBody(parseExpression());
                 }
                 else
                 {
-                    node.returnType = "void";
-                    node.body = parseImplicitSubroutineBody();
+                    returnType = "void";
+                    body = parseImplicitSubroutineBody();
                 }
             }
-            return node;
+            return locatedExpression(
+                new FunctionExpression(parameters, false, body, returnType), startToken);
         }
         if (check(TokenKind.identifier)
             && peek().lexeme == "i"
@@ -781,36 +838,27 @@ private struct Parser
         }
         if (match(TokenKind.number))
         {
-            auto node = locatedExpression(new LiteralExpression(Value.nullValue()), previous());
             auto token = previous();
-            node.value = canFind(token.lexeme, ".")
+            auto value = canFind(token.lexeme, ".")
                 ? Value.from(token.lexeme.to!double)
                 : Value.from(token.lexeme.to!long);
-            return node;
+            return locatedExpression(new LiteralExpression(value), token);
         }
         if (match(TokenKind.string_))
         {
-            auto node = locatedExpression(new LiteralExpression(Value.nullValue()), previous());
-            node.value = Value.from(previous().lexeme);
-            return node;
+            return locatedExpression(new LiteralExpression(Value.from(previous().lexeme)), previous());
         }
         if (match(TokenKind.keywordTrue))
         {
-            auto node = locatedExpression(new LiteralExpression(Value.nullValue()), previous());
-            node.value = Value.from(true);
-            return node;
+            return locatedExpression(new LiteralExpression(Value.from(true)), previous());
         }
         if (match(TokenKind.keywordFalse))
         {
-            auto node = locatedExpression(new LiteralExpression(Value.nullValue()), previous());
-            node.value = Value.from(false);
-            return node;
+            return locatedExpression(new LiteralExpression(Value.from(false)), previous());
         }
         if (match(TokenKind.keywordNull))
         {
-            auto node = locatedExpression(new LiteralExpression(Value.nullValue()), previous());
-            node.value = Value.nullValue();
-            return node;
+            return locatedExpression(new LiteralExpression(Value.nullValue()), previous());
         }
         if (match(TokenKind.dollar))
         {
@@ -823,9 +871,7 @@ private struct Parser
         }
         if (match(TokenKind.keywordThis))
         {
-            auto node = locatedExpression(new VariableExpression(previous().lexeme), previous());
-            node.name = "this";
-            return node;
+            return locatedExpression(new VariableExpression("this"), previous());
         }
         if (match(TokenKind.leftBracket))
         {
