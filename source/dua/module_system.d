@@ -10,6 +10,7 @@ module dua.module_system;
 
 import dua.evaluator : Environment;
 import dua.execution;
+import dua.binding : NativeCallable;
 import dua.value;
 import std.algorithm : map;
 import std.array : array;
