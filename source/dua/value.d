@@ -175,6 +175,10 @@ enum ValueKind
 private final class TableStorage
 {
     Value[string] entries;
+    // Coroutine identity belongs to the table allocation, not its script-visible
+    // key space.  The flag keeps the first valid id distinct from ordinary tables.
+    size_t coroutineId;
+    bool hasCoroutineId;
     Value delegate() copier;
     // Keeps the concrete reflected receiver alive without exposing its type in
     // Value.  Conversion performs a checked cast to ReflectedStructStorage!T,
@@ -334,6 +338,21 @@ struct Value
         if (tableStorage is null) tableStorage = new TableStorage();
         tableStorage.propertyGetters = getters.dup;
         tableStorage.propertySetters = setters.dup;
+    }
+
+    package(dua) void setCoroutineId(size_t id)
+    {
+        if (tableStorage is null) tableStorage = new TableStorage();
+        tableStorage.coroutineId = id;
+        tableStorage.hasCoroutineId = true;
+    }
+
+    package(dua) bool getCoroutineId(out size_t id) const
+    {
+        if (tableStorage is null || !tableStorage.hasCoroutineId)
+            return false;
+        id = tableStorage.coroutineId;
+        return true;
     }
 
     package(dua) void setTypeChain(Value[] chain)
