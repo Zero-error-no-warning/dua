@@ -108,7 +108,7 @@ final class Statement : AstNode
     }
 }
 
-final class Expression : AstNode
+abstract class Expression : AstNode
 {
     enum Kind
     {
@@ -125,24 +125,146 @@ final class Expression : AstNode
         index
     }
 
-    Kind kind;
-    Value literalValue;
-    string identifier;
+    immutable Kind kind;
+
+    protected this(Kind kind)
+    {
+        this.kind = kind;
+    }
+}
+
+final class LiteralExpression : Expression
+{
+    Value value;
+    this(Value value) { super(Kind.literal); this.value = value; }
+}
+
+final class VariableExpression : Expression
+{
+    string name;
+    this(string name) { super(Kind.variable); this.name = name; }
+}
+
+final class UnaryExpression : Expression
+{
     string operatorSymbol;
-    /// Declared result type for function expressions. Empty means inferred/dynamic.
-    string returnType;
+    Expression operand;
+    this(string operatorSymbol, Expression operand)
+    {
+        super(Kind.unary);
+        this.operatorSymbol = operatorSymbol;
+        this.operand = operand;
+    }
+}
+
+final class BinaryExpression : Expression
+{
+    string operatorSymbol;
     Expression left;
-    Expression middle;
     Expression right;
+    this(Expression left, string operatorSymbol, Expression right)
+    {
+        super(Kind.binary);
+        this.left = left;
+        this.operatorSymbol = operatorSymbol;
+        this.right = right;
+    }
+}
+
+final class TernaryExpression : Expression
+{
+    Expression condition;
+    Expression whenTrue;
+    Expression whenFalse;
+    this(Expression condition, Expression whenTrue, Expression whenFalse)
+    {
+        super(Kind.ternary);
+        this.condition = condition;
+        this.whenTrue = whenTrue;
+        this.whenFalse = whenFalse;
+    }
+}
+
+final class CallExpression : Expression
+{
+    Expression callee;
     Expression[] arguments;
-    bool[] argumentSpreads;
+    this(Expression callee, Expression[] arguments)
+    {
+        super(Kind.call);
+        this.callee = callee;
+        this.arguments = arguments;
+    }
+}
+
+final class ArrayExpression : Expression
+{
+    Expression[] elements;
+    bool[] elementSpreads;
+    this(Expression[] elements, bool[] elementSpreads = null)
+    {
+        super(Kind.array);
+        this.elements = elements;
+        this.elementSpreads = elementSpreads;
+    }
+}
+
+final class TableExpression : Expression
+{
     TableEntry[] entries;
+    this(TableEntry[] entries) { super(Kind.table); this.entries = entries; }
+}
+
+final class FunctionExpression : Expression
+{
     string[] parameters;
     bool variadic;
     Statement[] body;
-
-    this(Kind kind)
+    string returnType;
+    this(string[] parameters = null, bool variadic = false,
+        Statement[] body = null, string returnType = "")
     {
-        this.kind = kind;
+        super(Kind.function_);
+        this.parameters = parameters;
+        this.variadic = variadic;
+        this.body = body;
+        this.returnType = returnType;
+    }
+}
+
+final class GetExpression : Expression
+{
+    Expression target;
+    string memberName;
+    this(Expression target, string memberName)
+    {
+        super(Kind.get);
+        this.target = target;
+        this.memberName = memberName;
+    }
+}
+
+final class IndexExpression : Expression
+{
+    Expression target;
+    Expression index;
+    Expression sliceStart;
+    Expression sliceEnd;
+    bool isSlice;
+
+    this(Expression target, Expression index)
+    {
+        super(Kind.index);
+        this.target = target;
+        this.index = index;
+    }
+
+    this(Expression target, Expression sliceStart, Expression sliceEnd)
+    {
+        super(Kind.index);
+        this.target = target;
+        this.sliceStart = sliceStart;
+        this.sliceEnd = sliceEnd;
+        isSlice = true;
     }
 }
