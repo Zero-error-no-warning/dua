@@ -508,8 +508,7 @@ mixin template EvaluatorImplementation()
                             return;
                         }
                     }
-                    auto setterKey = internalFieldSetterPrefix ~ target.identifier;
-                    if (auto setter = setterKey in container.tableValue)
+                    if (auto setter = container.propertySetter(target.identifier))
                     {
                         invokeFunctionValue(*setter, [value]);
                         return;
@@ -666,9 +665,7 @@ mixin template EvaluatorImplementation()
                                 "Table spread requires a table value");
                             foreach (spreadKey, spreadValue; spread.tableValue)
                             {
-                                if (spreadKey == "__meta"
-                                    || startsWith(spreadKey, internalFieldGetterPrefix)
-                                    || startsWith(spreadKey, internalFieldSetterPrefix))
+                                if (spreadKey == "__meta")
                                 {
                                     continue;
                                 }
@@ -696,8 +693,7 @@ mixin template EvaluatorImplementation()
                     auto container = evaluate(expression.left, environment);
                     enforce(container.isFieldAggregate,
                         "Property access currently supports tables/reflected structs/classes");
-                    auto getterKey = internalFieldGetterPrefix ~ expression.identifier;
-                    if (auto getter = getterKey in container.tableValue)
+                    if (auto getter = container.propertyGetter(expression.identifier))
                     {
                         auto refreshed = invokeFunctionValueWithThis(*getter, [], container);
                         auto property = expression.identifier in container.tableValue;

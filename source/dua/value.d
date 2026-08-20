@@ -170,8 +170,6 @@ enum ValueKind
     native
 }
 
-enum string internalFieldGetterPrefix = "__dua_get_";
-enum string internalFieldSetterPrefix = "__dua_set_";
 /// Reference storage makes table identity explicit. Copies of Value (including
 /// module exports already handed to an importer) therefore observe additions.
 private final class TableStorage
@@ -185,6 +183,8 @@ private final class TableStorage
     Value[] typeChain;
     Value[] aliasThisTargets;
     Value[] aliasThisChain;
+    Value[string] propertyGetters;
+    Value[string] propertySetters;
 }
 
 struct Value
@@ -291,6 +291,9 @@ struct Value
         result.setTypeChain(cast(Value[]) typeChain);
         result.setAliasThisMetadata(cast(Value[]) aliasThisTargets,
             cast(Value[]) aliasThisChain);
+        if (tableStorage !is null)
+            result.setPropertyMetadata(cast(Value[string]) tableStorage.propertyGetters,
+                cast(Value[string]) tableStorage.propertySetters);
         return result;
     }
 
@@ -314,6 +317,23 @@ struct Value
         if (tableStorage is null) tableStorage = new TableStorage();
         tableStorage.aliasThisTargets = targets.dup;
         tableStorage.aliasThisChain = chain.dup;
+    }
+
+    package(dua) Value* propertyGetter(string name)
+    {
+        return tableStorage is null ? null : name in tableStorage.propertyGetters;
+    }
+
+    package(dua) Value* propertySetter(string name)
+    {
+        return tableStorage is null ? null : name in tableStorage.propertySetters;
+    }
+
+    package(dua) void setPropertyMetadata(Value[string] getters, Value[string] setters)
+    {
+        if (tableStorage is null) tableStorage = new TableStorage();
+        tableStorage.propertyGetters = getters.dup;
+        tableStorage.propertySetters = setters.dup;
     }
 
     package(dua) void setTypeChain(Value[] chain)
@@ -409,6 +429,8 @@ struct Value
         if (isAggregateType!T)
     {
         Value[string] converted;
+        Value[string] propertyGetters;
+        Value[string] propertySetters;
         // A member delegate contains a pointer to its struct receiver.  Keep a
         // reflected struct copy on the GC heap so delegates remain valid when
         // reflection was triggered by a temporary return value.
@@ -460,11 +482,11 @@ struct Value
                         {
                             if (overload.acceptsArity(0))
                             {
-                                converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(overload);
+                                propertyGetters[memberName] = Value.fromFunction(overload);
                             }
                             if (overload.acceptsArity(1))
                             {
-                                converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(overload);
+                                propertySetters[memberName] = Value.fromFunction(overload);
                             }
                         }
                     }
@@ -535,7 +557,7 @@ struct Value
                     converted[memberName] = convertToValue(mixin("value." ~ memberName));
                 static if (is(T == class) || is(T == struct))
                 {
-                    converted[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
+                    propertyGetters[memberName] = Value.fromFunction(
                         new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".getter", 0, (Value[] args) {
                         auto actualTarget = reflectedTarget;
                         static if (is(T == struct))
@@ -546,7 +568,7 @@ struct Value
                     static if (__traits(compiles, mixin("reflectedTarget.value." ~ memberName) = mixin("reflectedTarget.value." ~ memberName))
                         || __traits(compiles, mixin("value." ~ memberName) = mixin("value." ~ memberName)))
                     {
-                        converted[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
+                        propertySetters[memberName] = Value.fromFunction(
                             new ReflectedCallable(T.stringof ~ "." ~ memberName ~ ".setter", 1, (Value[] args) {
                             auto actualTarget = reflectedTarget;
                             static if (is(T == struct))
@@ -589,6 +611,7 @@ struct Value
                     aliasTargets, aliasChain, reflectedTarget);
         }
         auto result = Value.from(converted);
+        result.setPropertyMetadata(propertyGetters, propertySetters);
         static if (is(T == class) || is(T == struct))
             result.setTypeChain(typeChain);
         static if (__traits(getAliasThis, T).length && !isInstanceOf!(Tuple, T))
@@ -1802,8 +1825,7 @@ unittest
     assert(mod.maximumArity() == 1);
     assert(mod.invoke([]).toInt() == 7);
     assert(mod.invoke([Value.from(4)]).toInt() == 5);
-    assert(reflected.tableValue[internalFieldGetterPrefix ~ "mod"]
-        .functionValue.invoke([]).toInt() == 7);
+    assert(reflected.propertyGetter("mod").functionValue.invoke([]).toInt() == 7);
 
     auto combine = reflected.tableValue["combine"].functionValue;
     assert(combine.minimumArity() == 1);
@@ -1999,7 +2021,7 @@ unittest
     assert(roundTrip.items == [Item(1), Item(2)]);
     assert(roundTrip.hiddenValue() == 42);
 
-    reflected.tableValue[internalFieldSetterPrefix ~ "items"].functionValue.invoke(
+    reflected.propertySetter("items").functionValue.invoke(
         [Value.from([Value.fromStruct(["value": Value.from(9)])])]);
     assert(reflected.to!Container().items == [Item(9)]);
     assert(reflected.to!Container().hiddenValue() == 42);
@@ -2007,7 +2029,7 @@ unittest
     assert(reflected.to!Container().hiddenValue() == 88);
 
     auto copied = reflected.valueCopy();
-    reflected.tableValue[internalFieldSetterPrefix ~ "items"].functionValue.invoke(
+    reflected.propertySetter("items").functionValue.invoke(
         [Value.from([Value.fromStruct(["value": Value.from(10)])])]);
     assert(reflected.to!Container().items == [Item(10)]);
     assert(copied.to!Container().items == [Item(9)]);
@@ -2065,7 +2087,7 @@ unittest
     assert(host.invoke([wrapper]).toInt() == 7);
 
     // Alias targets are evaluated lazily instead of retaining a stale snapshot.
-    angle.tableValue[internalFieldSetterPrefix ~ "value"].functionValue.invoke([Value.from(8.0)]);
+    angle.propertySetter("value").functionValue.invoke([Value.from(8.0)]);
     assert(angle.to!double() == 8.0);
 }
 
