@@ -1,6 +1,7 @@
 module dua.runtime;
 
 import dua.ast;
+import dua.coroutine;
 import dua.evaluator;
 public import dua.execution;
 import dua.lexer : lex;
@@ -9,7 +10,6 @@ import dua.parser : parse;
 import dua.stdlib.json : encodeJson;
 import dua.typecheck : checkSource;
 import dua.value;
-import core.thread : Fiber;
 import std.algorithm : canFind, map;
 import std.array : array;
 import std.conv : to;
@@ -429,24 +429,9 @@ final class ScriptCallable : CallableValue
 
 final class ScriptEngine
 {
-    private final class CoroutineState
-    {
-        Value entryFunction;
-        Fiber fiber;
-        Value[] pendingArgs;
-        Value[] yieldedValues;
-        Value[] returnValues;
-        bool started;
-        bool dead;
-        bool failed;
-        string errorMessage;
-    }
-
     private Environment globals;
     mixin ModuleImplementation;
-    private size_t nextCoroutineId = 1;
-    private CoroutineState[size_t] coroutines;
-    private CoroutineState activeCoroutine;
+    mixin CoroutineImplementation;
     private EvaluatorContext evaluatorContext;
     private ModuleHandle globalModule_;
 
@@ -1047,113 +1032,6 @@ final class ScriptEngine
 
     mixin EvaluatorImplementation;
 
-    private Value createCoroutine(Value functionValue)
-    {
-        enforce(functionValue.kind == ValueKind.function_, "coroutine.create(callback) expects function");
-        auto state = new CoroutineState();
-        state.entryFunction = functionValue;
-
-        state.fiber = new Fiber({
-            activeCoroutine = state;
-            scope (exit) activeCoroutine = null;
-            try
-            {
-                auto result = invokeFunctionValue(state.entryFunction, state.pendingArgs.dup);
-                state.returnValues = [result];
-            }
-            catch (Exception error)
-            {
-                state.failed = true;
-                state.errorMessage = error.msg;
-            }
-            state.dead = true;
-        }, 1024 * 1024);
-
-        auto id = nextCoroutineId++;
-        coroutines[id] = state;
-
-        Value[string] handle;
-        handle["__coid"] = Value.from(cast(long) id);
-        return Value.from(handle);
-    }
-
-    private CoroutineState requireCoroutineState(Value handle)
-    {
-        enforce(handle.kind == ValueKind.table, "Coroutine handle must be a table");
-        auto idValue = "__coid" in handle.tableValue;
-        enforce(idValue !is null, "Invalid coroutine handle");
-        auto id = cast(size_t) idValue.toInt();
-        auto state = id in coroutines;
-        enforce(state !is null, "Unknown coroutine handle");
-        return *state;
-    }
-
-    private Value resumeCoroutine(Value handle, Value[] args)
-    {
-        auto state = requireCoroutineState(handle);
-        if (state.dead)
-        {
-            auto message = state.failed && state.errorMessage.length > 0
-                ? state.errorMessage
-                : "cannot resume dead coroutine";
-            return Value.from([Value.from(false), Value.from(message)]);
-        }
-
-        state.pendingArgs = args.dup;
-        state.yieldedValues.length = 0;
-        state.started = true;
-        state.fiber.call();
-
-        if (state.failed)
-        {
-            state.dead = true;
-            return Value.from([Value.from(false), Value.from(state.errorMessage)]);
-        }
-
-        if (state.dead)
-        {
-            Value[] done = [Value.from(true)];
-            done ~= state.returnValues;
-            return Value.from(done);
-        }
-
-        Value[] yielded = [Value.from(true)];
-        yielded ~= state.yieldedValues;
-        return Value.from(yielded);
-    }
-
-    private Value coroutineStatus(Value handle)
-    {
-        auto state = requireCoroutineState(handle);
-        if (state.dead)
-        {
-            return Value.from("dead");
-        }
-        if (!state.started)
-        {
-            return Value.from("suspended");
-        }
-        return Value.from(state.fiber.state == Fiber.State.HOLD ? "suspended" : "running");
-    }
-
-    private Value currentCoroutineHandle()
-    {
-        if (activeCoroutine is null)
-        {
-            return Value.nullValue();
-        }
-        foreach (id, state; coroutines)
-        {
-            if (state is activeCoroutine)
-            {
-                Value[string] handle;
-                handle["__coid"] = Value.from(cast(long) id);
-                return Value.from(handle);
-            }
-        }
-        return Value.nullValue();
-    }
-
     private void installStandardLibraries()
     {
         bindNative("error", (scope const(Value)[] args) {
@@ -1272,54 +1150,7 @@ final class ScriptEngine
             return filterValue(args);
         });
 
-        Value[string] coroutineLib;
-        coroutineLib["create"] = Value.fromFunction(new NativeCallable("coroutine.create", (scope const(Value)[] args) {
-            enforce(args.length == 1, "coroutine.create(callback) expects one argument");
-            return createCoroutine(cast(Value) args[0]);
-        }));
-        coroutineLib["resume"] = Value.fromFunction(new NativeCallable("coroutine.resume", (scope const(Value)[] args) {
-            enforce(args.length >= 1, "coroutine.resume(co, ...) expects at least one argument");
-            Value[] resumeArgs;
-            foreach (arg; args[1 .. $])
-            {
-                resumeArgs ~= cast(Value) arg;
-            }
-            return resumeCoroutine(cast(Value) args[0], resumeArgs);
-        }));
-        coroutineLib["status"] = Value.fromFunction(new NativeCallable("coroutine.status", (scope const(Value)[] args) {
-            enforce(args.length == 1, "coroutine.status(co) expects one argument");
-            return coroutineStatus(cast(Value) args[0]);
-        }));
-        coroutineLib["running"] = Value.fromFunction(new NativeCallable("coroutine.running", (scope const(Value)[] args) {
-            enforce(args.length == 0, "coroutine.running() takes no arguments");
-            return currentCoroutineHandle();
-        }));
-        coroutineLib["isyieldable"] = Value.fromFunction(new NativeCallable("coroutine.isyieldable", (scope const(Value)[] args) {
-            enforce(args.length == 0, "coroutine.isyieldable() takes no arguments");
-            return Value.from(activeCoroutine !is null);
-        }));
-        coroutineLib["wrap"] = Value.fromFunction(new NativeCallable("coroutine.wrap", (scope const(Value)[] args) {
-            enforce(args.length == 1, "coroutine.wrap(callback) expects one argument");
-            auto handle = createCoroutine(cast(Value) args[0]);
-            return Value.fromFunction(new NativeCallable("coroutine.wrapped", (scope const(Value)[] callArgs) {
-                Value[] resumeArgs;
-                foreach (arg; callArgs)
-                {
-                    resumeArgs ~= cast(Value) arg;
-                }
-                auto resumed = resumeCoroutine(handle, resumeArgs);
-                enforce(resumed.kind == ValueKind.array && resumed.arrayValue.length >= 1,
-                    "coroutine.wrap resume failed");
-                if (!resumed.arrayValue[0].truthy())
-                {
-                    enforce(false, resumed.arrayValue.length > 1
-                        ? resumed.arrayValue[1].toHostString()
-                        : "coroutine.wrap failure");
-                }
-                return resumed.arrayValue.length > 1 ? resumed.arrayValue[1] : Value.nullValue();
-            }));
-        }));
-        globals.define("coroutine", Value.from(coroutineLib));
+        installCoroutineLibrary();
 
         Value[string] stringLib;
         stringLib["len"] = Value.fromFunction(new NativeCallable("string.len", (scope const(Value)[] args) {
@@ -3060,6 +2891,27 @@ unittest
     });
 
     assert(result.toInt() == 18);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto co = coroutine.create(() {
+            error("coroutine failed");
+        });
+
+        auto ok1, message1 = coroutine.resume(co);
+        auto status = coroutine.status(co);
+        auto ok2, message2 = coroutine.resume(co);
+        return [ok1, message1, status, ok2, message2];
+    });
+
+    assert(!result.arrayValue[0].truthy());
+    assert(result.arrayValue[1].toHostString() == "coroutine failed");
+    assert(result.arrayValue[2].toHostString() == "dead");
+    assert(!result.arrayValue[3].truthy());
+    assert(result.arrayValue[4].toHostString() == "coroutine failed");
 }
 
 unittest
