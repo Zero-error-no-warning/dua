@@ -5,7 +5,7 @@ module dua.evaluator;
  *
  * `EvaluatorImplementation` is mixed into the owning runtime so evaluator code
  * can use the deliberately narrow set of runtime hooks (module loading, type
- * registration, coroutine state, and execution limits) without exposing the
+ * registration, coroutine yielding, and execution limits) without exposing the
  * ScriptEngine's private storage. Runtime orchestration depends on this module;
  * this module does not import `dua.runtime`.
  */
@@ -13,7 +13,6 @@ module dua.evaluator;
 import dua.ast;
 import dua.execution;
 import dua.value;
-import core.thread : Fiber;
 import std.algorithm : map;
 import std.array : array;
 import std.exception : enforce;
@@ -431,19 +430,16 @@ mixin template EvaluatorImplementation()
                     result.continued = true;
                     break;
                 case Statement.Kind.yield_:
-                    enforce(activeCoroutine !is null, "yield can only be used inside a running coroutine");
+                    Value[] yieldedValues;
                     if (statement.expressions.length == 0)
                     {
-                        activeCoroutine.yieldedValues = [Value.nullValue()];
+                        yieldedValues = [Value.nullValue()];
                     }
                     else
                     {
-                        activeCoroutine.yieldedValues = evaluateExpressionList(statement.expressions, environment, true);
+                        yieldedValues = evaluateExpressionList(statement.expressions, environment, true);
                     }
-                    Fiber.yield();
-                    result.lastValue = activeCoroutine.pendingArgs.length > 0
-                        ? activeCoroutine.pendingArgs[0]
-                        : Value.nullValue();
+                    result.lastValue = yieldFromScript(yieldedValues);
                     break;
             }
 
