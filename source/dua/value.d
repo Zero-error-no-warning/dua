@@ -172,9 +172,6 @@ enum ValueKind
 
 enum string internalFieldGetterPrefix = "__dua_get_";
 enum string internalFieldSetterPrefix = "__dua_set_";
-enum string internalAliasThisTargets = "__dua_alias_this_targets";
-enum string internalAliasThisChain = "__dua_alias_this_chain";
-
 /// Reference storage makes table identity explicit. Copies of Value (including
 /// module exports already handed to an importer) therefore observe additions.
 private final class TableStorage
@@ -185,6 +182,9 @@ private final class TableStorage
     // Value.  Conversion performs a checked cast to ReflectedStructStorage!T,
     // so reflection metadata such as type chains is never treated as identity.
     Object nativeOwner;
+    Value[] typeChain;
+    Value[] aliasThisTargets;
+    Value[] aliasThisChain;
 }
 
 struct Value
@@ -287,12 +287,39 @@ struct Value
             return tableStorage.copier();
         Value[string] copied;
         foreach (key, value; tableValue) copied[key] = value.valueCopy();
-        return Value.fromStruct(copied);
+        auto result = Value.fromStruct(copied);
+        result.setTypeChain(cast(Value[]) typeChain);
+        result.setAliasThisMetadata(cast(Value[]) aliasThisTargets,
+            cast(Value[]) aliasThisChain);
+        return result;
     }
 
-    void setTypeChain(Value[] chain)
+    package(dua) const(Value[]) typeChain() const
     {
-        tableValue["__typechain"] = Value.from(chain);
+        return tableStorage is null ? null : tableStorage.typeChain;
+    }
+
+    package(dua) const(Value[]) aliasThisTargets() const
+    {
+        return tableStorage is null ? null : tableStorage.aliasThisTargets;
+    }
+
+    package(dua) const(Value[]) aliasThisChain() const
+    {
+        return tableStorage is null ? null : tableStorage.aliasThisChain;
+    }
+
+    package(dua) void setAliasThisMetadata(Value[] targets, Value[] chain)
+    {
+        if (tableStorage is null) tableStorage = new TableStorage();
+        tableStorage.aliasThisTargets = targets.dup;
+        tableStorage.aliasThisChain = chain.dup;
+    }
+
+    package(dua) void setTypeChain(Value[] chain)
+    {
+        if (tableStorage is null) tableStorage = new TableStorage();
+        tableStorage.typeChain = chain.dup;
         if (kind == ValueKind.struct_ && tableStorage.copier !is null)
         {
             auto previous = tableStorage.copier;
@@ -546,8 +573,9 @@ struct Value
                 static foreach (Base; BaseClassesTuple!T){{
                     typeChain ~= Value.from(Base.stringof);
             }}
-            converted["__typechain"] = Value.from(typeChain);
         }
+        Value[] aliasTargets;
+        Value[] aliasChain;
         // Reflect alias-this targets last: the helper only fills missing slots,
         // so declarations on the outer aggregate always win.  It retains the
         // outer receiver and evaluates every alias-this hop when called.
@@ -555,12 +583,16 @@ struct Value
         {
             static if (is(T == struct))
                 addAliasThisReflection!(T, T, "root", AliasSeq!T)(converted,
-                    reflectedTarget.value, reflectedTarget);
+                    aliasTargets, aliasChain, reflectedTarget.value, reflectedTarget);
             else
                 addAliasThisReflection!(T, T, "root", AliasSeq!T)(converted,
-                    reflectedTarget);
+                    aliasTargets, aliasChain, reflectedTarget);
         }
         auto result = Value.from(converted);
+        static if (is(T == class) || is(T == struct))
+            result.setTypeChain(typeChain);
+        static if (__traits(getAliasThis, T).length && !isInstanceOf!(Tuple, T))
+            result.setAliasThisMetadata(aliasTargets, aliasChain);
         static if (is(T == struct))
         {
             result.kind = ValueKind.struct_;
@@ -704,7 +736,8 @@ struct Value
 }
 
 private void addAliasThisReflection(Root, Current, string expression, Seen...)(
-    ref Value[string] converted, auto ref Root root, Object lifetimeOwner = null)
+    ref Value[string] converted, ref Value[] aliasTargets, ref Value[] aliasChain,
+    auto ref Root root, Object lifetimeOwner = null)
 {
     // A string mixin is invisible to closure analysis.  Keep the receiver in a
     // normally referenced local so every escaping delegate captures it.
@@ -744,14 +777,8 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
                     enum actualExpression = "actualRoot" ~ nextExpression[4 .. $];
                     return convertToValue(mixin(actualExpression));
                 }, lifetimeOwner));
-            if (internalAliasThisTargets in converted)
-                converted[internalAliasThisTargets].arrayValue ~= aliasTarget;
-            else
-                converted[internalAliasThisTargets] = Value.from([aliasTarget]);
+            aliasTargets ~= aliasTarget;
 
-            Value[] aliasChain;
-            if (auto existing = internalAliasThisChain in converted)
-                aliasChain = existing.arrayValue.dup;
             void appendAliasType(string name)
             {
                 foreach (entry; aliasChain)
@@ -763,7 +790,6 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
             static if (is(Next == class))
                 static foreach (Base; BaseClassesTuple!Next)
                     appendAliasType(Base.stringof);
-            converted[internalAliasThisChain] = Value.from(aliasChain);
 
             static if (isAggregateType!Next)
             {
@@ -817,7 +843,7 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
                         nextExpression)(Root.stringof ~ ".opEquals", root, lifetimeOwner));
             }
             addAliasThisReflection!(Root, Next, nextExpression, Seen, Next)(converted,
-                root, lifetimeOwner);
+                aliasTargets, aliasChain, root, lifetimeOwner);
             }
         }
     }
@@ -1412,9 +1438,9 @@ private int conversionScore(T)(const(Value) value)
         }}
 
         int bestScore = directScore;
-        if (auto targets = internalAliasThisTargets in value.tableValue)
+        if (auto targets = value.aliasThisTargets)
         {
-            foreach (target; targets.arrayValue)
+            foreach (target; targets)
             {
                 auto resolved = cast(Value) target;
                 if (resolved.kind == ValueKind.function_ && resolved.functionValue.acceptsArity(0))
@@ -1437,9 +1463,9 @@ private int conversionScore(T)(const(Value) value)
 private int aliasThisConversionScore(T)(const(Value) value, int fallback = -1)
 {
     if (!value.isFieldAggregate) return fallback;
-    if (auto targets = internalAliasThisTargets in value.tableValue)
+    if (auto targets = value.aliasThisTargets)
     {
-        foreach (stored; targets.arrayValue)
+        foreach (stored; targets)
         {
             auto target = cast(Value) stored;
             if (target.kind == ValueKind.function_ && target.functionValue.acceptsArity(0))
@@ -1454,8 +1480,8 @@ private int aliasThisConversionScore(T)(const(Value) value, int fallback = -1)
 private bool convertAliasThisTarget(T)(const(Value) value, out T result)
 {
     if (!value.isFieldAggregate) return false;
-    if (auto targets = internalAliasThisTargets in value.tableValue)
-        foreach (stored; targets.arrayValue)
+    if (auto targets = value.aliasThisTargets)
+        foreach (stored; targets)
         {
             auto target = cast(Value) stored;
             if (target.kind == ValueKind.function_ && target.functionValue.acceptsArity(0))
@@ -2011,18 +2037,18 @@ unittest
 unittest
 {
     auto angle = Value.reflect(AliasAngleFixture(2.5));
-    assert(angle.tableValue["__typechain"].arrayValue.length == 1);
-    assert(angle.tableValue["__typechain"].arrayValue[0].toHostString() == "AliasAngleFixture");
-    assert(angle.tableValue[internalAliasThisChain].arrayValue[0].toHostString() == "double");
+    assert(angle.typeChain.length == 1);
+    assert(angle.typeChain[0].toHostString() == "AliasAngleFixture");
+    assert(angle.aliasThisChain[0].toHostString() == "double");
     assert(angle.to!double() == 2.5);
 
     auto wrapper = Value.reflect(AliasWrapperFixture(AliasAngleFixture(3.5)));
-    auto aliasChain = wrapper.tableValue[internalAliasThisChain].arrayValue;
+    auto aliasChain = wrapper.aliasThisChain;
     assert(aliasChain.length == 2);
     assert(aliasChain[0].toHostString() == "AliasAngleFixture");
     assert(aliasChain[1].toHostString() == "double");
     assert(wrapper.to!double() == 3.5);
-    assert(wrapper.valueCopy().tableValue[internalAliasThisChain].arrayValue.length == 2);
+    assert(wrapper.valueCopy().aliasThisChain.length == 2);
 
     auto aggregate = Value.reflect(AliasAggregateFixture(AliasAggregateTargetFixture(7)));
     assert(aggregate.to!AliasAggregateTargetFixture().amount == 7);
@@ -2031,7 +2057,7 @@ unittest
     assert(callable.to!double() == 4.5);
 
     auto classAlias = Value.reflect(AliasClassFixture(new AliasDerivedFixture()));
-    auto classChain = classAlias.tableValue[internalAliasThisChain].arrayValue;
+    auto classChain = classAlias.aliasThisChain;
     assert(classChain[0].toHostString() == "AliasDerivedFixture");
     assert(classChain[1].toHostString() == "AliasBaseFixture");
 
@@ -2082,7 +2108,7 @@ unittest
     assert(abs(left.toFloat() - (1.0 + PI / 4)) < tolerance);
     assert(abs(right.toFloat() - left.toFloat()) < tolerance);
 
-    auto chain = proxy.tableValue[internalAliasThisChain].arrayValue;
+    auto chain = proxy.aliasThisChain;
     assert(chain.length == 2);
     assert(chain[0].toHostString() == "AliasCaptureAngleFixture");
     assert(chain[1].toHostString() == "double");
