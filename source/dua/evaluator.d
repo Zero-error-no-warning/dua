@@ -666,9 +666,7 @@ mixin template EvaluatorImplementation()
                                 "Table spread requires a table value");
                             foreach (spreadKey, spreadValue; spread.tableValue)
                             {
-                                if (spreadKey == "__meta" || spreadKey == "__typechain"
-                                    || spreadKey == internalAliasThisChain
-                                    || spreadKey == internalAliasThisTargets
+                                if (spreadKey == "__meta"
                                     || startsWith(spreadKey, internalFieldGetterPrefix)
                                     || startsWith(spreadKey, internalFieldSetterPrefix))
                                 {
@@ -1147,16 +1145,8 @@ mixin template EvaluatorImplementation()
         Value[] chain;
         if (value.isFieldAggregate)
         {
-            if (auto reflected = "__typechain" in value.tableValue)
-            {
-                if (reflected.kind == ValueKind.array)
-                {
-                    foreach (name; reflected.arrayValue)
-                    {
-                        chain ~= Value.from(name.toHostString());
-                    }
-                }
-            }
+            foreach (name; value.typeChain)
+                chain ~= Value.from(name.toHostString());
         }
         return chain;
     }
@@ -1166,10 +1156,8 @@ mixin template EvaluatorImplementation()
         auto chain = extractTypeChain(value);
         Value[] aliasThisChain;
         if (value.isFieldAggregate)
-            if (auto reflected = internalAliasThisChain in value.tableValue)
-                if (reflected.kind == ValueKind.array)
-                    foreach (name; reflected.arrayValue)
-                        aliasThisChain ~= Value.from(name.toHostString());
+            foreach (name; value.aliasThisChain)
+                aliasThisChain ~= Value.from(name.toHostString());
         Value[string] info;
         info["kind"] = Value.from(value.kind.to!string);
         info["chain"] = Value.from(chain.dup);
@@ -1201,7 +1189,7 @@ mixin template EvaluatorImplementation()
 
         if (args.length == 2)
         {
-            table.tableValue.remove("__typechain");
+            table.setTypeChain([]);
             return table;
         }
 
@@ -1210,7 +1198,7 @@ mixin template EvaluatorImplementation()
         {
             typeChain ~= Value.from((cast(Value) typeName).toHostString());
         }
-        table.tableValue["__typechain"] = Value.from(typeChain);
+        table.setTypeChain(typeChain);
         return table;
     }
 

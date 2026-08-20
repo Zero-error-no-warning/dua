@@ -498,7 +498,6 @@ final class ScriptEngine
         Value[string] typeTable;
         typeTable["name"] = Value.from(name);
         typeTable["new"] = constructor;
-        typeTable["__typechain"] = Value.from(typeChain);
         static foreach (memberName; __traits(allMembers, T))
         {{
             static if (memberName != "this" && memberName != "__ctor")
@@ -573,12 +572,14 @@ final class ScriptEngine
             }
         }}
 
+        auto typeValue = Value.from(typeTable);
+        typeValue.setTypeChain(typeChain);
         Value[string] meta;
-        meta["__index"] = Value.from(typeTable);
+        meta["__index"] = typeValue;
         meta["__call"] = constructor;
-        typeTable["__meta"] = Value.from(meta);
+        typeValue.tableValue["__meta"] = Value.from(meta);
 
-        bind(name, Value.from(typeTable));
+        bind(name, typeValue);
     }
 
     void bindNative(string name, NativeFunction callback)
@@ -883,8 +884,9 @@ final class ScriptEngine
                 enforce(valueMatchesType(cast(Value) args[index], types[index]), format("%s.%s expected %s", typeName, fieldName, types[index]));
                 entries[fieldName] = args[index].valueCopy();
             }
-            entries["__typechain"] = Value.from(chain);
-            return Value.fromStruct(entries);
+            auto result = Value.fromStruct(entries);
+            result.setTypeChain(chain);
+            return result;
         }));
         globals.define(typeName, constructor);
     }
@@ -894,11 +896,10 @@ final class ScriptEngine
         if (canFind(typeName, " delegate(")) return value.kind == ValueKind.function_;
         if (value.isFieldAggregate)
         {
-            foreach (metadataName; ["__typechain", internalAliasThisChain])
-                if (auto chain = metadataName in value.tableValue)
-                    if (chain.kind == ValueKind.array)
-                        foreach (entry; chain.arrayValue)
-                            if (entry.toHostString() == typeName) return true;
+            foreach (entry; value.typeChain)
+                if (entry.toHostString() == typeName) return true;
+            foreach (entry; value.aliasThisChain)
+                if (entry.toHostString() == typeName) return true;
         }
         switch (typeName)
         {
@@ -936,7 +937,7 @@ final class ScriptEngine
         }
         Value[] chain;
         foreach (chainName; definition.tableValue["chain"].arrayValue) chain ~= chainName;
-        value.tableValue["__typechain"] = Value.from(chain);
+        value.setTypeChain(chain);
         return true;
     }
 
@@ -951,11 +952,10 @@ final class ScriptEngine
             return false;
         }
         if (!value.isFieldAggregate) return false;
-        foreach (metadataName; ["__typechain", internalAliasThisChain])
-            if (auto chain = metadataName in value.tableValue)
-                if (chain.kind == ValueKind.array)
-                    foreach (entry; chain.arrayValue)
-                        if (entry.toHostString() == typeName) return true;
+        foreach (entry; value.typeChain)
+            if (entry.toHostString() == typeName) return true;
+        foreach (entry; value.aliasThisChain)
+            if (entry.toHostString() == typeName) return true;
         return false;
     }
 
@@ -1142,6 +1142,39 @@ unittest
         return sum;
     });
     assert(result.toInt() == 11);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto typed = setmetatableWithType({ hp = 10 }, null, "Player", "Actor");
+        auto spread = { ...typed };
+        typed.__typechain = ["Fake"];
+        typed.__dua_alias_this_targets = [123];
+        typed.__dua_alias_this_chain = ["FakeAlias"];
+        auto userSpread = { ...typed };
+        auto before = typeinfo(typed);
+        auto wasPlayer = typed is Player;
+        auto wasFake = typed is Fake;
+        auto cleared = setmetatableWithType(typed, null);
+        auto after = typeinfo(cleared);
+        return [
+            length(before.chain), before.chain[0], wasPlayer, wasFake,
+            length(after.chain), cleared is Player,
+            length(table.keys(spread)) == 1,
+            userSpread.__typechain[0], userSpread.__dua_alias_this_chain[0]
+        ];
+    });
+    assert(result.arrayValue[0].toInt() == 2);
+    assert(result.arrayValue[1].toHostString() == "Player");
+    assert(result.arrayValue[2].truthy());
+    assert(!result.arrayValue[3].truthy());
+    assert(result.arrayValue[4].toInt() == 0);
+    assert(!result.arrayValue[5].truthy());
+    assert(result.arrayValue[6].truthy());
+    assert(result.arrayValue[7].toHostString() == "Fake");
+    assert(result.arrayValue[8].toHostString() == "FakeAlias");
 }
 
 unittest
