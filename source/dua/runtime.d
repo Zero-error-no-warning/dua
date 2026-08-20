@@ -1,6 +1,7 @@
 module dua.runtime;
 
 import dua.ast;
+public import dua.binding;
 import dua.coroutine;
 import dua.evaluator;
 public import dua.execution;
@@ -17,9 +18,7 @@ import std.exception : enforce;
 import std.file : exists, readText, remove, write;
 import std.format : format;
 import std.string : join, replace, startsWith;
-import std.traits : BaseClassesTuple, isAggregateType, isCallable, isNumeric;
-
-alias NativeFunction = Value delegate(scope const(Value)[] args);
+import std.traits : BaseClassesTuple, isAggregateType, isNumeric;
 
 private string bindFuncOverload(long value)
 {
@@ -117,85 +116,6 @@ private final class BindTypeStringEnumFixture
     {
         primary = "main",
         secondary = "sub"
-    }
-}
-
-/// Shared implementation of the automatically converting binding APIs.
-/// The containing type only has to provide bind(string, Value).
-private mixin template AutoBindingAPI()
-{
-    void bindAuto(T)(string name, auto ref T value)
-    {
-        static if (is(T == Value))
-            bind(name, value);
-        else static if (isAggregateType!T)
-            bind(name, Value.reflect(value));
-        else
-            bind(name, Value.from(value));
-    }
-
-    void opIndexAssign(T)(auto ref T value, string name)
-    {
-        bindAuto(name, value);
-    }
-}
-
-/// Shared typed-function binding API. Named functions retain their complete
-/// overload set because FUN is received as an alias rather than as an already
-/// resolved function pointer. Typed lambdas use the single-callable fallback.
-private mixin template FunctionBindingAPI()
-{
-    void bindFunc(alias FUN)(string name)
-    {
-        ReflectedCallable[] overloads;
-        static if (__traits(compiles,
-            __traits(getOverloads, __traits(parent, FUN), __traits(identifier, FUN))))
-        {
-            static foreach (overload;
-                __traits(getOverloads, __traits(parent, FUN), __traits(identifier, FUN)))
-            {
-                static if (__traits(compiles, makeStaticReflectedCallable!overload(name)))
-                    overloads ~= makeStaticReflectedCallable!overload(name);
-            }
-        }
-        else static if (__traits(compiles, makeAliasReflectedCallable!FUN(name)))
-        {
-            overloads ~= makeAliasReflectedCallable!FUN(name);
-        }
-        else
-        {
-            static assert(0,
-                "bindFunc requires a concrete D function or a typed lambda");
-        }
-
-        if (overloads.length == 1)
-            bind(name, Value.fromFunction(overloads[0]));
-        else
-            bind(name, Value.fromFunction(new OverloadedReflectedCallable(name, overloads)));
-    }
-
-    /// Runtime delegate form, used in particular when a lambda captures local
-    /// state and therefore cannot be a member-template alias on LDC.
-    void bindFunc(C)(string name, auto ref C callable)
-        if (isCallable!C)
-    {
-        bind(name, Value.fromFunction(makeReflectedCallable(name, callable)));
-    }
-}
-
-final class NativeCallable : CallableValue
-{
-    private NativeFunction nativeCallback;
-
-    this(string name, NativeFunction callback)
-    {
-        super(name);
-        this.nativeCallback = callback;
-    }
-
-    override Value invoke(Value[] args)
-    {
-        return nativeCallback(args);
     }
 }
 
@@ -1857,6 +1777,11 @@ unittest
     auto otherModule = engine.newModule("other.module");
     gameModule.bindAuto("player", 40);
     otherModule.bindAuto("player", 2);
+    gameModule.bindFunc!bindFuncOverload("describe");
+    gameModule.bindFunc!bindFuncVariadic("sumAll");
+    gameModule.bindFunc!((long value) => value * 2)("twice");
+    long offset = 3;
+    gameModule.bindFunc("withOffset", (long value) => value + offset);
     gameModule.load(q{
         auto privateBonus = 1;
         export int score(int amount) { return player + privateBonus + amount; }
@@ -1869,6 +1794,10 @@ unittest
     }).toInt() == 84);
     assert(gameModule["player"].toInt() == 40);
     assert(gameModule.call("score", [Value.from(2)]).toInt() == 43);
+    assert(gameModule.call("describe", [Value.from("host")]).toHostString() == "string:host");
+    assert(gameModule.call("sumAll", [Value.from(1), Value.from(2), Value.from(3)]).toInt() == 6);
+    assert(gameModule.call("twice", [Value.from(4)]).toInt() == 8);
+    assert(gameModule.call("withOffset", [Value.from(4)]).toInt() == 7);
 
     auto imported = engine.run("import game.module as gm; return gm;");
     gameModule.bindAuto("late", 7);

@@ -6,6 +6,7 @@ module dua.coroutine;
  * The owning runtime supplies function invocation and global registration.  The
  * evaluator crosses this boundary only through `yieldFromScript`.
  */
+import dua.binding : NativeCallable;
 import dua.value;
 import core.thread : Fiber;
 import std.exception : enforce;

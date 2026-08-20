@@ -1,8 +1,9 @@
 module dua.stdlib.core;
 
 import dua.evaluator : ScriptThrownException;
+import dua.binding : NativeCallable, NativeFunction;
 import dua.stdlib.json : encodeJson;
-import dua.value : CallableValue, Value, ValueKind;
+import dua.value : Value, ValueKind;
 import std.algorithm : canFind;
 import std.conv : to;
 import std.datetime.systime : Clock;
@@ -14,7 +15,7 @@ import std.string : replace;
 import std.uni : toLower, toUpper;
 import std.utf : byDchar;
 
-alias StdlibNativeFunction = Value delegate(scope const(Value)[] args);
+alias StdlibNativeFunction = NativeFunction;
 
 /// Narrow internal bridge between the standard library and the execution engine.
 package(dua) struct StdlibContext
@@ -32,22 +33,6 @@ package(dua) struct StdlibContext
     Value delegate(string) tableKeyToScriptValue;
     string delegate() traceback;
     Value delegate(string) getGlobal;
-}
-
-private final class StdlibCallable : CallableValue
-{
-    private StdlibNativeFunction callback;
-
-    this(string name, StdlibNativeFunction callback)
-    {
-        super(name);
-        this.callback = callback;
-    }
-
-    override Value invoke(Value[] args)
-    {
-        return callback(args);
-    }
 }
 
 package(dua) void installStandardLibraries(StdlibContext context)
@@ -169,43 +154,43 @@ package(dua) void installStandardLibraries(StdlibContext context)
     });
 
     Value[string] stringLib;
-    stringLib["len"] = Value.fromFunction(new StdlibCallable("string.len", (scope const(Value)[] args) {
+    stringLib["len"] = Value.fromFunction(new NativeCallable("string.len", (scope const(Value)[] args) {
         return context.measureLengthValue(args);
     }));
-    stringLib["upper"] = Value.fromFunction(new StdlibCallable("string.upper", (scope const(Value)[] args) {
+    stringLib["upper"] = Value.fromFunction(new NativeCallable("string.upper", (scope const(Value)[] args) {
         enforce(args.length == 1, "string.upper(value) expects one argument");
         return Value.from(args[0].toHostString().toUpper().to!string);
     }));
-    stringLib["lower"] = Value.fromFunction(new StdlibCallable("string.lower", (scope const(Value)[] args) {
+    stringLib["lower"] = Value.fromFunction(new NativeCallable("string.lower", (scope const(Value)[] args) {
         enforce(args.length == 1, "string.lower(value) expects one argument");
         return Value.from(args[0].toHostString().toLower().to!string);
     }));
-    stringLib["trim"] = Value.fromFunction(new StdlibCallable("string.trim", (scope const(Value)[] args) {
+    stringLib["trim"] = Value.fromFunction(new NativeCallable("string.trim", (scope const(Value)[] args) {
         import std.string : strip;
         enforce(args.length == 1, "string.trim(value) expects one argument");
         return Value.from(args[0].toHostString().strip());
     }));
-    stringLib["contains"] = Value.fromFunction(new StdlibCallable("string.contains", (scope const(Value)[] args) {
+    stringLib["contains"] = Value.fromFunction(new NativeCallable("string.contains", (scope const(Value)[] args) {
         enforce(args.length == 2, "string.contains(value, needle) expects two arguments");
         return Value.from(args[0].toHostString().canFind(args[1].toHostString()));
     }));
-    stringLib["replace"] = Value.fromFunction(new StdlibCallable("string.replace", (scope const(Value)[] args) {
+    stringLib["replace"] = Value.fromFunction(new NativeCallable("string.replace", (scope const(Value)[] args) {
         enforce(args.length == 3, "string.replace(value, from, to) expects three arguments");
         return Value.from(args[0].toHostString().replace(args[1].toHostString(), args[2].toHostString()));
     }));
     context.bind("string", Value.from(stringLib));
 
     Value[string] mathLib;
-    mathLib["abs"] = Value.fromFunction(new StdlibCallable("math.abs", (scope const(Value)[] args) {
+    mathLib["abs"] = Value.fromFunction(new NativeCallable("math.abs", (scope const(Value)[] args) {
         enforce(args.length == 1, "math.abs(value) expects one argument");
         auto value = args[0].toFloat();
         return Value.from(value < 0 ? -value : value);
     }));
-    mathLib["floor"] = Value.fromFunction(new StdlibCallable("math.floor", (scope const(Value)[] args) {
+    mathLib["floor"] = Value.fromFunction(new NativeCallable("math.floor", (scope const(Value)[] args) {
         enforce(args.length == 1, "math.floor(value) expects one argument");
         return Value.from(cast(long) floor(args[0].toFloat()));
     }));
-    mathLib["min"] = Value.fromFunction(new StdlibCallable("math.min", (scope const(Value)[] args) {
+    mathLib["min"] = Value.fromFunction(new NativeCallable("math.min", (scope const(Value)[] args) {
         enforce(args.length >= 1, "math.min(value, ...) expects at least one argument");
         double minimum = args[0].toFloat();
         foreach (arg; args[1 .. $])
@@ -218,7 +203,7 @@ package(dua) void installStandardLibraries(StdlibContext context)
         }
         return Value.from(minimum);
     }));
-    mathLib["max"] = Value.fromFunction(new StdlibCallable("math.max", (scope const(Value)[] args) {
+    mathLib["max"] = Value.fromFunction(new NativeCallable("math.max", (scope const(Value)[] args) {
         enforce(args.length >= 1, "math.max(value, ...) expects at least one argument");
         double maximum = args[0].toFloat();
         foreach (arg; args[1 .. $])
@@ -234,11 +219,11 @@ package(dua) void installStandardLibraries(StdlibContext context)
     context.bind("math", Value.from(mathLib));
 
     Value[string] tableLib;
-    tableLib["len"] = Value.fromFunction(new StdlibCallable("table.len", (scope const(Value)[] args) {
+    tableLib["len"] = Value.fromFunction(new NativeCallable("table.len", (scope const(Value)[] args) {
         return context.measureLengthValue(args);
     }));
     tableLib["length"] = tableLib["len"];
-    tableLib["keys"] = Value.fromFunction(new StdlibCallable("table.keys", (scope const(Value)[] args) {
+    tableLib["keys"] = Value.fromFunction(new NativeCallable("table.keys", (scope const(Value)[] args) {
         enforce(args.length == 1, "table.keys(value) expects one argument");
         enforce(args[0].kind == ValueKind.table, "table.keys supports table values only");
         Value[] keys;
@@ -248,20 +233,20 @@ package(dua) void installStandardLibraries(StdlibContext context)
         }
         return Value.from(keys);
     }));
-    tableLib["map"] = Value.fromFunction(new StdlibCallable("table.map", (scope const(Value)[] args) {
+    tableLib["map"] = Value.fromFunction(new NativeCallable("table.map", (scope const(Value)[] args) {
         return context.mapValue(args);
     }));
-    tableLib["filter"] = Value.fromFunction(new StdlibCallable("table.filter", (scope const(Value)[] args) {
+    tableLib["filter"] = Value.fromFunction(new NativeCallable("table.filter", (scope const(Value)[] args) {
         return context.filterValue(args);
     }));
     context.bind("table", Value.from(tableLib));
 
     Value[string] ioLib;
-    ioLib["exists"] = Value.fromFunction(new StdlibCallable("io.exists", (scope const(Value)[] args) {
+    ioLib["exists"] = Value.fromFunction(new NativeCallable("io.exists", (scope const(Value)[] args) {
         enforce(args.length == 1, "io.exists(path) expects one argument");
         return Value.from(exists(args[0].toHostString()));
     }));
-    ioLib["readFile"] = Value.fromFunction(new StdlibCallable("io.readFile", (scope const(Value)[] args) {
+    ioLib["readFile"] = Value.fromFunction(new NativeCallable("io.readFile", (scope const(Value)[] args) {
         enforce(args.length == 1, "io.readFile(path) expects one argument");
         auto path = args[0].toHostString();
         enforce(exists(path), format("File not found: %s", path));
@@ -270,11 +255,11 @@ package(dua) void installStandardLibraries(StdlibContext context)
     context.bind("io", Value.from(ioLib));
 
     Value[string] osLib;
-    osLib["clock"] = Value.fromFunction(new StdlibCallable("os.clock", (scope const(Value)[] args) {
+    osLib["clock"] = Value.fromFunction(new NativeCallable("os.clock", (scope const(Value)[] args) {
         enforce(args.length == 0, "os.clock() takes no arguments");
         return Value.from(Clock.currTime.toUnixTime());
     }));
-    osLib["getenv"] = Value.fromFunction(new StdlibCallable("os.getenv", (scope const(Value)[] args) {
+    osLib["getenv"] = Value.fromFunction(new NativeCallable("os.getenv", (scope const(Value)[] args) {
         import std.process : environment;
         enforce(args.length == 1, "os.getenv(name) expects one argument");
         auto name = args[0].toHostString();
@@ -283,7 +268,7 @@ package(dua) void installStandardLibraries(StdlibContext context)
     context.bind("os", Value.from(osLib));
 
     Value[string] utf8Lib;
-    utf8Lib["len"] = Value.fromFunction(new StdlibCallable("utf8.len", (scope const(Value)[] args) {
+    utf8Lib["len"] = Value.fromFunction(new NativeCallable("utf8.len", (scope const(Value)[] args) {
         enforce(args.length == 1, "utf8.len(value) expects one argument");
         long count = 0;
         foreach (_; byDchar(args[0].toHostString()))
@@ -295,18 +280,18 @@ package(dua) void installStandardLibraries(StdlibContext context)
     context.bind("utf8", Value.from(utf8Lib));
 
     Value[string] debugLib;
-    debugLib["type"] = Value.fromFunction(new StdlibCallable("debug.type", (scope const(Value)[] args) {
+    debugLib["type"] = Value.fromFunction(new NativeCallable("debug.type", (scope const(Value)[] args) {
         enforce(args.length == 1, "debug.type(value) expects one argument");
         return Value.from(args[0].kind.to!string);
     }));
-    debugLib["traceback"] = Value.fromFunction(new StdlibCallable("debug.traceback", (scope const(Value)[] args) {
+    debugLib["traceback"] = Value.fromFunction(new NativeCallable("debug.traceback", (scope const(Value)[] args) {
         enforce(args.length == 0, "debug.traceback() takes no arguments");
         return Value.from(context.traceback());
     }));
     context.bind("debug", Value.from(debugLib));
 
     Value[string] timeLib;
-    timeLib["nowUnix"] = Value.fromFunction(new StdlibCallable("time.nowUnix", (scope const(Value)[] args) {
+    timeLib["nowUnix"] = Value.fromFunction(new NativeCallable("time.nowUnix", (scope const(Value)[] args) {
         enforce(args.length == 0, "time.nowUnix() takes no arguments");
         import core.stdc.time : time;
         return Value.from(cast(long) time(null));
@@ -314,12 +299,12 @@ package(dua) void installStandardLibraries(StdlibContext context)
     context.bind("time", Value.from(timeLib));
 
     Value[string] jsonLib;
-    jsonLib["encode"] = Value.fromFunction(new StdlibCallable("json.encode", (scope const(Value)[] args) {
+    jsonLib["encode"] = Value.fromFunction(new NativeCallable("json.encode", (scope const(Value)[] args) {
         enforce(args.length == 1, "json.encode(value) expects one argument");
         return Value.from(encodeJson(args[0]));
     }));
     context.bind("json", Value.from(jsonLib));
-    context.bind("_ENV", Value.fromFunction(new StdlibCallable("_ENV", (scope const(Value)[] args) {
+    context.bind("_ENV", Value.fromFunction(new NativeCallable("_ENV", (scope const(Value)[] args) {
         enforce(args.length == 1, "_ENV(name) expects one argument");
         return context.getGlobal(args[0].toHostString());
     })));
