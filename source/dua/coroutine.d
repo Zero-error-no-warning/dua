@@ -74,17 +74,17 @@ package mixin template CoroutineImplementation()
 
     private Value coroutineHandle(size_t id)
     {
-        Value[string] handle;
-        handle["__coid"] = Value.from(cast(long) id);
-        return Value.from(handle);
+        auto handle = Value.from(cast(Value[string]) null);
+        handle.setCoroutineId(id);
+        return handle;
     }
 
     private CoroutineState requireCoroutineState(Value handle)
     {
         enforce(handle.kind == ValueKind.table, "Coroutine handle must be a table");
-        auto idValue = "__coid" in handle.tableValue;
-        enforce(idValue !is null, "Invalid coroutine handle");
-        auto state = cast(size_t) idValue.toInt() in coroutines;
+        size_t id;
+        enforce(handle.getCoroutineId(id), "Invalid coroutine handle");
+        auto state = id in coroutines;
         enforce(state !is null, "Unknown coroutine handle");
         return *state;
     }

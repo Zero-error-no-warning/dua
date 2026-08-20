@@ -2651,6 +2651,48 @@ unittest
 {
     auto engine = new ScriptEngine();
     auto result = engine.run(q{
+        auto co = coroutine.create(() {
+            yield coroutine.running();
+            return 42;
+        });
+        auto copied = co;
+        auto spread = { ...co };
+
+        // A script field with the old implementation name cannot redirect either
+        // the original handle or a normal Value copy of that handle.
+        co.__coid = 999999;
+        auto ok1, running = coroutine.resume(copied);
+        running.__coid = -1;
+        auto ok2, answer = coroutine.resume(running);
+
+        auto fake = { __coid = 1 };
+        auto fakeRejected = false;
+        try {
+            coroutine.status(fake);
+        } catch (error) {
+            fakeRejected = true;
+        }
+
+        return [
+            ok1,
+            coroutine.status(co) == "dead",
+            ok2,
+            answer == 42,
+            fakeRejected,
+            length(table.keys(spread)) == 0,
+            co.__coid == 999999,
+            running.__coid == -1
+        ];
+    });
+
+    foreach (value; result.arrayValue)
+        assert(value.truthy());
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
         auto text = string.trim("  Dua  ");
         if (!string.contains(text, "ua")) {
             return -1;
