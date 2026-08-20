@@ -463,8 +463,7 @@ final class ScriptEngine
                         enforce(userArgs[0].kind == ValueKind.table, format("%s.new init argument must be table", name));
                         foreach (key, entry; userArgs[0].tableValue)
                         {
-                            auto setterKey = internalFieldSetterPrefix ~ key;
-                            if (auto setter = setterKey in reflected.tableValue)
+                            if (auto setter = reflected.propertySetter(key))
                             {
                                 enforce((*setter).kind == ValueKind.function_,
                                     format("%s.new setter '%s' is not callable", name, key));
@@ -496,6 +495,8 @@ final class ScriptEngine
         }));
 
         Value[string] typeTable;
+        Value[string] propertyGetters;
+        Value[string] propertySetters;
         typeTable["name"] = Value.from(name);
         typeTable["new"] = constructor;
         static foreach (memberName; __traits(allMembers, T))
@@ -555,17 +556,17 @@ final class ScriptEngine
                             staticSetters ~= overload;
                     }
                     if (staticGetters.length == 1)
-                        typeTable[internalFieldGetterPrefix ~ memberName] =
+                        propertyGetters[memberName] =
                             Value.fromFunction(staticGetters[0]);
                     else if (staticGetters.length > 1)
-                        typeTable[internalFieldGetterPrefix ~ memberName] = Value.fromFunction(
+                        propertyGetters[memberName] = Value.fromFunction(
                             new OverloadedReflectedCallable(name ~ "." ~ memberName ~ ".getter",
                                 staticGetters));
                     if (staticSetters.length == 1)
-                        typeTable[internalFieldSetterPrefix ~ memberName] =
+                        propertySetters[memberName] =
                             Value.fromFunction(staticSetters[0]);
                     else if (staticSetters.length > 1)
-                        typeTable[internalFieldSetterPrefix ~ memberName] = Value.fromFunction(
+                        propertySetters[memberName] = Value.fromFunction(
                             new OverloadedReflectedCallable(name ~ "." ~ memberName ~ ".setter",
                                 staticSetters));
                 }
@@ -573,6 +574,7 @@ final class ScriptEngine
         }}
 
         auto typeValue = Value.from(typeTable);
+        typeValue.setPropertyMetadata(propertyGetters, propertySetters);
         typeValue.setTypeChain(typeChain);
         Value[string] meta;
         meta["__index"] = typeValue;
@@ -2209,8 +2211,10 @@ unittest
     auto engine = new ScriptEngine();
     auto gauge = new Gauge();
     auto reflectedGauge = Value.reflect(gauge);
-    assert((internalFieldGetterPrefix ~ "value") in reflectedGauge.tableValue);
-    assert((internalFieldSetterPrefix ~ "value") in reflectedGauge.tableValue);
+    assert(reflectedGauge.propertyGetter("value") !is null);
+    assert(reflectedGauge.propertySetter("value") !is null);
+    assert("__dua_get_value" !in reflectedGauge.tableValue);
+    assert("__dua_set_value" !in reflectedGauge.tableValue);
     engine.bind("gauge", reflectedGauge);
 
     auto result = engine.run(q{
@@ -2221,6 +2225,33 @@ unittest
     });
 
     assert(result.toInt() == 120);
+}
+
+unittest
+{
+    final class Gauge
+    {
+        private int current;
+
+        int value() const { return current; }
+        void value(int next) { current = next; }
+    }
+
+    auto engine = new ScriptEngine();
+    auto reflected = Value.reflect(new Gauge());
+    reflected.tableValue["__dua_get_value"] = Value.from(11);
+    reflected.tableValue["__dua_set_value"] = Value.from(22);
+    engine.bind("gauge", reflected);
+
+    auto result = engine.run(q{
+        gauge.value = 7;
+        auto spread = { ...gauge };
+        return [gauge.value, spread.__dua_get_value, spread.__dua_set_value];
+    });
+
+    assert(result.arrayValue[0].toInt() == 7);
+    assert(result.arrayValue[1].toInt() == 11);
+    assert(result.arrayValue[2].toInt() == 22);
 }
 
 unittest
