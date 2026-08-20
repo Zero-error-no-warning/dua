@@ -493,13 +493,13 @@ mixin template EvaluatorImplementation()
             switch (target.kind)
             {
                 case Expression.Kind.variable:
-                    environment.assign(target.identifier, value);
+                    environment.assign((cast(VariableExpression) target).name, value);
                     return;
                 case Expression.Kind.get:
-                    auto container = evaluate(target.left, environment);
+                    auto container = evaluate((cast(GetExpression) target).target, environment);
                     enforce(container.isFieldAggregate,
                         "Property assignment currently supports tables/reflected structs/classes");
-                    if (auto property = target.identifier in container.tableValue)
+                    if (auto property = (cast(GetExpression) target).memberName in container.tableValue)
                     {
                         if (property.kind == ValueKind.function_
                             && property.functionValue.acceptsArity(1))
@@ -508,20 +508,20 @@ mixin template EvaluatorImplementation()
                             return;
                         }
                     }
-                    if (auto setter = container.propertySetter(target.identifier))
+                    if (auto setter = container.propertySetter((cast(GetExpression) target).memberName))
                     {
                         invokeFunctionValue(*setter, [value]);
                         return;
                     }
-                    if (!applyTableNewIndex(container, target.identifier, value))
+                    if (!applyTableNewIndex(container, (cast(GetExpression) target).memberName, value))
                     {
-                        container.tableValue[target.identifier] = value.valueCopy();
+                        container.tableValue[(cast(GetExpression) target).memberName] = value.valueCopy();
                     }
                     return;
                 case Expression.Kind.index:
-                    auto container = evaluate(target.left, environment);
-                    enforce(target.operatorSymbol != "..", "Slice cannot be an assignment target");
-                    auto index = evaluate(target.right, environment);
+                    auto container = evaluate((cast(IndexExpression) target).target, environment);
+                    enforce(!(cast(IndexExpression) target).isSlice, "Slice cannot be an assignment target");
+                    auto index = evaluate((cast(IndexExpression) target).index, environment);
                     if (container.kind == ValueKind.array)
                     {
                         auto position = cast(size_t) index.toInt();
@@ -568,18 +568,18 @@ mixin template EvaluatorImplementation()
             final switch (expression.kind)
             {
                 case Expression.Kind.literal:
-                    return expression.literalValue;
+                    return (cast(LiteralExpression) expression).value;
                 case Expression.Kind.variable:
-                    return environment.get(expression.identifier);
+                    return environment.get((cast(VariableExpression) expression).name);
                 case Expression.Kind.unary:
-                    switch (expression.operatorSymbol)
+                    switch ((cast(UnaryExpression) expression).operatorSymbol)
                     {
                         case "$":
                             enforce(evaluatorContext.indexLengthStack.length > 0, "$ is only available inside index expressions");
                             return Value.from(evaluatorContext.indexLengthStack[$ - 1]);
                         case "-":
-                            auto right = evaluate(expression.right, environment);
-                            if (auto overloaded = tryCallUnaryOverload(expression.operatorSymbol, right))
+                            auto right = evaluate((cast(UnaryExpression) expression).operand, environment);
+                            if (auto overloaded = tryCallUnaryOverload((cast(UnaryExpression) expression).operatorSymbol, right))
                             {
                                 return *overloaded;
                             }
@@ -587,62 +587,62 @@ mixin template EvaluatorImplementation()
                                 ? Value.from(-right.integerValue)
                                 : Value.from(-right.toFloat());
                         case "!":
-                            auto right = evaluate(expression.right, environment);
-                            if (auto overloaded = tryCallUnaryOverload(expression.operatorSymbol, right))
+                            auto right = evaluate((cast(UnaryExpression) expression).operand, environment);
+                            if (auto overloaded = tryCallUnaryOverload((cast(UnaryExpression) expression).operatorSymbol, right))
                             {
                                 return *overloaded;
                             }
                             return Value.from(!right.truthy());
                         default:
-                            enforce(false, format("Unsupported unary operator '%s'", expression.operatorSymbol));
+                            enforce(false, format("Unsupported unary operator '%s'", (cast(UnaryExpression) expression).operatorSymbol));
                             assert(0);
                     }
                 case Expression.Kind.binary:
-                    if (expression.operatorSymbol == "is")
+                    if ((cast(BinaryExpression) expression).operatorSymbol == "is")
                     {
                         return Value.from(valueIsType(
-                            evaluate(expression.left, environment), expression.right.identifier));
+                            evaluate((cast(BinaryExpression) expression).left, environment), (cast(VariableExpression) (cast(BinaryExpression) expression).right).name));
                     }
-                    if (expression.operatorSymbol == "&&")
+                    if ((cast(BinaryExpression) expression).operatorSymbol == "&&")
                     {
-                        auto left = evaluate(expression.left, environment);
+                        auto left = evaluate((cast(BinaryExpression) expression).left, environment);
                         if (!left.truthy())
                         {
                             return Value.from(false);
                         }
 
-                        auto right = evaluate(expression.right, environment);
+                        auto right = evaluate((cast(BinaryExpression) expression).right, environment);
                         return Value.from(right.truthy());
                     }
 
-                    if (expression.operatorSymbol == "||")
+                    if ((cast(BinaryExpression) expression).operatorSymbol == "||")
                     {
-                        auto left = evaluate(expression.left, environment);
+                        auto left = evaluate((cast(BinaryExpression) expression).left, environment);
                         if (left.truthy())
                         {
                             return Value.from(true);
                         }
 
-                        auto right = evaluate(expression.right, environment);
+                        auto right = evaluate((cast(BinaryExpression) expression).right, environment);
                         return Value.from(right.truthy());
                     }
 
-                    return evaluateBinary(expression.operatorSymbol,
-                        evaluate(expression.left, environment),
-                        evaluate(expression.right, environment));
+                    return evaluateBinary((cast(BinaryExpression) expression).operatorSymbol,
+                        evaluate((cast(BinaryExpression) expression).left, environment),
+                        evaluate((cast(BinaryExpression) expression).right, environment));
                 case Expression.Kind.ternary:
-                    return evaluate(expression.left, environment).truthy()
-                        ? evaluate(expression.middle, environment)
-                        : evaluate(expression.right, environment);
+                    return evaluate((cast(TernaryExpression) expression).condition, environment).truthy()
+                        ? evaluate((cast(TernaryExpression) expression).whenTrue, environment)
+                        : evaluate((cast(TernaryExpression) expression).whenFalse, environment);
                 case Expression.Kind.call:
-                    auto args = expression.arguments.map!(arg => evaluate(arg, environment)).array;
-                    return evaluateCall(expression.left, args, environment);
+                    auto args = (cast(CallExpression) expression).arguments.map!(arg => evaluate(arg, environment)).array;
+                    return evaluateCall((cast(CallExpression) expression).callee, args, environment);
                 case Expression.Kind.array:
                     Value[] items;
-                    foreach (index, argument; expression.arguments)
+                    foreach (index, argument; (cast(ArrayExpression) expression).elements)
                     {
                         auto value = evaluate(argument, environment);
-                        if (index < expression.argumentSpreads.length && expression.argumentSpreads[index])
+                        if (index < (cast(ArrayExpression) expression).elementSpreads.length && (cast(ArrayExpression) expression).elementSpreads[index])
                         {
                             enforce(value.kind == ValueKind.array,
                                 "Array spread requires an array value");
@@ -656,7 +656,7 @@ mixin template EvaluatorImplementation()
                     return Value.from(items);
                 case Expression.Kind.table:
                     Value[string] entries;
-                    foreach (entry; expression.entries)
+                    foreach (entry; (cast(TableExpression) expression).entries)
                     {
                         if (entry.isSpread)
                         {
@@ -687,23 +687,23 @@ mixin template EvaluatorImplementation()
                     return Value.from(entries);
                 case Expression.Kind.function_:
                     return Value.fromFunction(new ScriptCallable("anonymous", this, environment,
-                        expression.parameters, expression.variadic, expression.body,
-                        null, expression.returnType));
+                        (cast(FunctionExpression) expression).parameters, (cast(FunctionExpression) expression).variadic, (cast(FunctionExpression) expression).body,
+                        null, (cast(FunctionExpression) expression).returnType));
                 case Expression.Kind.get:
-                    auto container = evaluate(expression.left, environment);
+                    auto container = evaluate((cast(GetExpression) expression).target, environment);
                     enforce(container.isFieldAggregate,
                         "Property access currently supports tables/reflected structs/classes");
-                    if (auto getter = container.propertyGetter(expression.identifier))
+                    if (auto getter = container.propertyGetter((cast(GetExpression) expression).memberName))
                     {
                         auto refreshed = invokeFunctionValueWithThis(*getter, [], container);
-                        auto property = expression.identifier in container.tableValue;
+                        auto property = (cast(GetExpression) expression).memberName in container.tableValue;
                         if (property is null || property.kind != ValueKind.function_)
                         {
-                            container.tableValue[expression.identifier] = refreshed;
+                            container.tableValue[(cast(GetExpression) expression).memberName] = refreshed;
                         }
                         return refreshed;
                     }
-                    if (auto value = expression.identifier in container.tableValue)
+                    if (auto value = (cast(GetExpression) expression).memberName in container.tableValue)
                     {
                         if (value.kind == ValueKind.function_
                             && value.functionValue.acceptsArity(0))
@@ -713,14 +713,14 @@ mixin template EvaluatorImplementation()
                         return *value;
                     }
                     Value resolved;
-                    if (resolveTableIndex(container, expression.identifier, resolved))
+                    if (resolveTableIndex(container, (cast(GetExpression) expression).memberName, resolved))
                     {
                         return resolved;
                     }
-                    enforce(false, format("Unknown property '%s'", expression.identifier));
+                    enforce(false, format("Unknown property '%s'", (cast(GetExpression) expression).memberName));
                     assert(0);
                 case Expression.Kind.index:
-                    auto container = evaluate(expression.left, environment);
+                    auto container = evaluate((cast(IndexExpression) expression).target, environment);
                     bool pushedLengthContext;
                     if (canMeasureLength(container))
                     {
@@ -734,11 +734,11 @@ mixin template EvaluatorImplementation()
                             evaluatorContext.indexLengthStack.length = evaluatorContext.indexLengthStack.length - 1;
                         }
                     }
-                    if (expression.operatorSymbol == "..")
+                    if ((cast(IndexExpression) expression).isSlice)
                     {
                         enforce(container.kind == ValueKind.array, "Slicing currently supports arrays only");
-                        auto start = evaluate(expression.middle, environment).toInt();
-                        auto finish = evaluate(expression.right, environment).toInt();
+                        auto start = evaluate((cast(IndexExpression) expression).sliceStart, environment).toInt();
+                        auto finish = evaluate((cast(IndexExpression) expression).sliceEnd, environment).toInt();
                         enforce(start >= 0 && finish >= start, "Invalid slice range");
                         auto lowerBound = cast(size_t) start;
                         auto upperBound = cast(size_t) finish;
@@ -750,7 +750,7 @@ mixin template EvaluatorImplementation()
                         }
                         return Value.from(sliced);
                     }
-                    auto index = evaluate(expression.right, environment);
+                    auto index = evaluate((cast(IndexExpression) expression).index, environment);
                     if (container.kind == ValueKind.array)
                     {
                         auto position = cast(size_t) index.toInt();
@@ -892,8 +892,8 @@ mixin template EvaluatorImplementation()
     {
         if (calleeExpression.kind == Expression.Kind.get)
         {
-            auto receiver = evaluate(calleeExpression.left, environment);
-            return callMethodOrUfcs(receiver, calleeExpression.identifier, args, environment);
+            auto receiver = evaluate((cast(GetExpression) calleeExpression).target, environment);
+            return callMethodOrUfcs(receiver, (cast(GetExpression) calleeExpression).memberName, args, environment);
         }
 
         auto callee = evaluate(calleeExpression, environment);

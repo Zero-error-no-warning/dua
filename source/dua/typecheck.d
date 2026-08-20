@@ -72,11 +72,11 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                         : "any";
                     if (target.kind == Expression.Kind.variable)
                     {
-                        auto expected = target.identifier in variables;
+                        auto expected = (cast(VariableExpression) target).name in variables;
                         if (expected !is null && !staticTypesCompatible(actual, *expected))
                             diagnostics ~= CheckDiagnostic(target.line, target.column,
                                 format("Assignment to '%s' expects %s but expression has type %s",
-                                    target.identifier, *expected, actual));
+                                    (cast(VariableExpression) target).name, *expected, actual));
                     }
                 }
                 break;
@@ -143,7 +143,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
     final switch (expression.kind)
     {
         case Expression.Kind.literal:
-            final switch (expression.literalValue.kind)
+            final switch ((cast(LiteralExpression) expression).value.kind)
             {
                 case ValueKind.integer: return "int";
                 case ValueKind.floating: return "double";
@@ -157,40 +157,40 @@ private string inferExpressionType(Expression expression, ref string[string] var
                 case ValueKind.native: return "any";
             }
         case Expression.Kind.variable:
-            auto found = expression.identifier in variables;
+            auto found = (cast(VariableExpression) expression).name in variables;
             return found is null ? "any" : *found;
         case Expression.Kind.array: return "array";
         case Expression.Kind.table: return "table";
         case Expression.Kind.function_: return "function";
         case Expression.Kind.unary:
-            return expression.operatorSymbol == "!" ? "bool"
-                : inferExpressionType(expression.right, variables, functions, diagnostics);
+            return (cast(UnaryExpression) expression).operatorSymbol == "!" ? "bool"
+                : inferExpressionType((cast(UnaryExpression) expression).operand, variables, functions, diagnostics);
         case Expression.Kind.binary:
-            auto left = inferExpressionType(expression.left, variables, functions, diagnostics);
-            auto right = expression.operatorSymbol == "is" ? "any"
-                : inferExpressionType(expression.right, variables, functions, diagnostics);
-            if (["==", "!=", "<", "<=", ">", ">=", "&&", "||", "is"].canFind(expression.operatorSymbol))
+            auto left = inferExpressionType((cast(BinaryExpression) expression).left, variables, functions, diagnostics);
+            auto right = (cast(BinaryExpression) expression).operatorSymbol == "is" ? "any"
+                : inferExpressionType((cast(BinaryExpression) expression).right, variables, functions, diagnostics);
+            if (["==", "!=", "<", "<=", ">", ">=", "&&", "||", "is"].canFind((cast(BinaryExpression) expression).operatorSymbol))
                 return "bool";
-            if (expression.operatorSymbol == "~") return "string";
+            if ((cast(BinaryExpression) expression).operatorSymbol == "~") return "string";
             return left == "int" && right == "int" ? "int" : "double";
         case Expression.Kind.ternary:
-            auto middle = inferExpressionType(expression.middle, variables, functions, diagnostics);
-            auto right = inferExpressionType(expression.right, variables, functions, diagnostics);
+            auto middle = inferExpressionType((cast(TernaryExpression) expression).whenTrue, variables, functions, diagnostics);
+            auto right = inferExpressionType((cast(TernaryExpression) expression).whenFalse, variables, functions, diagnostics);
             return middle == right ? middle : "any";
         case Expression.Kind.call:
-            if (expression.left.kind == Expression.Kind.variable)
+            if ((cast(CallExpression) expression).callee.kind == Expression.Kind.variable)
             {
-                auto functionInfo = expression.left.identifier in functions;
+                auto functionInfo = (cast(VariableExpression) (cast(CallExpression) expression).callee).name in functions;
                 if (functionInfo !is null)
                 {
-                    foreach (index, argument; expression.arguments)
+                    foreach (index, argument; (cast(CallExpression) expression).arguments)
                     {
                         auto actual = inferExpressionType(argument, variables, functions, diagnostics);
                         if (index < functionInfo.parameterTypes.length
                             && !staticTypesCompatible(actual, functionInfo.parameterTypes[index]))
                             diagnostics ~= CheckDiagnostic(argument.line, argument.column,
                                 format("Argument %s to '%s' expects %s but has type %s",
-                                    index + 1, expression.left.identifier,
+                                    index + 1, (cast(VariableExpression) (cast(CallExpression) expression).callee).name,
                                     functionInfo.parameterTypes[index], actual));
                     }
                     return functionInfo.returnType.length > 0 ? functionInfo.returnType : "any";
