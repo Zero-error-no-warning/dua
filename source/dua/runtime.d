@@ -7,21 +7,17 @@ public import dua.execution;
 import dua.lexer : lex;
 import dua.module_system : ModuleImplementation;
 import dua.parser : parse;
-import dua.stdlib.json : encodeJson;
+import dua.stdlib.core : StdlibContext, installStandardLibraries;
 import dua.typecheck : checkSource;
 import dua.value;
 import std.algorithm : canFind, map;
 import std.array : array;
 import std.conv : to;
-import std.datetime.systime : Clock;
 import std.exception : enforce;
 import std.file : exists, readText, remove, write;
 import std.format : format;
-import std.math : floor;
 import std.string : join, replace, startsWith;
 import std.traits : BaseClassesTuple, isAggregateType, isCallable, isNumeric;
-import std.uni : toLower, toUpper;
-import std.utf : byDchar;
 
 alias NativeFunction = Value delegate(scope const(Value)[] args);
 
@@ -440,8 +436,28 @@ final class ScriptEngine
         globals = new Environment();
         globalModule_ = new ModuleHandle(this, "<global>", globals, ModuleVisibility.global);
         moduleSearchPaths = ["?.dua", "?/init.dua"];
-        installStandardLibraries();
+        installStandardLibraries(stdlibContext());
+        installCoroutineLibrary();
         installRequireFunction();
+    }
+
+    private StdlibContext stdlibContext()
+    {
+        StdlibContext context;
+        context.bindNative = (name, callback) => bindNative(name, callback);
+        context.bind = (name, value) => globals.define(name, value);
+        context.stringify = (value) => stringify(value);
+        context.typeOfValue = (args) => typeOfValue(args);
+        context.measureLengthValue = (args) => measureLengthValue(args);
+        context.iotaValue = (args) => iotaValue(args);
+        context.setMetatableWithType = (args) => setMetatableWithType(args);
+        context.invokeFunctionValue = (callable, args) => invokeFunctionValue(callable, args);
+        context.mapValue = (args) => mapValue(args);
+        context.filterValue = (args) => filterValue(args);
+        context.tableKeyToScriptValue = (key) => tableKeyToScriptValue(key);
+        context.traceback = () => evaluatorContext.callStack.join("\n");
+        context.getGlobal = (name) => globals.get(name);
+        return context;
     }
 
     ModuleHandle globalModule() { return globalModule_; }
@@ -1032,282 +1048,6 @@ final class ScriptEngine
 
     mixin EvaluatorImplementation;
 
-    private void installStandardLibraries()
-    {
-        bindNative("error", (scope const(Value)[] args) {
-            enforce(args.length >= 1, "error(message) expects at least one argument");
-            string message = stringify(cast(Value) args[0]);
-            if (args.length > 1)
-            {
-                message = format("%s (level: %s)", message, (cast(Value) args[1]).toHostString());
-            }
-            throw new ScriptThrownException(cast(Value) args[0], message);
-            assert(0);
-            return Value.nullValue();
-        });
-        bindNative("typeof", (scope const(Value)[] args) {
-            return typeOfValue(args);
-        });
-        bindNative("typeinfo", (scope const(Value)[] args) {
-            return typeOfValue(args);
-        });
-        bindNative("length", (scope const(Value)[] args) {
-            return measureLengthValue(args);
-        });
-        bindNative("len", (scope const(Value)[] args) {
-            return measureLengthValue(args);
-        });
-        bindNative("iota", (scope const(Value)[] args) {
-            return iotaValue(args);
-        });
-        bindNative("rawget", (scope const(Value)[] args) {
-            enforce(args.length == 2, "rawget(table, key) expects two arguments");
-            enforce(args[0].kind == ValueKind.table, "rawget first argument must be table");
-            auto key = (cast(Value) args[1]).toHostString();
-            if (auto found = key in args[0].tableValue)
-            {
-                return cast(Value) *found;
-            }
-            return Value.nullValue();
-        });
-        bindNative("rawset", (scope const(Value)[] args) {
-            enforce(args.length == 3, "rawset(table, key, value) expects three arguments");
-            enforce(args[0].kind == ValueKind.table, "rawset first argument must be table");
-            auto table = cast(Value) args[0];
-            table.tableValue[(cast(Value) args[1]).toHostString()] = cast(Value) args[2];
-            return table;
-        });
-        bindNative("setmetatable", (scope const(Value)[] args) {
-            enforce(args.length == 2, "setmetatable(table, meta) expects two arguments");
-            enforce(args[0].kind == ValueKind.table, "setmetatable first argument must be table");
-            enforce(args[1].kind == ValueKind.table || args[1].kind == ValueKind.null_,
-                "setmetatable second argument must be table or null");
-            auto table = cast(Value) args[0];
-            if (args[1].kind == ValueKind.null_)
-            {
-                table.tableValue.remove("__meta");
-            }
-            else
-            {
-                table.tableValue["__meta"] = cast(Value) args[1];
-            }
-            return table;
-        });
-        bindNative("setmetatableWithType", (scope const(Value)[] args) {
-            return setMetatableWithType(args);
-        });
-        bindNative("getmetatable", (scope const(Value)[] args) {
-            enforce(args.length == 1, "getmetatable(table) expects one argument");
-            enforce(args[0].kind == ValueKind.table, "getmetatable argument must be table");
-            if (auto meta = "__meta" in args[0].tableValue)
-            {
-                return cast(Value) *meta;
-            }
-            return Value.nullValue();
-        });
-        bindNative("pcall", (scope const(Value)[] args) {
-            enforce(args.length >= 1, "pcall(callback, ...) expects at least one argument");
-            enforce(args[0].kind == ValueKind.function_, "pcall first argument must be function");
-            try
-            {
-                Value[] callArgs;
-                foreach (arg; args[1 .. $])
-                {
-                    callArgs ~= cast(Value) arg;
-                }
-                auto result = invokeFunctionValue(cast(Value) args[0], callArgs);
-                return Value.from([Value.from(true), result]);
-            }
-            catch (Exception error)
-            {
-                return Value.from([Value.from(false), Value.from(error.msg)]);
-            }
-        });
-        bindNative("xpcall", (scope const(Value)[] args) {
-            enforce(args.length >= 2, "xpcall(callback, errHandler, ...) expects at least two arguments");
-            enforce(args[0].kind == ValueKind.function_, "xpcall first argument must be function");
-            enforce(args[1].kind == ValueKind.function_, "xpcall second argument must be function");
-            try
-            {
-                Value[] callArgs;
-                foreach (arg; args[2 .. $])
-                {
-                    callArgs ~= cast(Value) arg;
-                }
-                auto result = invokeFunctionValue(cast(Value) args[0], callArgs);
-                return Value.from([Value.from(true), result]);
-            }
-            catch (Exception error)
-            {
-                auto handled = invokeFunctionValue(cast(Value) args[1], [Value.from(error.msg)]);
-                return Value.from([Value.from(false), handled]);
-            }
-        });
-        bindNative("map", (scope const(Value)[] args) {
-            return mapValue(args);
-        });
-        bindNative("filter", (scope const(Value)[] args) {
-            return filterValue(args);
-        });
-
-        installCoroutineLibrary();
-
-        Value[string] stringLib;
-        stringLib["len"] = Value.fromFunction(new NativeCallable("string.len", (scope const(Value)[] args) {
-            return measureLengthValue(args);
-        }));
-        stringLib["upper"] = Value.fromFunction(new NativeCallable("string.upper", (scope const(Value)[] args) {
-            enforce(args.length == 1, "string.upper(value) expects one argument");
-            return Value.from(args[0].toHostString().toUpper().to!string);
-        }));
-        stringLib["lower"] = Value.fromFunction(new NativeCallable("string.lower", (scope const(Value)[] args) {
-            enforce(args.length == 1, "string.lower(value) expects one argument");
-            return Value.from(args[0].toHostString().toLower().to!string);
-        }));
-        stringLib["trim"] = Value.fromFunction(new NativeCallable("string.trim", (scope const(Value)[] args) {
-            import std.string : strip;
-            enforce(args.length == 1, "string.trim(value) expects one argument");
-            return Value.from(args[0].toHostString().strip());
-        }));
-        stringLib["contains"] = Value.fromFunction(new NativeCallable("string.contains", (scope const(Value)[] args) {
-            enforce(args.length == 2, "string.contains(value, needle) expects two arguments");
-            return Value.from(args[0].toHostString().canFind(args[1].toHostString()));
-        }));
-        stringLib["replace"] = Value.fromFunction(new NativeCallable("string.replace", (scope const(Value)[] args) {
-            enforce(args.length == 3, "string.replace(value, from, to) expects three arguments");
-            return Value.from(args[0].toHostString().replace(args[1].toHostString(), args[2].toHostString()));
-        }));
-        globals.define("string", Value.from(stringLib));
-
-        Value[string] mathLib;
-        mathLib["abs"] = Value.fromFunction(new NativeCallable("math.abs", (scope const(Value)[] args) {
-            enforce(args.length == 1, "math.abs(value) expects one argument");
-            auto value = args[0].toFloat();
-            return Value.from(value < 0 ? -value : value);
-        }));
-        mathLib["floor"] = Value.fromFunction(new NativeCallable("math.floor", (scope const(Value)[] args) {
-            enforce(args.length == 1, "math.floor(value) expects one argument");
-            return Value.from(cast(long) floor(args[0].toFloat()));
-        }));
-        mathLib["min"] = Value.fromFunction(new NativeCallable("math.min", (scope const(Value)[] args) {
-            enforce(args.length >= 1, "math.min(value, ...) expects at least one argument");
-            double minimum = args[0].toFloat();
-            foreach (arg; args[1 .. $])
-            {
-                auto candidate = arg.toFloat();
-                if (candidate < minimum)
-                {
-                    minimum = candidate;
-                }
-            }
-            return Value.from(minimum);
-        }));
-        mathLib["max"] = Value.fromFunction(new NativeCallable("math.max", (scope const(Value)[] args) {
-            enforce(args.length >= 1, "math.max(value, ...) expects at least one argument");
-            double maximum = args[0].toFloat();
-            foreach (arg; args[1 .. $])
-            {
-                auto candidate = arg.toFloat();
-                if (candidate > maximum)
-                {
-                    maximum = candidate;
-                }
-            }
-            return Value.from(maximum);
-        }));
-        globals.define("math", Value.from(mathLib));
-
-        Value[string] tableLib;
-        tableLib["len"] = Value.fromFunction(new NativeCallable("table.len", (scope const(Value)[] args) {
-            return measureLengthValue(args);
-        }));
-        tableLib["length"] = tableLib["len"];
-        tableLib["keys"] = Value.fromFunction(new NativeCallable("table.keys", (scope const(Value)[] args) {
-            enforce(args.length == 1, "table.keys(value) expects one argument");
-            enforce(args[0].kind == ValueKind.table, "table.keys supports table values only");
-            Value[] keys;
-            foreach (key; args[0].tableValue.keys)
-            {
-                keys ~= tableKeyToScriptValue(key);
-            }
-            return Value.from(keys);
-        }));
-        tableLib["map"] = Value.fromFunction(new NativeCallable("table.map", (scope const(Value)[] args) {
-            return mapValue(args);
-        }));
-        tableLib["filter"] = Value.fromFunction(new NativeCallable("table.filter", (scope const(Value)[] args) {
-            return filterValue(args);
-        }));
-        globals.define("table", Value.from(tableLib));
-
-        Value[string] ioLib;
-        ioLib["exists"] = Value.fromFunction(new NativeCallable("io.exists", (scope const(Value)[] args) {
-            enforce(args.length == 1, "io.exists(path) expects one argument");
-            return Value.from(exists(args[0].toHostString()));
-        }));
-        ioLib["readFile"] = Value.fromFunction(new NativeCallable("io.readFile", (scope const(Value)[] args) {
-            enforce(args.length == 1, "io.readFile(path) expects one argument");
-            auto path = args[0].toHostString();
-            enforce(exists(path), format("File not found: %s", path));
-            return Value.from(readText(path));
-        }));
-        globals.define("io", Value.from(ioLib));
-
-        Value[string] osLib;
-        osLib["clock"] = Value.fromFunction(new NativeCallable("os.clock", (scope const(Value)[] args) {
-            enforce(args.length == 0, "os.clock() takes no arguments");
-            return Value.from(Clock.currTime.toUnixTime());
-        }));
-        osLib["getenv"] = Value.fromFunction(new NativeCallable("os.getenv", (scope const(Value)[] args) {
-            import std.process : environment;
-            enforce(args.length == 1, "os.getenv(name) expects one argument");
-            auto name = args[0].toHostString();
-            return Value.from(environment.get(name, ""));
-        }));
-        globals.define("os", Value.from(osLib));
-
-        Value[string] utf8Lib;
-        utf8Lib["len"] = Value.fromFunction(new NativeCallable("utf8.len", (scope const(Value)[] args) {
-            enforce(args.length == 1, "utf8.len(value) expects one argument");
-            long count = 0;
-            foreach (_; byDchar(args[0].toHostString()))
-            {
-                ++count;
-            }
-            return Value.from(count);
-        }));
-        globals.define("utf8", Value.from(utf8Lib));
-
-        Value[string] debugLib;
-        debugLib["type"] = Value.fromFunction(new NativeCallable("debug.type", (scope const(Value)[] args) {
-            enforce(args.length == 1, "debug.type(value) expects one argument");
-            return Value.from(args[0].kind.to!string);
-        }));
-        debugLib["traceback"] = Value.fromFunction(new NativeCallable("debug.traceback", (scope const(Value)[] args) {
-            enforce(args.length == 0, "debug.traceback() takes no arguments");
-            return Value.from(evaluatorContext.callStack.join("\n"));
-        }));
-        globals.define("debug", Value.from(debugLib));
-
-        Value[string] timeLib;
-        timeLib["nowUnix"] = Value.fromFunction(new NativeCallable("time.nowUnix", (scope const(Value)[] args) {
-            enforce(args.length == 0, "time.nowUnix() takes no arguments");
-            import core.stdc.time : time;
-            return Value.from(cast(long) time(null));
-        }));
-        globals.define("time", Value.from(timeLib));
-
-        Value[string] jsonLib;
-        jsonLib["encode"] = Value.fromFunction(new NativeCallable("json.encode", (scope const(Value)[] args) {
-            enforce(args.length == 1, "json.encode(value) expects one argument");
-            return Value.from(encodeJson(args[0]));
-        }));
-        globals.define("json", Value.from(jsonLib));
-        globals.define("_ENV", Value.fromFunction(new NativeCallable("_ENV", (scope const(Value)[] args) {
-            enforce(args.length == 1, "_ENV(name) expects one argument");
-            return globals.get(args[0].toHostString());
-        })));
-    }
 }
 
 private final class BindTypeEnemy
@@ -2935,6 +2675,28 @@ unittest
         return string.len(replaced) + math.min(6, 2, 9) + math.max(1, 5, 3);
     });
     assert(result.toInt() == 12);
+}
+
+unittest
+{
+    // Keep the complete standard-library surface installed by a fresh engine.
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        return typeof(error).kind == "function_"
+            && typeof(length).kind == "function_"
+            && typeof(map).kind == "function_"
+            && typeof(string).kind == "table"
+            && typeof(math).kind == "table"
+            && typeof(table).kind == "table"
+            && typeof(io).kind == "table"
+            && typeof(os).kind == "table"
+            && typeof(utf8).kind == "table"
+            && typeof(debug).kind == "table"
+            && typeof(time).kind == "table"
+            && typeof(json).kind == "table"
+            && typeof(coroutine).kind == "table";
+    });
+    assert(result.truthy());
 }
 
 unittest
