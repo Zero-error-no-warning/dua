@@ -15,6 +15,7 @@ import dua.execution;
 import dua.value;
 import std.algorithm : map;
 import std.array : array;
+import std.conv : to;
 import std.exception : enforce;
 import std.format : format;
 import std.math : floor;
@@ -571,6 +572,9 @@ mixin template EvaluatorImplementation()
                     return (cast(LiteralExpression) expression).value;
                 case Expression.Kind.variable:
                     return environment.get((cast(VariableExpression) expression).name);
+                case Expression.Kind.cast_:
+                    auto conversion = cast(CastExpression) expression;
+                    return castValue(evaluate(conversion.operand, environment), conversion.targetType);
                 case Expression.Kind.unary:
                     switch ((cast(UnaryExpression) expression).operatorSymbol)
                     {
@@ -793,6 +797,57 @@ mixin template EvaluatorImplementation()
             return "unknown";
         }
         return format("%s:%s", statement.line, statement.column);
+    }
+
+    private Value castValue(Value value, string targetType, size_t depth = 0)
+    {
+        enforce(depth < 64, "Cyclic or excessively nested cast type alias");
+        // A pure alias uses the same conversion as its target. Union casts
+        // only check membership, since choosing a conversion would be ambiguous.
+        if (auto definition = globals.find("__dua_type_" ~ targetType))
+        {
+            if (!definition.tableValue["isTable"].truthy())
+            {
+                auto alternatives = definition.tableValue["alternatives"].arrayValue;
+                if (alternatives.length == 1)
+                    return castValue(value, alternatives[0].toHostString(), depth + 1);
+            }
+        }
+        switch (targetType)
+        {
+            case "int":
+                if (value.kind == ValueKind.boolean)
+                    return Value.from(value.booleanValue ? 1 : 0);
+                if (value.kind == ValueKind.string_)
+                    return Value.from(value.stringValue.to!long);
+                if (value.kind == ValueKind.floating)
+                    enforce(value.floatingValue >= -9223372036854775808.0
+                        && value.floatingValue < 9223372036854775808.0,
+                        "Cannot cast non-finite or out-of-range double to int");
+                return Value.from(value.toInt());
+            case "double":
+                if (value.kind == ValueKind.boolean)
+                    return Value.from(value.booleanValue ? 1.0 : 0.0);
+                if (value.kind == ValueKind.string_)
+                    return Value.from(value.stringValue.to!double);
+                return Value.from(value.toFloat());
+            case "bool": return Value.from(value.truthy());
+            case "string": return Value.from(value.toHostString());
+            case "array":
+                if (value.kind == ValueKind.array) return value;
+                break;
+            case "table":
+                if (value.kind == ValueKind.table) return value;
+                break;
+            case "function":
+                if (value.kind == ValueKind.function_) return value;
+                break;
+            default:
+                if (valueMatchesType(value, targetType)) return value.valueCopy();
+                break;
+        }
+        enforce(false, format("Cannot cast %s to %s", value.kind, targetType));
+        assert(0);
     }
 
     private string expressionLocation(Expression expression) const

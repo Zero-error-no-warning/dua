@@ -165,6 +165,10 @@ private string inferExpressionType(Expression expression, ref string[string] var
         case Expression.Kind.unary:
             return (cast(UnaryExpression) expression).operatorSymbol == "!" ? "bool"
                 : inferExpressionType((cast(UnaryExpression) expression).operand, variables, functions, diagnostics);
+        case Expression.Kind.cast_:
+            auto conversion = cast(CastExpression) expression;
+            inferExpressionType(conversion.operand, variables, functions, diagnostics);
+            return conversion.targetType;
         case Expression.Kind.binary:
             auto left = inferExpressionType((cast(BinaryExpression) expression).left, variables, functions, diagnostics);
             auto right = (cast(BinaryExpression) expression).operatorSymbol == "is" ? "any"

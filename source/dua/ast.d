@@ -115,6 +115,7 @@ abstract class Expression : AstNode
         literal,
         variable,
         unary,
+        cast_,
         binary,
         ternary,
         call,
@@ -153,6 +154,19 @@ final class UnaryExpression : Expression
     {
         super(Kind.unary);
         this.operatorSymbol = operatorSymbol;
+        this.operand = operand;
+    }
+}
+
+final class CastExpression : Expression
+{
+    string targetType;
+    Expression operand;
+
+    this(string targetType, Expression operand)
+    {
+        super(Kind.cast_);
+        this.targetType = targetType;
         this.operand = operand;
     }
 }

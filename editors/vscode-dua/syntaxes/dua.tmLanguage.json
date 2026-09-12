@@ -85,7 +85,7 @@
         },
         {
           "name": "keyword.operator.word.dua",
-          "match": "\\bis\\b"
+          "match": "\\b(?:is|cast)\\b"
         },
         {
           "name": "constant.language.dua",

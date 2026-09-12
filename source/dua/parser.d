@@ -106,6 +106,23 @@ unittest
     assert(unary.column == 5);
 }
 
+unittest
+{
+    import std.exception : assertThrown;
+
+    auto program = parse(lex("return\n    cast(int) -values[0] + 2;"));
+    auto binary = cast(BinaryExpression) program.statements[0].expression;
+    assert(binary !is null);
+    auto conversion = cast(CastExpression) binary.left;
+    assert(conversion !is null && conversion.targetType == "int");
+    assert(conversion.line == 2 && conversion.column == 5);
+    auto unary = cast(UnaryExpression) conversion.operand;
+    assert(unary !is null && cast(IndexExpression) unary.operand !is null);
+    foreach (source; ["return cast int 1;", "return cast() 1;",
+        "return cast(int 1;", "return cast(int);"])
+        assertThrown!Exception(parse(lex(source)));
+}
+
 private struct Parser
 {
     Token[] tokens;
@@ -744,6 +761,14 @@ private struct Parser
 
     Expression parseUnary()
     {
+        if (match(TokenKind.keywordCast))
+        {
+            auto castToken = previous();
+            consume(TokenKind.leftParen, "Expected '(' after cast");
+            auto targetType = parseTypeName();
+            consume(TokenKind.rightParen, "Expected ')' after cast type");
+            return locatedExpression(new CastExpression(targetType, parseUnary()), castToken);
+        }
         if (match(TokenKind.bang, TokenKind.minus))
         {
             auto operatorToken = previous();

@@ -25,6 +25,7 @@ enum TokenKind
     keywordAlias,
     keywordStruct,
     keywordIs,
+    keywordCast,
     keywordTry,
     keywordCatch,
     keywordReturn,
@@ -389,6 +390,7 @@ private TokenKind keywordFor(string identifier)
         case "alias": return TokenKind.keywordAlias;
         case "struct": return TokenKind.keywordStruct;
         case "is": return TokenKind.keywordIs;
+        case "cast": return TokenKind.keywordCast;
         case "try": return TokenKind.keywordTry;
         case "catch": return TokenKind.keywordCatch;
         case "return": return TokenKind.keywordReturn;

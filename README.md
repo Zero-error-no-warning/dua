@@ -17,6 +17,7 @@ Dua は、**D 言語アプリケーションへ組み込み可能な軽量スク
 - ネイティブな値型 `struct`（代入・呼び出し・戻り値・コンテナ格納で浅いコピー）
 - `iota(end)` / `iota(start, end[, step])` による整数配列の生成
 - `auto` と `int` / `double` / `bool` / `string` による型付き宣言・関数
+- `cast(Type) expr` による明示的な型キャスト
 - `delegate` 型と `=>` / `:>` による型付きラムダ
 - `table` による参照型aggregateと型spread、`alias` による純粋な型別名・Union / Optional型
 - `struct Vec2 { int x; int y; }` と `Vec2(1, 2)` による値型の宣言・構築

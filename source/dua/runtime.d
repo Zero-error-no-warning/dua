@@ -972,6 +972,79 @@ final class ScriptEngine
 
 }
 
+unittest
+{
+    auto engine = new ScriptEngine();
+    RunOptions options;
+    options.typeCheck = true;
+    auto result = engine.run(q{
+        int integer = cast(int) 3.9;
+        double floating = cast(double) integer;
+        string text = cast(string) integer;
+        bool flag = cast(bool) integer;
+        int accept(int x) { return x; }
+        int converted() { return cast(int) 2.9; }
+        return integer == 3 && floating is double && text == "3" && flag
+            && accept(cast(int) 4.9) == 4 && converted() == 2
+            && cast(int) -3.9 == -3 && cast(int) 3.9 * 2 == 6
+            && cast(int) (3.9 * 2) == 7 && -cast(int) 3.9 == -3
+            && cast(int) cast(double) "12.5" == 12
+            && cast(int) true == 1 && cast(double) false == 0.0
+            && cast(int) "42" == 42 && cast(double) "2.5" == 2.5
+            && !cast(bool) null && !cast(bool) 0 && !cast(bool) ""
+            && cast(bool) "false" && cast(string) null == "null";
+    }, options);
+    assert(result.booleanValue);
+    assert(engine.check("string wrong = cast(int) 1.5;").length == 1);
+    assert(engine.check("int f(int x) { return x; } return cast(double) f(true);").length == 1);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        alias Integer = int;
+        alias Count = Integer;
+        alias OptionalInt = int | null;
+        table Point { int x; }
+        struct Position { int x; }
+        auto source = { x = 1 };
+        auto point = cast(Point) source;
+        point.x = 2;
+        auto position = Position(3);
+        auto copied = cast(Position) position;
+        copied.x = 4;
+        auto calls = 0;
+        double next() { calls = calls + 1; return 8.9; }
+        auto value = cast(int) next();
+        auto items = [2.9];
+        auto identity = (int x) => x;
+        auto functionValue = cast(int delegate(int)) identity;
+        return cast(Count) 4.9 == 4 && cast(OptionalInt) null == null
+            && cast(OptionalInt) 3 == 3 && point is Point && source.x == 2
+            && position.x == 3 && copied.x == 4 && calls == 1 && value == 8
+            && cast(int) items[0] == 2 && (cast(array) items)[0] == 2.9
+            && (cast(table) source).x == 2 && functionValue(5) == 5
+            && cast(any) 3 == 3;
+    });
+    assert(result.booleanValue);
+    foreach (source; ["return cast(int) {};", "return cast(double) null;",
+        "return cast(int) \"abc\";", "return cast(double) \"abc\";",
+        "return cast(int) 9223372036854775808.0;",
+        "return cast(int) (0.0 / 0.0);", "return cast(int) (1.0 / 0.0);",
+        "return cast(Unknown) 1;", "return cast(array) 1;",
+        "return cast(Point) { x = true };",
+        "return cast(OptionalInt) 1.5;"])
+    {
+        auto failed = engine.runSafe(source);
+        assert(!failed.ok, source);
+        assert(failed.errorMessage.canFind("1:8"), failed.errorMessage);
+    }
+    auto caught = engine.run("try { return cast(int) {}; } catch (err) { return true; }");
+    assert(caught.booleanValue);
+    assert(!engine.runSafe("auto x = 1; cast(int) x = 2;").ok);
+}
+
 private final class BindTypeEnemy
 {
     int hp;

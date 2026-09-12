@@ -22,7 +22,7 @@ auto empty = null;
 - 数値は10進整数か小数です。負数はリテラルではなく単項 `-` を適用した式です。
 - 文字列はダブルクォートで1行に記述します。現在、文字列リテラル内のエスケープシーケンスは提供しません。
 - 文は原則 `;` で終わり、ブロックは `{ ... }` で囲みます。
-- キーワードは `auto delegate alias struct is try catch return if else while for foreach switch case default break continue yield true false null this import export as` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。
+- キーワードは `auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。
 
 ### 1.2 値の種類と真偽
 
@@ -178,12 +178,35 @@ if (hero is Named) {
 - `typeinfo(value)` / `typeof(value)` は `{ kind, chain }` を返します。`chain` は名前付き型の継承チェーンです。
 - 事前型検査は保守的です。`any`、動的プロパティ、ネイティブ関数の結果などは実行時検査に残ります。
 
+### 型キャスト
+
+`cast(Type) expr` で明示的に型を変換します。
+
+```dua
+auto value = 3.9;
+int whole = cast(int) value;             // 3（小数部をゼロ方向に切り捨て）
+double decimal = cast(double) whole;    // 3.0
+string text = cast(string) whole;       // "3"
+int parsed = cast(int) "42";            // 42
+alias Count = int;
+auto count = cast(Count) value;         // 3
+```
+
+- `int` / `double`: 数値、真偽値（false は 0、true は 1）、数値文字列を変換します。`int` は符号付き64ビット整数です。整数範囲外、NaN、無限大から `int` への変換はエラーです。
+- `bool`: 条件式と同じ真偽判定です。文字列 `"false"` も空でないため真になります。
+- `string`: 値の文字列表現を返します。
+- 純粋な型別名は別名先と同じ変換を行います。Union / Optional、名前付き型、delegate 型は既存の型検査に成功した値を返します。Union の候補間での変換は行いません。
+- `array` / `table` / `function` は対応する種類の値を受け付けます。`any` は任意の値を受け付けます。参照型の共有とstructのコピー規則は通常の代入と同じです。
+- 変換できない値や不正な数値文字列は、キャスト位置付きの実行時エラーになります。
+
+キャストは単項演算子と同じ優先順位で、対象を一度だけ評価します。`cast(int) value * 2` は変換後に乗算します。式全体を変換する場合は `cast(int) (value * 2)` と書きます。
+
 ## 7. 演算子と優先順位
 
 強いものから概ね次の順です。
 
 1. 呼び出し、プロパティ、添字、スライス: `()`、`.`、`[]`、`[..]`
-2. 単項: `!`、`-`
+2. 単項: `!`、`-`、`cast(Type)`
 3. 乗除余: `* / %`
 4. 加減・連結: `+ - ~`
 5. シフト: `<< >>`
