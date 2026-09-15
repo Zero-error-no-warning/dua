@@ -1249,80 +1249,54 @@ ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugNam
 private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string operatorSymbol)(
     string debugName, auto ref T value, Object lifetimeOwner = null)
 {
-    static if (is(T == struct))
-        auto receiver = &value;
-    else
-        auto receiver = value;
-    return new ReflectedCallable(debugName, 2, (Value[] args) {
-        static if (is(T == struct))
-            auto ref actualValue = *receiver;
-        else
-            auto actualValue = receiver;
-        auto rhsValue = args[1];
-        int bestScore = -1;
-        Value delegate() invocation;
+    ReflectedCallable[] candidates;
 
-        // A partially instantiated overload represents every concrete RHS
-        // declaration.  Do not let its mere existence hide a second overload
-        // whose RHS remains a template parameter.
-        static if (__traits(compiles,
-            mixin("&value." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")")))
+    void registerCandidate(alias declaration)()
+    {
+        auto callable = &__traits(child, value, declaration);
+        static if (Parameters!(typeof(callable)).length == 1
+            && __traits(compiles, makeReflectedCallable(debugName, callable, lifetimeOwner)))
+            candidates ~= makeReflectedCallable(debugName, callable, lifetimeOwner);
+    }
+
+    // Instantiate each declaration separately: taking the address of the
+    // overload set only exposes one concrete RHS (or fails when ambiguous).
+    alias overloads = __traits(getOverloads, T, methodName, true);
+    static foreach (overload; overloads)
+    {{
+        static if (__traits(compiles, &__traits(child, value, overload!operatorSymbol)))
+            registerCandidate!(overload!operatorSymbol)();
+    }}
+
+    // Keep concrete candidates first so they win ties with numeric template
+    // instances. Generic-only operators must also register their candidates.
+    static foreach (overload; overloads)
+    {{
+        static foreach (R; AliasSeq!(long, double))
+        {{
+            static if (__traits(compiles,
+                &__traits(child, value, overload!(operatorSymbol, R))))
+                registerCandidate!(overload!(operatorSymbol, R))();
+        }}
+    }}
+
+    return new ReflectedCallable(debugName, 2, (Value[] args) {
+        auto rhsArgs = args[1 .. $];
+        int bestScore = -1;
+        ReflectedCallable match;
+        foreach (candidate; candidates)
         {
-            auto concrete = mixin("&actualValue." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")");
-            alias ConcreteRhs = Unqual!(Parameters!(typeof(concrete))[0]);
-            auto score = conversionScore!ConcreteRhs(rhsValue);
-            if (score >= 0)
+            auto score = candidate.matchArguments(rhsArgs);
+            if (score > bestScore)
             {
                 bestScore = score;
-                invocation = () {
-                    auto rhs = convertFromValue!ConcreteRhs(rhsValue);
-                    return convertToValue(concrete(rhs));
-                };
+                match = candidate;
             }
         }
-
-        void considerGeneric(R)()
-        {
-            static if (methodName == "opBinary")
-                enum acceptsGeneric = __traits(compiles,
-                    value.opBinary!(operatorSymbol, R)(R.init));
-            else
-                enum acceptsGeneric = __traits(compiles,
-                    value.opBinaryRight!(operatorSymbol, R)(R.init));
-            static if (acceptsGeneric)
-            {
-                auto genericScore = conversionScore!R(rhsValue);
-                if (genericScore > bestScore)
-                {
-                    bestScore = genericScore;
-                    invocation = () {
-                        static if (is(T == struct))
-                            auto ref actualValue = *receiver;
-                        else
-                            auto actualValue = receiver;
-                        auto rhs = convertFromValue!R(rhsValue);
-                        static if (methodName == "opBinary")
-                            return convertToValue(actualValue.opBinary!(operatorSymbol, R)(rhs));
-                        else
-                            return convertToValue(actualValue.opBinaryRight!(operatorSymbol, R)(rhs));
-                    };
-                }
-            }
-        }
-        static if (__traits(compiles,
-            mixin("&value." ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")")))
-        {
-            static if (variadicFunctionStyle!(typeof(mixin("&value." ~ methodName
-                    ~ "!(\"" ~ operatorSymbol ~ "\")"))) == Variadic.no)
-            {
-                considerGeneric!long();
-                considerGeneric!double();
-            }
-        }
-        enforce(invocation !is null,
+        enforce(match !is null,
             format("Operator '%s' has no overload matching RHS kind %s",
-                operatorSymbol, rhsValue.kind));
-        return invocation();
+                operatorSymbol, args[1].kind));
+        return match.invoke(rhsArgs);
     }, lifetimeOwner);
 }
 

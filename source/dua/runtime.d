@@ -99,6 +99,48 @@ private struct MixedBinaryAliasFixture
     alias target this;
 }
 
+private struct OverloadedBinaryFixture
+{
+    long value;
+
+    // Put the generic declaration first to verify concrete candidates win ties.
+    string opBinary(string op, R)(R rhs) const
+        if ((op == "+" || op == "/") && isNumeric!R) { return "generic-left"; }
+    double opBinary(string op)(double rhs) const if (op == "+") { return value + rhs; }
+    long opBinary(string op)(long rhs) const if (op == "+") { return value + rhs; }
+    string opBinary(string op)(string rhs) const if (op == "+") { return "text:" ~ rhs; }
+    long opBinary(string op)(OverloadedBinaryFixture rhs) const if (op == "+")
+    {
+        return value + rhs.value;
+    }
+}
+
+private final class OverloadedBinaryRightFixture
+{
+    long value;
+
+    this(long value) { this.value = value; }
+    string opBinaryRight(string op, L)(L lhs) const
+        if ((op == "+" || op == "/") && isNumeric!L) { return "generic-right"; }
+    long opBinaryRight(string op)(long lhs) const if (op == "+") { return lhs + value; }
+    double opBinaryRight(string op)(double lhs) const if (op == "+") { return lhs + value; }
+    string opBinaryRight(string op)(string lhs) const if (op == "+") { return lhs ~ ":text"; }
+}
+
+private struct GenericBinaryFixture
+{
+    long value;
+
+    auto opBinary(string op, R)(R rhs) const if (op == "+" && isNumeric!R)
+    {
+        return value + rhs;
+    }
+    auto opBinaryRight(string op, L)(L lhs) const if (op == "+" && isNumeric!L)
+    {
+        return lhs + value;
+    }
+}
+
 private struct BindTypeEnumFixture
 {
     enum State
@@ -1160,6 +1202,40 @@ unittest
     assert(!failed.ok);
     // A failed property assignment must leave the callable in the type table.
     assert(engine.run(`return StaticProperty.p();`).toFloat() == 2.5);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindAuto("left", OverloadedBinaryFixture(10));
+    engine.bindAuto("other", OverloadedBinaryFixture(20));
+    engine.bindAuto("right", new OverloadedBinaryRightFixture(30));
+    engine.bindAuto("generic", GenericBinaryFixture(40));
+    auto result = engine.run(q{
+        return [left + 2, left + 0.5, left + "hello", left + other,
+            2 + right, 0.5 + right, "hello" + right,
+            generic + 2, generic + 0.5, 2 + generic, 0.5 + generic,
+            left / 2, 2 / right];
+    });
+    assert(result.toScriptLiteral() ==
+        `[12, 10.5, "text:hello", 30, 32, 30.5, "hello:text", 42, 40.5, 42, 40.5, "generic-left", "generic-right"]`);
+    assert(result.arrayValue[0].kind == ValueKind.integer);
+    assert(result.arrayValue[4].kind == ValueKind.integer);
+
+    // Bound overloads must keep observing the reflected receiver's current state.
+    assert(engine.run(q{
+        left.value = 100;
+        right.value = 200;
+        return [left + 2, 2 + right];
+    }).toScriptLiteral() == `[102, 202]`);
+
+    foreach (source; [`return left - 2;`, `return 2 - right;`,
+        `return generic + "nope";`, `return "nope" + generic;`])
+    {
+        auto mismatch = engine.runSafe(source);
+        assert(!mismatch.ok);
+        assert(mismatch.errorMessage.canFind("no overload matching RHS kind"));
+    }
 }
 
 unittest
