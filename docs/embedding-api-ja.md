@@ -71,6 +71,7 @@ assert(answer.toInt() == 42);
 engine.registerModule("game.rules", q{
     auto privateBase = 40;
     export auto answer = privateBase + 2;
+    export int calculate(int value) { return value + privateBase; }
 });
 
 auto rules = engine.loadModule("game.rules");
@@ -331,7 +332,7 @@ engine.clearModuleCache();
 
 - `registerModule(name, source)` はソースをエンジンへ登録します。
 - `require(name)` / `import ... as ...` は一度評価した値をキャッシュします。
-- `clearModuleCache()` は全キャッシュを消します。登録ソースは残ります。
+- `clearModuleCache()` は評価済みソースモジュールのキャッシュを消します。登録ソースと D 側で作成したモジュールは残ります。
 - 未登録時は loader、続いて検索パターン `?.dua`, `?/init.dua` を調べます。`.` はパス区切りへ変換されます。
 - スクリプト側で `package.path`、`package.addPath`、`package.addLoader` などを使って設定できます。ファイル探索を許可する場合は検索元を信頼境界として扱ってください。
 

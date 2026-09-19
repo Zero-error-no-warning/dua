@@ -68,7 +68,10 @@ void main()
 
 - [入門ガイド](docs/public-guide-ja.md) — ビルド、最初の埋め込み、値・関数・モジュールの基本
 - [言語リファレンス](docs/language-reference-ja.md) — 構文、型、標準ライブラリの一覧
+- [日本語 HTML リファレンス](docs/language-reference-ja.html) — 30章の言語仕様・標準関数詳解・D API・実用例。全文検索、コードコピー、ダークモード、印刷に対応し、ブラウザーで直接開けます
 - [埋め込み API リファレンス](docs/embedding-api-ja.md) — `ScriptEngine` / `Value` / reflection / 安全な実行
+
+HTML版は外部依存のない単体ファイルです。原稿を更新したら `node docs/build-reference.mjs` で再生成できます。
 
 ## エディターサポート
 

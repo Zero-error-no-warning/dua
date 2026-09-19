@@ -43,11 +43,11 @@ first = first + 1;
 first, second = [second, first];
 ```
 
-- `auto name = expr;` は値から型を推論します。
-- `Type name = expr;` は代入時に型を検査します。組み込み型は `int`、`double`、`bool`、`string`、`any`、`void` です。
+- `auto name = expr;` は型注釈なしで値を束縛します。事前型検査では初期値から型を推論します。
+- `Type name = expr;` は宣言の初期値を実行時に型検査します。現在の実行時環境は変数の型注釈を保持しないため、その後の単純代入すべてを同じ型に制限するものではありません。事前型検査は別途 `check` / `RunOptions.typeCheck` で有効にします。
 - 宣言には初期値が必須です。未宣言変数への代入はエラーです。
 - ブロックと関数は外側を参照できるレキシカルスコープを作り、ラムダは外側の変数をキャプチャします。
-- `auto a, b = array;` と `a, b = array;` は、右辺の配列要素を左辺へ順番に割り当てる分配代入です。関数が複数の戻り値を持つ機能ではありません。要素が足りない左辺には `null` が入ります。
+- `auto a, b = array;` と `a, b = array;` は、右辺の配列要素を左辺へ順番に割り当てる分配代入です。`return a, b;` も書けますが、戻り値は配列にまとめられます。要素が足りない左辺には `null` が入ります。
 
 ## 3. 関数とラムダ
 
@@ -72,8 +72,9 @@ auto sink = (any value) :> rawset({}, "value", value);
 - `(typedArgs) => expression` は式を返すラムダです。
 - `(typedArgs) :> expression` は式を評価して結果を捨てる `void` ラムダです。値を返すラムダではありません。
 - ブロック形式の関数は明示的な `return` がなければ `null` を返します。単なる最後の式は暗黙 return になりません。
-- `ReturnType delegate(ArgumentTypes)` は関数型です（例: `int delegate(int)`）。引数・戻り値は呼び出し時に検査されます。
+- `ReturnType delegate(ArgumentTypes)` は関数型の表記です（例: `int delegate(int)`）。型付き関数自身の引数・戻り値は呼び出し時に検査されます。ただし現在の delegate 型への実行時適合判定は関数値であることの確認で、注釈だけでシグネチャ全体の一致を保証するものではありません。
 - テーブル上の関数を `object.method(...)` と呼ぶと、関数本体の `this` はそのテーブルになります。
+- 同名の直接メンバーがない場合、`value.fn(args)` はスコープ内の関数 `fn(value, args)` を探す UFCS 呼び出しになります。メンバーが存在して関数でない場合はエラーです。
 
 ## 4. 制御構文
 
@@ -108,6 +109,7 @@ default:
 - `foreach (value; collection)` は値だけ、`foreach (key, value; collection)` は配列の添字またはテーブルのキーと値を受け取ります。
 - `break` / `continue` はループで使用します。`switch` の分岐を終えるときも `break` を使用できます。
 - 三項演算子 `condition ? whenTrue : whenFalse` も利用できます。
+- 現在の `switch` は最初に選ばれた節だけを実行し、次の節へフォールスルーしません。`default` は最後に置いてください。
 
 ## 5. 配列、スライス、テーブル
 
@@ -142,6 +144,17 @@ auto tableCopy = { ...user, hp = 50 };
 
 ## 6. 型、alias、Union
 
+| 型名 | 意味 |
+|---|---|
+| `int` | 符号付き64ビット整数 |
+| `double` | 倍精度浮動小数 |
+| `bool` | `true` または `false` |
+| `string` | UTF-8文字列 |
+| `any` | 任意の種類の値 |
+| `void` | 値を返さない関数の注釈。実行時の対応値は `null` |
+
+型付き宣言の数値型は値の種類を区別します。`double rate = 1.0;` または `double rate = cast(double) 1;` と記述してください。整数リテラル `1` が型注釈だけで自動的に double に変換されるわけではありません。配列・table・function の種類を確認して受け取る明示キャストは、後述の `cast(array)` などを使います。
+
 ```D
 struct Vec2 {
     double x;
@@ -155,6 +168,10 @@ table Named {
 table Player {
     ...Named;
     int hp;
+}
+table Enemy {
+    string name;
+    int damage;
 }
 alias Target = Player | Enemy;
 alias MaybePlayer = Player | null;
@@ -171,11 +188,11 @@ if (hero is Named) {
 - `alias Name = T` と `alias Name = A | B` は純粋な型別名とUnion型に使用します。aggregateは宣言しません。
 
 - 名前付きテーブル型は宣言したフィールドを要求しますが、余分なフィールドは許可します。
-- 型内の `...BaseType;` は基底型のフィールドと型チェーンを取り込みます。
+- table 型内の `...BaseType;` は基底型のフィールドと型チェーンを取り込みます。struct 宣言内の型 spread は未対応です。
 - 基底型同士または派生型との同名フィールドは、同じ型でもエラーです。
 - `A | B` は Union、`T | null` は Optional 型として使えます。
 - `value is Type` は名前付き型とその基底型を判定します。
-- `typeinfo(value)` / `typeof(value)` は `{ kind, chain }` を返します。`chain` は名前付き型の継承チェーンです。
+- `typeinfo(value)` / `typeof(value)` は `{ kind, chain, aliasThisChain }` を返します。`chain` は名前付き型の型チェーン、`aliasThisChain` は D reflection の alias this に関する情報です。
 - 事前型検査は保守的です。`any`、動的プロパティ、ネイティブ関数の結果などは実行時検査に残ります。
 
 ### 型キャスト
@@ -203,20 +220,27 @@ auto count = cast(Count) value;         // 3
 
 ## 7. 演算子と優先順位
 
-強いものから概ね次の順です。
+上ほど強い優先順位です。通常の二項演算子は同じ段の中で左から結合します。三項式の偽側は右結合です。`is` の右辺は値の式ではなく型名です。
 
-1. 呼び出し、プロパティ、添字、スライス: `()`、`.`、`[]`、`[..]`
-2. 単項: `!`、`-`、`cast(Type)`
-3. 乗除余: `* / %`
-4. 加減・連結: `+ - ~`
-5. シフト: `<< >>`
-6. 比較と型判定: `< <= > >=`、`is`
-7. 等価: `== !=`
-8. ビット: `&`、`^`、`|`
-9. 論理: `&&`、`||`
-10. 三項: `?:`
+| 優先順位 | 演算子 | 用途 |
+|---|---|---|
+| 1（最強） | `()`、`.`、`[]`、`[..]` | 呼び出し、メンバー、添字、スライス |
+| 2 | `!`、`-`、`cast(Type)` | 論理否定、符号反転、明示変換 |
+| 3 | `*`、`/`、`%` | 乗算、除算、整数剰余 |
+| 4 | `+`、`-`、`~` | 加減、連結 |
+| 5 | `<<`、`>>` | 整数シフト |
+| 6 | `<`、`<=`、`>`、`>=`、`is` | 大小比較、型判定 |
+| 7 | `==`、`!=` | 等価・不等価 |
+| 8 | `&` | ビットAND |
+| 9 | `^` | ビットXOR |
+| 10 | `|` | ビットOR |
+| 11 | `&&` | 短絡論理AND |
+| 12 | `||` | 短絡論理OR |
+| 13（最弱） | `?:` | 条件による式の選択 |
 
-`&&` と `||` は短絡評価します。算術は数値、`~` は文字列表現の連結です。テーブルには次の特殊キーを置いて動作を拡張できます。
+`=` は代入文に使います。式としての連鎖代入や `+=`、`++` は提供しません。`+`・`-`・`*` は両辺が整数なら整数、それ以外は浮動小数として計算します。`%`、ビット演算、シフトは整数に変換して処理します。
+
+`&&` と `||` は短絡評価します。`/` は浮動小数の結果を返します。`~` は両辺が配列なら配列を連結し、それ以外では文字列表現を連結します。テーブルには次の特殊キーを置いて動作を拡張できます。
 
 | キー | 用途 |
 |---|---|
@@ -295,14 +319,14 @@ return rules.add(5);
 - `export` はモジュールソース内だけで使えます。宣言に付けるほか、`export existingName;` で既存値を公開できます。
 - import のモジュール名は `game.rules` または `"game.rules"`、別名は `as alias` で指定します。
 - `require("game.rules")` は同じキャッシュ機構からモジュール値を返します。
-- export が1つ以上あれば export テーブルがモジュール値です。export がなければトップレベルの実行結果を返します。
+- export が1つ以上あれば export テーブルがモジュール値です。export がなく、トップレベルの結果がテーブルならその内容を取り込みます。数値などの任意の戻り値が `require` の結果になるわけではありません。
 
 ## 12. 標準関数・ライブラリ一覧
 
 | 名前 | 概要 |
 |---|---|
 | `error(value[, level])` | スクリプトエラーを送出 |
-| `typeof(value)`, `typeinfo(value)` | `{ kind, chain }` を返す |
+| `typeof(value)`, `typeinfo(value)` | `{ kind, chain, aliasThisChain }` を返す |
 | `length(value)`, `len(value)` | 文字列、配列、テーブル等の長さ |
 | `iota(end)`, `iota(start,end[,step])` | 終了値を含まない整数配列を生成。負の step で降順 |
 | `rawget(table,key)`, `rawset(table,key,value)` | 生のテーブルアクセス |
@@ -316,7 +340,7 @@ return rules.add(5);
 | `io.exists/readFile` | ファイル確認・読み込み |
 | `os.clock/getenv`, `time.nowUnix` | 時刻・環境変数 |
 | `debug.type/traceback` | 値種別・現在のスタック |
-| `json.encode` | Dua のスクリプトリテラル表現へ変換（汎用 JSON serializer ではない） |
+| `json.encode` | JSON文字列へ変換。配列はJSON配列、table・structはJSONオブジェクト。関数・native・非有限数はエラー |
 | `_ENV(name)` | グローバル値を名前で取得 |
 
 `map` / `filter` の callback は、0引数なら引数なし、1引数なら値、2引数以上なら値とキー（または添字）を受け取ります。`table.keys` の順序は未規定です。
