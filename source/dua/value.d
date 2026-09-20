@@ -1046,10 +1046,19 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
 private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string debugName,
     auto ref T value, Object lifetimeOwner = null)
 {
-    alias Function = typeof(overload);
-    alias Delegate = ReturnType!Function delegate(Parameters!Function);
-    Delegate callable = &__traits(getMember, value, __traits(identifier, overload));
-    return makeReflectedCallableWithDefaults!overload(debugName, callable, lifetimeOwner);
+    static if (__traits(isStaticFunction, overload))
+    {
+        // Static members have no receiver and yield function pointers, not
+        // delegates. Keep the original declaration for default arguments.
+        return makeStaticReflectedCallable!overload(debugName);
+    }
+    else
+    {
+        alias Function = typeof(overload);
+        alias Delegate = ReturnType!Function delegate(Parameters!Function);
+        Delegate callable = &__traits(getMember, value, __traits(identifier, overload));
+        return makeReflectedCallableWithDefaults!overload(debugName, callable, lifetimeOwner);
+    }
 }
 
 private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string expression)(
@@ -1798,6 +1807,37 @@ private struct ReflectedDefaultFixture
     {
         return base + required + first + second;
     }
+}
+
+// A static factory returning its own reflected type must not be bound as a
+// member delegate. This also exercises recursive reflection instantiation.
+private struct ReflectedStaticFactoryFixture
+{
+    double value;
+    alias value this;
+
+    static auto Deg(double degrees = 180)
+    {
+        return ReflectedStaticFactoryFixture(degrees / 180);
+    }
+
+    double scaled(double factor = 2)
+    {
+        return value * factor;
+    }
+}
+
+unittest
+{
+    auto reflected = Value.reflect(ReflectedStaticFactoryFixture(0.25));
+    auto factory = reflected.tableValue["Deg"].functionValue;
+    assert(factory.minimumArity() == 0);
+    assert(factory.maximumArity() == 1);
+    assert(factory.invoke([]).tableValue["value"].toFloat() == 1);
+    auto result = factory.invoke([Value.from(90.0)]);
+    assert(result.tableValue["value"].toFloat() == 0.5);
+    assert(result.tableValue["scaled"].functionValue.invoke([]).toFloat() == 1);
+    assert(reflected.tableValue["scaled"].functionValue.invoke([]).toFloat() == 0.5);
 }
 
 private struct ReflectedDefaultConstructorFixture
