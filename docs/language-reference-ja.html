@@ -292,7 +292,16 @@ engine.bindAuto(<span class="str">&quot;counter&quot;</span>, counter);
 
 engine.run(<span class="str">&quot;vector.x = 99; counter.value = 7;&quot;</span>);
 assert(vector.x == <span class="num">1</span>);       <span class="comment">// struct は安全な値コピー</span>
-assert(counter.value == <span class="num">7</span>); <span class="comment">// class は元インスタンスへ反映</span></code></pre></figure><ul><li>struct はコピーを reflection するため、スクリプト側フィールド代入は元 struct に反映されません。</li><li>class は getter/setter を介して元インスタンスを読み書きします。</li><li>公開可能なフィールド、メソッド、演算子がテーブルへ反映されます。</li><li>同名の0引数メソッドと1引数メソッドは property getter/setter としても扱われます。通常の <code>obj.method(...)</code> 呼び出しも可能です。</li><li>class の継承チェーンは <code>typeinfo(value).chain</code> で取得できます。</li></ul><p>Reflection は D の型安全な境界変換に対応できるメンバーだけを公開します。公開面が意図どおりかテストしてください。</p><h3 id="host-6-s2">6.2 bindType<a class="anchor" href="#host-6-s2" aria-label="この項目へのリンク">#</a></h3><figure class="code-block"><figcaption><span>D · ホスト側</span><button type="button" class="copy" aria-label="コードをコピー">コピー</button></figcaption><pre tabindex="0"><code class="language-d"><span class="kw">struct</span> Player {
+assert(counter.value == <span class="num">7</span>); <span class="comment">// class は元インスタンスへ反映</span></code></pre></figure><ul><li>struct はコピーを reflection するため、スクリプト側フィールド代入は元 struct に反映されません。</li><li>class は getter/setter を介して元インスタンスを読み書きします。</li><li>公開可能なフィールド、メソッド、演算子がテーブルへ反映されます。</li><li>同名の0引数メソッドと1引数メソッドは property getter/setter としても扱われます。通常の <code>obj.method(...)</code> 呼び出しも可能です。</li><li>class の継承チェーンは <code>typeinfo(value).chain</code> で取得できます。</li></ul><p>Reflection は D の型安全な境界変換に対応できるメンバーだけを公開します。公開面が意図どおりかテストしてください。</p><p><code>reflect</code> / <code>bindAuto</code> で公開した D class は、<code>to!T()</code> や <code>bindFunc</code> のクラス引数へ戻すと
+元インスタンスと <code>is</code> で一致する参照になります。通常の関数呼び出し、UFCS、D 関数の
+戻り値を別の D 関数へ渡す場合も同じです。<code>bindType</code> の登録は逆変換の必須条件ではありません。
+実際の D オブジェクトへの実行時キャストで判定するため、派生型から基底型への変換と、
+基底型として公開された派生オブジェクトの派生型への変換に対応します。無関係なクラス、
+通常のテーブル、型名や型チェーンだけを設定したテーブルはクラス引数に変換できません。
+<code>{ ...instance }</code> によるテーブルコピーにも D オブジェクトの参照は引き継がれません。</p><p>クラス引数のオーバーロードは、実オブジェクトの型との完全一致を基底型への変換より優先します。
+D の null クラス参照は Dua の <code>null</code> になり、Dua の <code>null</code> は D の null クラス参照へ戻ります。
+<code>null</code> はクラスの型情報を持たないため、クラス引数だけが異なる複数の候補では曖昧エラーになります。
+このホスト境界の null 変換は、スクリプトの <code>cast(Type)</code> や Optional 型の既存規則を変更しません。</p><h3 id="host-6-s2">6.2 bindType<a class="anchor" href="#host-6-s2" aria-label="この項目へのリンク">#</a></h3><figure class="code-block"><figcaption><span>D · ホスト側</span><button type="button" class="copy" aria-label="コードをコピー">コピー</button></figcaption><pre tabindex="0"><code class="language-d"><span class="kw">struct</span> Player {
     <span class="kw">string</span> name;
     <span class="kw">int</span> hp;
 }

@@ -156,6 +156,20 @@ private final class ReflectedStructStorage(T)
     }
 }
 
+private final class ReflectedClassStorage
+{
+    const(Object) instance;
+    bool isMutable;
+    bool isImmutable;
+
+    this(const(Object) instance, bool isMutable, bool isImmutable)
+    {
+        this.instance = instance;
+        this.isMutable = isMutable;
+        this.isImmutable = isImmutable;
+    }
+}
+
 enum ValueKind
 {
     null_,
@@ -184,6 +198,9 @@ private final class TableStorage
     // Value.  Conversion performs a checked cast to ReflectedStructStorage!T,
     // so reflection metadata such as type chains is never treated as identity.
     Object nativeOwner;
+    // Class identity is independent of struct ownership/copying and of all
+    // script-visible metadata. Keep the original object strongly reachable.
+    ReflectedClassStorage nativeClass;
     Value[] typeChain;
     Value[] aliasThisTargets;
     Value[] aliasThisChain;
@@ -447,6 +464,8 @@ struct Value
     static Value reflect(T)(auto ref T value)
         if (isAggregateType!T)
     {
+        static if (is(T == class))
+            if (value is null) return Value.nullValue();
         Value[string] converted;
         Value[string] propertyGetters;
         Value[string] propertySetters;
@@ -641,6 +660,11 @@ struct Value
             auto owner = reflectedTarget;
             result.tableStorage.nativeOwner = owner;
             result.tableStorage.copier = () => Value.reflect(owner.value);
+        }
+        else static if (is(T == class))
+        {
+            result.tableStorage.nativeClass = new ReflectedClassStorage(
+                reflectedTarget, is(T : Object), is(T : immutable(Object)));
         }
         return result;
     }
@@ -1375,6 +1399,23 @@ private Value convertToValue(T)(auto ref T value)
     }
 }
 
+// Both overload matching and conversion use the same checked D cast. A const
+// Value is only a const handle, but qualifiers of the original D object must
+// still be respected when recovering its reference.
+private T reflectedClass(T)(const(Value) value) if (is(T == class))
+{
+    // Reflection stores an unshared object; a cast must not invent sharing.
+    static if (!is(T : const(Object))) return null;
+    if (value.kind != ValueKind.table || value.tableStorage is null
+        || value.tableStorage.nativeClass is null)
+        return null;
+    static if (is(T : Object))
+        if (!value.tableStorage.nativeClass.isMutable) return null;
+    static if (is(T : immutable(Object)))
+        if (!value.tableStorage.nativeClass.isImmutable) return null;
+    return cast(T) value.tableStorage.nativeClass.instance;
+}
+
 /// Returns a non-negative overload ranking when a Value can be converted to T.
 /// Exact Dua representations outrank the permissive conversions retained by
 /// convertFromValue (for example, stringification and boolean truthiness).
@@ -1433,6 +1474,14 @@ private int conversionScore(T)(const(Value) value)
     else static if (isAssociativeArray!T && isSomeString!(KeyType!T))
     {
         return value.isFieldAggregate ? 80 : -1;
+    }
+    else static if (is(T == class))
+    {
+        // Null carries no dynamic class type, so all class overloads tie.
+        if (value.kind == ValueKind.null_) return 50;
+        auto instance = reflectedClass!T(value);
+        if (instance is null) return -1;
+        return typeid(instance) is typeid(Unqual!T) ? 1_000_000 : 900_000;
     }
     else static if (isAggregateType!T && !is(T == class))
     {
@@ -1606,6 +1655,13 @@ private T convertFromValue(T)(const(Value) value)
         foreach (index, element; value.arrayValue)
             result[index] = convertFromValue!Element(element);
         return result;
+    }
+    else static if (is(T == class))
+    {
+        if (value.kind == ValueKind.null_) return null;
+        auto instance = reflectedClass!T(value);
+        enforce(instance !is null, format("Cannot convert Value to '%s'", T.stringof));
+        return instance;
     }
     else static if (isAggregateType!T && !is(T == class))
     {
@@ -1969,6 +2025,84 @@ private struct AliasAggregateFixture
 
 private class AliasBaseFixture { }
 private class AliasDerivedFixture : AliasBaseFixture { }
+
+unittest
+{
+    import core.memory : GC;
+    import std.exception : assertThrown;
+
+    auto original = new AliasDerivedFixture();
+    auto reflected = Value.reflect(original);
+    assert(reflected.to!AliasDerivedFixture() is original);
+    assert(reflected.to!AliasBaseFixture() is original);
+    assert(reflected.to!Object() is original);
+    assert(reflected.to!(const AliasDerivedFixture)() is original);
+    assert(reflected.valueCopy().to!AliasDerivedFixture() is original);
+    assert(conversionScore!AliasDerivedFixture(reflected)
+        > conversionScore!AliasBaseFixture(reflected));
+
+    // A base-typed handle may still refer to a derived D object. Dynamic type,
+    // rather than the static reflection type or typeChain, controls conversion.
+    AliasBaseFixture baseHandle = original;
+    auto throughBase = Value.reflect(baseHandle);
+    assert(throughBase.to!AliasDerivedFixture() is original);
+    assert(conversionScore!AliasDerivedFixture(throughBase)
+        > conversionScore!AliasBaseFixture(throughBase));
+    auto baseOnly = Value.reflect(new AliasBaseFixture());
+    assertThrown!Exception(baseOnly.to!AliasDerivedFixture());
+    assert(conversionScore!AliasDerivedFixture(baseOnly) < 0);
+
+    // Neither metadata nor a struct's native owner proves class identity.
+    auto fake = Value.from(["__typechain": Value.from([Value.from("AliasDerivedFixture")])]);
+    fake.nativeTypeName = "AliasDerivedFixture";
+    fake.setTypeChain(cast(Value[]) reflected.typeChain);
+    fake.setAliasThisMetadata([reflected], cast(Value[]) reflected.typeChain);
+    foreach (invalid; [fake, Value.fromStruct(null), Value.native(original),
+        Value.reflect(NativeRoundTripItemFixture(7)), Value.from(7)])
+    {
+        assertThrown!Exception(invalid.to!AliasDerivedFixture());
+        assert(conversionScore!AliasDerivedFixture(invalid) < 0);
+        assertThrown!Exception(invalid.to!Object());
+        assert(conversionScore!Object(invalid) < 0);
+    }
+    assertThrown!Exception(reflected.to!AliasCaptureOwnerFixture());
+    assert(conversionScore!AliasCaptureOwnerFixture(reflected) < 0);
+
+    reflected.setTypeChain([Value.from("Unrelated")]);
+    reflected.tableValue = null;
+    reflected.setPropertyMetadata(null, null);
+    original = null;
+    baseHandle = null;
+    throughBase = Value.nullValue();
+    GC.collect();
+    assert(reflected.to!AliasDerivedFixture() !is null);
+
+    AliasDerivedFixture missing;
+    assert(Value.reflect(missing).kind == ValueKind.null_);
+    assert(Value.fromAuto(missing).kind == ValueKind.null_);
+    assert(Value.nullValue().to!AliasDerivedFixture() is null);
+    assert(conversionScore!AliasDerivedFixture(Value.nullValue()) >= 0);
+    assert(conversionScore!AliasDerivedFixture(Value.nullValue())
+        == conversionScore!AliasBaseFixture(Value.nullValue()));
+
+    // Qualifying the Value handle must not prevent mutations of a mutable D
+    // object, while reflecting a const object must not grant mutable access.
+    const handle = Value.reflect(new AliasDerivedFixture());
+    assert(handle.to!AliasDerivedFixture() !is null);
+    const(AliasDerivedFixture) readOnly = new AliasDerivedFixture();
+    auto constReflected = Value.reflect(readOnly);
+    assert(constReflected.to!(const AliasDerivedFixture)() is readOnly);
+    assertThrown!Exception(constReflected.to!AliasDerivedFixture());
+    assert(conversionScore!AliasDerivedFixture(constReflected) < 0);
+    assertThrown!Exception(handle.to!(immutable AliasDerivedFixture)());
+    assertThrown!Exception(handle.to!(shared AliasDerivedFixture)());
+    assert(conversionScore!(shared AliasDerivedFixture)(handle) < 0);
+    immutable frozen = new immutable AliasDerivedFixture();
+    auto frozenReflected = Value.reflect(frozen);
+    assert(frozenReflected.to!(immutable AliasDerivedFixture)() is frozen);
+    assert(frozenReflected.to!(const AliasBaseFixture)() is frozen);
+}
+
 private struct AliasClassFixture
 {
     AliasDerivedFixture target;

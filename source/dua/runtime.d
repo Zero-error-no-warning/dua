@@ -1364,6 +1364,159 @@ unittest
     assert(result.arrayValue[8].toHostString() == "struct-string:member");
 }
 
+version (unittest)
+{
+    private class BindingSceneFixture
+    {
+        int id = 7;
+        void add(long size) { id += size; }
+    }
+    private class BindingDerivedSceneFixture : BindingSceneFixture { }
+    private class BindingOtherSceneFixture { int id = 7; }
+
+    // Put the base overload first to catch selection by declaration order.
+    private string describeBoundClass(BindingSceneFixture value) { return "base"; }
+    private string describeBoundClass(BindingDerivedSceneFixture value) { return "derived"; }
+    private string describeBoundClass(BindingOtherSceneFixture value) { return "other"; }
+    private string describeBoundClass(long value) { return "integer"; }
+    private string describeBoundClass(string value) { return "string"; }
+    private string describeBoundClass(Value value) { return "value"; }
+
+    private string onlyBoundClasses(BindingSceneFixture value) { return "base"; }
+    private string onlyBoundClasses(BindingOtherSceneFixture value) { return "other"; }
+
+    private struct BindingStructFixture
+    {
+        int id = 7;
+        void add(long size) { id += size; }
+    }
+    private string classOrStruct(BindingSceneFixture value) { return "class"; }
+    private string classOrStruct(BindingStructFixture value) { return "struct"; }
+}
+
+unittest
+{
+    // Both bindType and bindAuto alone must preserve class identity.
+    foreach (registerType; [false, true])
+    {
+        auto engine = new ScriptEngine();
+        if (registerType) engine.bindType!BindingSceneFixture("Scene");
+        auto scene = new BindingSceneFixture();
+        engine.bindAuto("scene", scene);
+        engine.bindFunc!((BindingSceneFixture s, long size) => s.id + size)("newLightCanvas");
+        engine.bindFunc("sameScene", (BindingSceneFixture s) => s is scene);
+        engine.bindFunc("getScene", () => scene);
+        engine.bindFunc!((BindingSceneFixture s, long size) { s.id += size; })("changeScene");
+
+        assert(engine.run("return scene.id;").to!long() == 7);
+        assert(engine.run("return newLightCanvas(scene, 4);").to!long() == 11);
+        assert(engine.run("return scene.newLightCanvas(4);").to!long() == 11);
+        assert(engine.run("return scene;").to!BindingSceneFixture() is scene);
+        assert(engine.run("return sameScene(scene) && sameScene(getScene());").truthy());
+        assert(engine.run("return newLightCanvas(getScene(), 4);").toInt() == 11);
+        assert(engine.run("return getScene().newLightCanvas(4);").toInt() == 11);
+        assert(engine.run(q{
+            auto assigned = scene;
+            auto container = { item = [assigned] };
+            return sameScene(container.item[0])
+                && sameScene(cast(BindingSceneFixture) assigned)
+                && sameScene(cast(table) assigned);
+        }).truthy());
+        engine.run("changeScene(scene, 5); scene.add(2);");
+        assert(scene.id == 14);
+        assert(engine.run("return scene.id;").toInt() == 14);
+        engine.run("scene.id = 20;");
+        assert(scene.id == 20);
+        if (registerType)
+            assert(engine.run("return newLightCanvas(Scene(), 4);").toInt() == 11);
+
+        BindingSceneFixture missing;
+        engine.bindAuto("missingScene", missing);
+        engine.bindFunc("getMissingScene", () => missing);
+        engine.bindFunc!((BindingSceneFixture s) => s is null)("isMissingScene");
+        assert(engine.run(q{
+            return missingScene == null && getMissingScene() == null
+                && isMissingScene(null) && isMissingScene(getMissingScene());
+        }).truthy());
+    }
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto derived = new BindingDerivedSceneFixture();
+    BindingSceneFixture baseHandle = derived;
+    engine.bindAuto("derived", derived);
+    engine.bindAuto("baseHandle", baseHandle);
+    engine.bindAuto("baseOnly", new BindingSceneFixture());
+    engine.bindAuto("other", new BindingOtherSceneFixture());
+    engine.bindFunc("sameDerived", (BindingDerivedSceneFixture s) => s is derived);
+    engine.bindFunc("sameBase", (BindingSceneFixture s) => s is derived);
+    engine.bindFunc("getBaseHandle", () => baseHandle);
+    engine.bindFunc!describeBoundClass("describeClass");
+    engine.bindFunc!onlyBoundClasses("onlyClasses");
+    assert(engine.run(q{
+        return sameBase(derived) && sameBase(getBaseHandle())
+            && sameDerived(baseHandle) && sameDerived(getBaseHandle());
+    }).truthy());
+    assert(engine.run(q{
+        return describeClass(derived) == "derived"
+            && describeClass(baseHandle) == "derived"
+            && describeClass(getBaseHandle()) == "derived"
+            && derived.describeClass() == "derived"
+            && describeClass(baseOnly) == "base"
+            && describeClass(other) == "other"
+            && describeClass(4) == "integer"
+            && describeClass("text") == "string"
+            && describeClass({}) == "string";
+    }).truthy());
+
+    foreach (source; [
+        "return sameDerived(baseOnly);",
+        "return sameBase(other);",
+        "return sameBase({ id = 7 });",
+        "return sameBase({ ...derived });",
+        "return sameBase({ id = 7, __typechain = [\"BindingSceneFixture\"] });",
+        "return sameBase(setmetatableWithType({ id = 7 }, null, \"BindingSceneFixture\"));",
+        "return sameBase(cast(BindingSceneFixture) setmetatableWithType({}, null, \"BindingSceneFixture\"));",
+        "return onlyClasses(setmetatableWithType({}, null, \"BindingSceneFixture\"));",
+        "return sameBase(7);"
+    ])
+        assert(!engine.runSafe(source).ok, source);
+
+    auto ambiguous = engine.runSafe("return describeClass(null);");
+    assert(!ambiguous.ok);
+    assert(canFind(ambiguous.errorMessage, "multiple matching overloads"));
+    assert(!engine.runSafe("return onlyClasses(null);").ok);
+    // Rewriting the script's type chain must not change native identity.
+    assert(engine.run(q{
+        setmetatableWithType(derived, null, "BindingOtherSceneFixture");
+        return sameBase(derived) && sameDerived(derived)
+            && describeClass(derived) == "derived";
+    }).truthy());
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    auto original = BindingStructFixture();
+    engine.bindAuto("record", original);
+    engine.bindAuto("scene", new BindingSceneFixture());
+    engine.bindFunc!classOrStruct("classOrStruct");
+    engine.bindFunc!((BindingStructFixture value) => value.id)("readRecord");
+    assert(engine.run(q{
+        auto copied = record;
+        record.add(5);
+        copied.add(2);
+        return readRecord(record) == 12 && readRecord(copied) == 9
+            && readRecord({ id = 3 }) == 3
+            && classOrStruct(record) == "struct"
+            && classOrStruct(scene) == "class";
+    }).truthy());
+    assert(original.id == 7);
+    assert(engine.run("return record;").to!BindingStructFixture().id == 12);
+}
+
 private struct AliasNumberFixture
 {
     int value;
