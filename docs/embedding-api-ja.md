@@ -144,6 +144,16 @@ else
 | `errorKind` | `none`, `runtime`, `stepLimit`, `callDepthLimit` |
 | `stepsExecuted` | 今回消費した概算ステップ |
 
+`errorMessage` には発生元のファイルパスまたはモジュール名が含まれます（例: `[expression @ scripts/main.dua:1:8] Undefined variable 'missing'`）。ファイル API は渡されたパス、モジュール API はモジュール名を使い、読み込み済み関数やラムダも定義元を保持します。字句・構文・事前型検査のエラーにも発生元が付きます。
+
+文字列ソースに名前を付ける場合は `RunOptions.sourceName` を指定します。省略時は所属モジュール名（通常は `<global>`）を使います。ファイル API ではパスが優先されます。
+
+```d
+auto options = Dua.RunOptions();
+options.sourceName = "scripts/main.dua";
+auto out = engine.runSafe("return missing;", options);
+```
+
 ### 3.5 実行制限と型検査
 
 ```d

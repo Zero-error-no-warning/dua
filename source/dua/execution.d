@@ -11,8 +11,19 @@ enum RunErrorKind
     callDepthLimit
 }
 
+/// Internal marker preserving the first diagnostic origin during propagation.
+package class SourceException : Exception
+{
+    bool hasSourceContext;
+
+    this(string message, Throwable next = null)
+    {
+        super(message, __FILE__, __LINE__, next);
+    }
+}
+
 /// Base class for limits enforced by the interpreter rather than script errors.
-class ExecutionLimitException : Exception
+class ExecutionLimitException : SourceException
 {
     this(string message)
     {
@@ -52,6 +63,8 @@ struct RunOptions
 {
     ExecutionLimits limits;
     bool typeCheck;
+    /// Diagnostic name for source strings. File APIs use their path instead.
+    string sourceName;
 }
 
 struct RunOutcome

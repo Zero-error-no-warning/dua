@@ -343,13 +343,14 @@ final class ModuleHandle
 
     RunOutcome loadFileSafe(string path, RunOptions options)
     {
+        options.sourceName = path;
         try
             return loadSafe(engine.readScriptFile(path), options);
         catch (Exception error)
         {
             RunOutcome outcome;
             outcome.ok = false;
-            outcome.errorMessage = error.msg;
+            outcome.errorMessage = engine.withSourceContext(error, path).msg;
             outcome.errorKind = RunErrorKind.runtime;
             return outcome;
         }
@@ -361,6 +362,130 @@ final class ModuleHandle
 /// Backwards-compatible name for the former host-only module facade.
 alias ScriptModule = ModuleHandle;
 
+unittest
+{
+    import std.path : buildPath;
+    import std.file : tempDir;
+    import std.uuid : randomUUID;
+
+    auto path = buildPath(tempDir(), "dua-diagnostics-" ~ randomUUID().toString() ~ ".dua");
+    scope (exit) if (exists(path)) remove(path);
+    foreach (source; ["return missing;", "auto broken = ;", "return `;", "error(\"boom\");"])
+    {
+        write(path, source);
+        auto engine = new ScriptEngine();
+        auto hostModule = engine.newModule("host");
+        foreach (outcome; [engine.runFileSafe(path), engine.loadFileSafe(path),
+            hostModule.loadFileSafe(path), engine.loadModuleFileSafe(path)])
+        {
+            assert(!outcome.ok);
+            assert(outcome.errorMessage.canFind(path), outcome.errorMessage);
+        }
+    }
+
+    auto engine = new ScriptEngine();
+    write(path, "int count = \"wrong\";");
+    RunOptions options;
+    options.typeCheck = true;
+    options.sourceName = "overridden";
+    auto checked = engine.runFileSafe(path, options);
+    assert(!checked.ok && checked.errorMessage.canFind(path), checked.errorMessage);
+    assert(checked.errorMessage.canFind("Type check failed"));
+    assert(!checked.errorMessage.canFind("overridden"));
+
+    write(path, "any fail() { return missing; } auto later = () => missing;");
+    engine.loadFile(path);
+    foreach (name; ["fail", "later"])
+    {
+        bool failed;
+        try engine.call(name);
+        catch (Exception error)
+        {
+            failed = true;
+            assert(error.msg.canFind(path), error.msg);
+        }
+        assert(failed);
+    }
+
+    write(path, "return missing;");
+    bool failed;
+    try engine.runFile(path);
+    catch (Exception error)
+    {
+        failed = true;
+        assert(error.msg == "[expression @ " ~ path ~ ":1:8] Undefined variable 'missing'", error.msg);
+    }
+    assert(failed);
+}
+
+unittest
+{
+    foreach (source; ["return missing;", "auto broken = ;", "return `;", "error(\"boom\");"])
+    {
+        auto engine = new ScriptEngine();
+        engine.registerModule("inner", source);
+        engine.registerModule("outer", "import inner;");
+        auto outcome = engine.runSafe("import outer;");
+        assert(!outcome.ok);
+        assert(outcome.errorMessage.canFind("@ inner"), outcome.errorMessage);
+        assert(!outcome.errorMessage.canFind("@ outer"), outcome.errorMessage);
+    }
+
+    auto engine = new ScriptEngine();
+    engine.registerModule("library", "export any fail() { return missing; }");
+    auto outcome = engine.runSafe("import library; return library.fail();");
+    assert(!outcome.ok && outcome.errorMessage.canFind("@ library:"), outcome.errorMessage);
+    outcome = engine.runSafe("return missing;");
+    assert(!outcome.ok && outcome.errorMessage.canFind("@ <global>:"), outcome.errorMessage);
+
+    RunOptions options;
+    options.sourceName = "named.dua";
+    engine.bindNative("nativeFail", delegate Value(scope const(Value)[] args) {
+        throw new Exception("[application] failed");
+    });
+    outcome = engine.runSafe("nativeFail();", options);
+    assert(!outcome.ok && outcome.errorMessage.canFind("@ named.dua:"), outcome.errorMessage);
+    assert(outcome.errorMessage.canFind("[application] failed"));
+
+    options.limits.maxSteps = 10;
+    outcome = engine.runSafe("while (true) {}", options);
+    assert(outcome.errorKind == RunErrorKind.stepLimit);
+    assert(outcome.errorMessage.canFind("named.dua"), outcome.errorMessage);
+    options.limits.maxSteps = 0;
+    options.limits.maxCallDepth = 3;
+    outcome = engine.runSafe("any recurse() { return recurse(); } return recurse();", options);
+    assert(outcome.errorKind == RunErrorKind.callDepthLimit);
+    assert(outcome.errorMessage.canFind("named.dua"), outcome.errorMessage);
+
+    auto caught = engine.run(q{
+        try { error({ message = "boom", code = 7 }); }
+        catch (err) { return [err.kind, err.value.code, err.message]; }
+    }, options);
+    assert(caught.arrayValue[0].toHostString() == "ScriptError");
+    assert(caught.arrayValue[1].toInt() == 7);
+    assert(caught.arrayValue[2].toHostString().canFind("named.dua"));
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    RunOptions options;
+    options.sourceName = "worker.dua";
+    auto loaded = engine.loadSafe(q{
+        auto worker = coroutine.create(() {
+            yield 1;
+            return missing;
+        });
+    }, options);
+    assert(loaded.ok, loaded.errorMessage);
+    options.sourceName = "caller.dua";
+    auto outcome = engine.runSafe("coroutine.resume(worker); return missing;", options);
+    assert(!outcome.ok && outcome.errorMessage.canFind("@ caller.dua:"), outcome.errorMessage);
+    auto resumed = engine.run("return coroutine.resume(worker);", options);
+    assert(!resumed.arrayValue[0].truthy());
+    assert(resumed.arrayValue[1].toHostString().canFind("@ worker.dua:"));
+}
+
 final class ScriptCallable : CallableValue
 {
     private ScriptEngine engine;
@@ -370,6 +495,7 @@ final class ScriptCallable : CallableValue
     private Statement[] body;
     private string[] parameterTypes;
     private string returnType;
+    private string sourceName;
 
     this(string name, ScriptEngine engine, Environment closure, string[] parameters, bool variadic,
         Statement[] body, string[] parameterTypes = null, string returnType = "")
@@ -382,9 +508,21 @@ final class ScriptCallable : CallableValue
         this.body = body.dup;
         this.parameterTypes = parameterTypes.dup;
         this.returnType = returnType;
+        this.sourceName = engine.evaluatorContext.sourceName;
     }
 
     override Value invoke(Value[] args)
+    {
+        auto previousSource = engine.evaluatorContext.sourceName;
+        engine.evaluatorContext.sourceName = sourceName;
+        scope (exit) engine.evaluatorContext.sourceName = previousSource;
+        try
+            return invokeBody(args);
+        catch (Exception error)
+            throw engine.withSourceContext(error, sourceName);
+    }
+
+    private Value invokeBody(Value[] args)
     {
         auto requiredCount = variadic && parameters.length > 0 ? parameters.length - 1 : parameters.length;
         if (variadic)
@@ -770,6 +908,7 @@ final class ScriptEngine
 
     RunOutcome runFileSafe(string path, RunOptions options)
     {
+        options.sourceName = path;
         try
         {
             return runSafe(readScriptFile(path), options);
@@ -778,7 +917,8 @@ final class ScriptEngine
         {
             RunOutcome outcome;
             outcome.ok = false;
-            outcome.errorMessage = error.msg;
+            outcome.errorMessage = withSourceContext(error, path).msg;
+            outcome.errorKind = RunErrorKind.runtime;
             return outcome;
         }
     }
@@ -828,6 +968,7 @@ final class ScriptEngine
 
     RunOutcome loadFileSafe(string path, RunOptions options)
     {
+        options.sourceName = path;
         try
         {
             return loadSafe(readScriptFile(path), options);
@@ -836,7 +977,8 @@ final class ScriptEngine
         {
             RunOutcome outcome;
             outcome.ok = false;
-            outcome.errorMessage = error.msg;
+            outcome.errorMessage = withSourceContext(error, path).msg;
+            outcome.errorKind = RunErrorKind.runtime;
             return outcome;
         }
     }
@@ -869,6 +1011,9 @@ final class ScriptEngine
 
     private RunOutcome runInEnvironmentSafe(string source, Environment environment, RunOptions options)
     {
+        auto previousSource = evaluatorContext.sourceName;
+        evaluatorContext.sourceName = options.sourceName;
+        scope (exit) evaluatorContext.sourceName = previousSource;
         evaluatorContext.callStack.length = 0;
         evaluatorContext.lastErrorStack.length = 0;
         evaluatorContext.currentRunOptions = options;
@@ -895,7 +1040,7 @@ final class ScriptEngine
         catch (Exception error)
         {
             outcome.ok = false;
-            outcome.errorMessage = error.msg;
+            outcome.errorMessage = withSourceContext(error, options.sourceName).msg;
             outcome.stackTrace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack.dup : evaluatorContext.callStack.dup;
             outcome.errorKind = cast(StepLimitException) error !is null
                 ? RunErrorKind.stepLimit
@@ -3162,10 +3307,12 @@ unittest
     });
 
     assert(!result.arrayValue[0].truthy());
-    assert(result.arrayValue[1].toHostString() == "coroutine failed");
+    auto message = result.arrayValue[1].toHostString();
+    assert(message.canFind("@ <global>:"), message);
+    assert(message.canFind("coroutine failed"), message);
     assert(result.arrayValue[2].toHostString() == "dead");
     assert(!result.arrayValue[3].truthy());
-    assert(result.arrayValue[4].toHostString() == "coroutine failed");
+    assert(result.arrayValue[4].toHostString() == message);
 }
 
 unittest

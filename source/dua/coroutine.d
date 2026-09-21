@@ -22,6 +22,7 @@ package final class CoroutineState
     bool dead;
     bool failed;
     string errorMessage;
+    string sourceName;
 }
 
 package Fiber createFiber(void delegate() body)
@@ -102,6 +103,13 @@ package mixin template CoroutineImplementation()
         state.pendingArgs = args.dup;
         state.yieldedValues.length = 0;
         state.started = true;
+        auto previousSource = evaluatorContext.sourceName;
+        evaluatorContext.sourceName = state.sourceName;
+        scope (exit)
+        {
+            state.sourceName = evaluatorContext.sourceName;
+            evaluatorContext.sourceName = previousSource;
+        }
         state.fiber.call();
 
         if (state.failed)

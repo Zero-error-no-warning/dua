@@ -86,7 +86,7 @@ mixin template ModuleImplementation()
         catch (Exception error)
         {
             outcome.ok = false;
-            outcome.errorMessage = error.msg;
+            outcome.errorMessage = withSourceContext(error, name).msg;
             outcome.stackTrace = evaluatorContext.lastErrorStack.length > 0
                 ? evaluatorContext.lastErrorStack.dup : evaluatorContext.callStack.dup;
             outcome.errorKind = RunErrorKind.runtime;
@@ -121,7 +121,7 @@ mixin template ModuleImplementation()
         {
             RunOutcome outcome;
             outcome.ok = false;
-            outcome.errorMessage = error.msg;
+            outcome.errorMessage = withSourceContext(error, path).msg;
             outcome.errorKind = RunErrorKind.runtime;
             return outcome;
         }
@@ -130,6 +130,8 @@ mixin template ModuleImplementation()
     private RunOutcome runInModuleSafe(ModuleHandle hostModule, string source,
         Environment environment, RunOptions options)
     {
+        if (options.sourceName.length == 0)
+            options.sourceName = hostModule.moduleName;
         moduleExportScopes ~= hostModule.moduleValue.tableValue;
         auto outcome = runInEnvironmentSafe(source, environment, options);
         if (hostModule.visibility == ModuleVisibility.explicitExports)
@@ -238,7 +240,12 @@ mixin template ModuleImplementation()
         modules[name] = handle; // Make cycles share module identity while loading.
         scope(failure) modules.remove(name);
         auto outcome = handle.loadSafe(*source);
-        enforce(outcome.ok, outcome.errorMessage);
+        if (!outcome.ok)
+        {
+            auto error = new SourceException(outcome.errorMessage);
+            error.hasSourceContext = true;
+            throw error;
+        }
         return handle;
     }
 

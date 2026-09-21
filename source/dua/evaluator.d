@@ -20,9 +20,8 @@ import std.conv : to;
 import std.exception : enforce;
 import std.format : format;
 import std.math : floor;
-import std.string : startsWith;
 
-package final class ScriptThrownException : Exception
+package final class ScriptThrownException : SourceException
 {
     Value thrownValue;
 
@@ -37,6 +36,7 @@ package final class ScriptThrownException : Exception
 /// Keeping it together prevents evaluator internals from becoming ScriptEngine API.
 struct EvaluatorContext
 {
+    package string sourceName;
     package string[] callStack;
     package string[] lastErrorStack;
     package long[] indexLengthStack;
@@ -474,18 +474,10 @@ mixin template EvaluatorImplementation()
 
             return result;
         }
-        catch (ScriptThrownException error)
-        {
-            throw error;
-        }
-        catch (ExecutionLimitException error)
-        {
-            throw error;
-        }
         catch (Exception error)
         {
             auto location = statementLocation(statement);
-            throw makeContextualException(error.msg, location, "statement");
+            throw withSourceContext(error, evaluatorContext.sourceName, location, "statement");
         }
     }
 
@@ -583,18 +575,10 @@ mixin template EvaluatorImplementation()
 
             enforce(false, "Invalid assignment target");
         }
-        catch (ScriptThrownException error)
-        {
-            throw error;
-        }
-        catch (ExecutionLimitException error)
-        {
-            throw error;
-        }
         catch (Exception error)
         {
             auto location = expressionLocation(target);
-            throw makeContextualException(error.msg, location, "assignment");
+            throw withSourceContext(error, evaluatorContext.sourceName, location, "assignment");
         }
     }
 
@@ -831,18 +815,10 @@ mixin template EvaluatorImplementation()
                     assert(0);
             }
         }
-        catch (ScriptThrownException error)
-        {
-            throw error;
-        }
-        catch (ExecutionLimitException error)
-        {
-            throw error;
-        }
         catch (Exception error)
         {
             auto location = expressionLocation(expression);
-            throw makeContextualException(error.msg, location, "expression");
+            throw withSourceContext(error, evaluatorContext.sourceName, location, "expression");
         }
     }
 
@@ -918,13 +894,19 @@ mixin template EvaluatorImplementation()
         return format("%s:%s", expression.line, expression.column);
     }
 
-    private Exception makeContextualException(string message, string location, string context)
+    private Exception withSourceContext(Exception error, string sourceName,
+        string location = "", string context = "source")
     {
-        if (startsWith(message, "["))
-        {
-            return new Exception(message);
-        }
-        return new Exception(format("[%s @ %s] %s", context, location, message));
+        auto contextual = cast(SourceException) error;
+        if (contextual !is null && contextual.hasSourceContext)
+            return error;
+        if (contextual is null)
+            contextual = new SourceException(error.msg, error);
+        auto origin = sourceName.length > 0 ? sourceName : "<global>";
+        if (location.length > 0) origin ~= ":" ~ location;
+        contextual.msg = format("[%s @ %s] %s", context, origin, error.msg);
+        contextual.hasSourceContext = true;
+        return contextual;
     }
 
     private Value evaluateBinary(string operatorSymbol, Value left, Value right)
