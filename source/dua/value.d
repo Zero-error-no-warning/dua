@@ -136,16 +136,37 @@ final class OverloadedReflectedCallable : CallableValue
                 ambiguous = true;
             }
         }
-        string[] allowed;
-        foreach (overload; overloads)
-            allowed ~= overload.arityDescription();
         enforce(match !is null,
             format("Function '%s' has no overload matching %s arguments (allowed: %s)",
-                debugName, args.length, allowed.join(", ")));
+                debugName, args.length, allowedArities()));
         enforce(!ambiguous,
             format("Function '%s' has multiple matching overloads for %s arguments", debugName, args.length));
         return match.invoke(args);
     }
+
+    // enforce evaluates its message lazily; successful calls need no strings.
+    private string allowedArities() const
+    {
+        string[] allowed;
+        foreach (overload; overloads) allowed ~= overload.arityDescription();
+        return allowed.join(", ");
+    }
+}
+
+unittest
+{
+    auto one = new ReflectedCallable("select", 1, args => args[0]);
+    auto two = new ReflectedCallable("select", 2, args => args[1]);
+    auto callable = new OverloadedReflectedCallable("select", [one, two]);
+    assert(callable.invoke([Value.from(10)]).toInt() == 10);
+    assert(callable.invoke([Value.from(10), Value.from(20)]).toInt() == 20);
+    try { callable.invoke([]); assert(0); }
+    catch (Exception error)
+        assert(error.msg == "Function 'select' has no overload matching 0 arguments (allowed: 1, 2)");
+    auto ambiguous = new OverloadedReflectedCallable("select", [one, one]);
+    try { ambiguous.invoke([Value.from(10)]); assert(0); }
+    catch (Exception error)
+        assert(error.msg == "Function 'select' has multiple matching overloads for 1 arguments");
 }
 
 private final class ReflectedStructStorage(T)
