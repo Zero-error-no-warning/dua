@@ -7,6 +7,36 @@ import dua;
 unittest
 {
     auto engine = new ScriptEngine();
+    engine.load(q{
+        int descend(int depth) {
+            if (depth == 0) { error("deep failure"); }
+            return descend(depth - 1);
+        }
+    });
+    auto failed = engine.runSafe("return descend(20);");
+    assert(!failed.ok && failed.stackTrace.length > 0);
+    auto savedTrace = failed.stackTrace.dup;
+    auto second = engine.runSafe("return descend(2);");
+    assert(!second.ok && failed.stackTrace == savedTrace);
+    RunOptions limited;
+    limited.limits.maxCallDepth = 4;
+    assert(engine.runSafe("return descend(20);", limited).errorKind == RunErrorKind.callDepthLimit);
+    assert(engine.run(q{
+        auto inner = { read = () { error("inner failure"); } };
+        auto outer = {
+            value = 42,
+            read = () { try { inner.read(); } catch (err) {} return this.value; }
+        };
+        auto items = [[1, 2], [3, 4, 5]];
+        int badIndex() { error("index failure"); return 0; }
+        try { auto ignored = items[badIndex()]; } catch (err) {}
+        return outer.read() == 42 && items[$ - 1][$ - 1] == 5;
+    }).truthy());
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
     assert(engine.run(q{
         auto trace = "";
         auto left = {

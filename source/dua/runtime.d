@@ -797,7 +797,7 @@ final class ScriptEngine
         context.mapValue = (args) => mapValue(args);
         context.filterValue = (args) => filterValue(args);
         context.tableKeyToScriptValue = (key) => tableKeyToScriptValue(key);
-        context.traceback = () => evaluatorContext.callStack.join("\n");
+        context.traceback = () => evaluatorContext.callStack.view.join("\n");
         context.getGlobal = (name) => globals.get(name);
         return context;
     }
@@ -1181,7 +1181,7 @@ final class ScriptEngine
         auto previousSource = evaluatorContext.sourceName;
         evaluatorContext.sourceName = options.sourceName;
         scope (exit) evaluatorContext.sourceName = previousSource;
-        evaluatorContext.callStack.length = 0;
+        evaluatorContext.callStack.clear();
         evaluatorContext.lastErrorStack.length = 0;
         evaluatorContext.currentRunOptions = options;
         evaluatorContext.executedSteps = 0;
@@ -1208,7 +1208,7 @@ final class ScriptEngine
         {
             outcome.ok = false;
             outcome.errorMessage = withSourceContext(error, options.sourceName).msg;
-            outcome.stackTrace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack.dup : evaluatorContext.callStack.dup;
+            outcome.stackTrace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack.dup : evaluatorContext.callStack.snapshot();
             outcome.errorKind = cast(StepLimitException) error !is null
                 ? RunErrorKind.stepLimit
                 : cast(CallDepthLimitException) error !is null

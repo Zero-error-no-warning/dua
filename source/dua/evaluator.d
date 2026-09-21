@@ -30,15 +30,52 @@ package final class ScriptThrownException : SourceException
     }
 }
 
+// Stack storage is private to evaluation. Keep capacity across pops, and clear
+// inactive slots so receivers and closures are not retained by the GC.
+package(dua) struct EvaluationStack(T)
+{
+    private T[] storage;
+    private size_t count;
+
+    size_t length() const { return count; }
+
+    void push(T value)
+    {
+        if (count == storage.length) storage.length = count == 0 ? 8 : count * 2;
+        storage[count++] = value;
+    }
+
+    void pop()
+    {
+        assert(count > 0);
+        storage[--count] = T.init;
+    }
+
+    void clear()
+    {
+        storage[0 .. count] = T.init;
+        count = 0;
+    }
+
+    const(T) top() const
+    {
+        assert(count > 0);
+        return storage[count - 1];
+    }
+
+    const(T)[] view() const { return storage[0 .. count]; }
+    T[] snapshot() { return storage[0 .. count].dup; }
+}
+
 /// Mutable state that belongs exclusively to evaluation of a run.
 /// Keeping it together prevents evaluator internals from becoming ScriptEngine API.
 struct EvaluatorContext
 {
     package string sourceName;
-    package string[] callStack;
+    package EvaluationStack!string callStack;
     package string[] lastErrorStack;
-    package long[] indexLengthStack;
-    package Value[] thisContextStack;
+    package EvaluationStack!long indexLengthStack;
+    package EvaluationStack!Value thisContextStack;
     package RunOptions currentRunOptions;
     package size_t executedSteps;
 }
@@ -246,7 +283,7 @@ mixin template EvaluatorImplementation()
                             kind = "ScriptError";
                         }
                         Value[] frames;
-                        auto trace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack : evaluatorContext.callStack;
+                        auto trace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack : evaluatorContext.callStack.view;
                         foreach (frame; trace) frames ~= Value.from(frame);
                         Value[string] errorInfo;
                         errorInfo["kind"] = Value.from(kind);
@@ -585,10 +622,10 @@ mixin template EvaluatorImplementation()
                 enforce(!indexed.isSlice, "Slice cannot be an assignment target");
                 auto container = evaluate(indexed.target, environment);
                 auto pushedLength = canMeasureLength(container);
-                if (pushedLength) evaluatorContext.indexLengthStack ~= measuredLength(container);
+                if (pushedLength) evaluatorContext.indexLengthStack.push(measuredLength(container));
                 scope (exit)
                 {
-                    if (pushedLength) --evaluatorContext.indexLengthStack.length;
+                    if (pushedLength) evaluatorContext.indexLengthStack.pop();
                 }
                 auto index = evaluate(indexed.index, environment);
                 resolved = new IndexExpression(new LiteralExpression(container), new LiteralExpression(index));
@@ -696,7 +733,7 @@ mixin template EvaluatorImplementation()
                     {
                         case "$":
                             enforce(evaluatorContext.indexLengthStack.length > 0, "$ is only available inside index expressions");
-                            return Value.from(evaluatorContext.indexLengthStack[$ - 1]);
+                            return Value.from(evaluatorContext.indexLengthStack.top());
                         case "-":
                             auto right = evaluate((cast(UnaryExpression) expression).operand, environment);
                             Value overloaded;
@@ -858,14 +895,14 @@ mixin template EvaluatorImplementation()
                     bool pushedLengthContext;
                     if (canMeasureLength(container))
                     {
-                        evaluatorContext.indexLengthStack ~= measuredLength(container);
+                        evaluatorContext.indexLengthStack.push(measuredLength(container));
                         pushedLengthContext = true;
                     }
                     scope (exit)
                     {
                         if (pushedLengthContext)
                         {
-                            evaluatorContext.indexLengthStack.length = evaluatorContext.indexLengthStack.length - 1;
+                            evaluatorContext.indexLengthStack.pop();
                         }
                     }
                     if ((cast(IndexExpression) expression).isSlice)
@@ -1154,10 +1191,10 @@ mixin template EvaluatorImplementation()
 
     private Value invokeFunctionValueWithThis(Value callable, Value[] args, Value thisValue)
     {
-        evaluatorContext.thisContextStack ~= thisValue;
+        evaluatorContext.thisContextStack.push(thisValue);
         scope (exit)
         {
-            evaluatorContext.thisContextStack.length = evaluatorContext.thisContextStack.length - 1;
+            evaluatorContext.thisContextStack.pop();
         }
         return invokeFunctionValue(callable, args);
     }
@@ -1170,7 +1207,7 @@ mixin template EvaluatorImplementation()
     private Value currentThisContext() const
     {
         assert(evaluatorContext.thisContextStack.length > 0);
-        return cast(Value) evaluatorContext.thisContextStack[$ - 1];
+        return cast(Value) evaluatorContext.thisContextStack.top();
     }
 
     private bool tryCallBinaryOverload(string operatorSymbol, Value left, Value right, out Value result)
@@ -1255,12 +1292,12 @@ mixin template EvaluatorImplementation()
         if (maximumDepth != 0 && evaluatorContext.callStack.length >= maximumDepth)
             throw new CallDepthLimitException(maximumDepth);
         auto name = callable.functionValue.debugName;
-        evaluatorContext.callStack ~= name;
+        evaluatorContext.callStack.push(name);
         scope (exit)
         {
             if (evaluatorContext.callStack.length > 0)
             {
-                evaluatorContext.callStack.length = evaluatorContext.callStack.length - 1;
+                evaluatorContext.callStack.pop();
             }
         }
         try
@@ -1269,7 +1306,7 @@ mixin template EvaluatorImplementation()
         }
         catch (Exception error)
         {
-            evaluatorContext.lastErrorStack = evaluatorContext.callStack.dup;
+            evaluatorContext.lastErrorStack = evaluatorContext.callStack.snapshot();
             throw error;
         }
     }

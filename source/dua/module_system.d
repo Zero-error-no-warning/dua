@@ -75,7 +75,7 @@ mixin template ModuleImplementation()
     /// Safe counterpart to loadModule. Module failures are returned as data.
     RunOutcome loadModuleSafe(string name)
     {
-        evaluatorContext.callStack.length = 0;
+        evaluatorContext.callStack.clear();
         evaluatorContext.lastErrorStack.length = 0;
         evaluatorContext.currentRunOptions = RunOptions.init;
         evaluatorContext.executedSteps = 0;
@@ -91,7 +91,7 @@ mixin template ModuleImplementation()
             outcome.ok = false;
             outcome.errorMessage = withSourceContext(error, name).msg;
             outcome.stackTrace = evaluatorContext.lastErrorStack.length > 0
-                ? evaluatorContext.lastErrorStack.dup : evaluatorContext.callStack.dup;
+                ? evaluatorContext.lastErrorStack.dup : evaluatorContext.callStack.snapshot();
             outcome.errorKind = RunErrorKind.runtime;
         }
         outcome.stepsExecuted = evaluatorContext.executedSteps;
