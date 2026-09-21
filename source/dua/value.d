@@ -218,11 +218,115 @@ struct AssociativeEntry
     Value value;
 }
 
+// Only scalar keys have an equality relation that can be indexed without
+// invoking host code. Keep their kind in the key: 1, 1.0 and true are distinct.
+private struct ScalarAssociativeKey
+{
+    ValueKind kind;
+    long bits;
+    string text;
+
+    size_t toHash() const nothrow @safe
+    {
+        return kind == ValueKind.string_ ? hashOf(text, hashOf(kind))
+            : hashOf(bits, hashOf(kind));
+    }
+
+    static bool fromValue(const ref Value value, out ScalarAssociativeKey key)
+    {
+        key.kind = value.kind;
+        switch (value.kind)
+        {
+            case ValueKind.null_:
+                return true;
+            case ValueKind.integer:
+                key.bits = value.integerValue;
+                return true;
+            case ValueKind.boolean:
+                key.bits = value.booleanValue;
+                return true;
+            case ValueKind.string_:
+                key.text = value.stringValue;
+                return true;
+            case ValueKind.floating:
+                // Equality treats both signed zeros alike. NaN and infinity
+                // cannot be stored, and retain the linear lookup behavior.
+                if (!isFinite(value.floatingValue)) return false;
+                union FloatingBits { double number; long bits; }
+                FloatingBits representation;
+                representation.number = value.floatingValue == 0 ? 0.0 : value.floatingValue;
+                key.bits = representation.bits;
+                return true;
+            default:
+                return false;
+        }
+    }
+}
+
 private final class AssociativeStorage
 {
     string keyType;
     string valueType;
     AssociativeEntry[] entries;
+
+    // Entries remain in insertion order for iteration, snapshots and printing.
+    // Small maps avoid allocating a second data structure. Aggregate keys keep
+    // their existing structural/custom equality and comparison order.
+    private enum indexThreshold = 8;
+    private bool indexed;
+    private size_t[ScalarAssociativeKey] scalarPositions;
+
+    size_t find(Value key) const
+    {
+        ScalarAssociativeKey scalar;
+        if (indexed && ScalarAssociativeKey.fromValue(key, scalar))
+        {
+            auto position = scalar in scalarPositions;
+            return position is null ? size_t.max : *position;
+        }
+        foreach (index, entry; entries)
+            if (associativeKeysEqual(cast(Value) entry.key, key)) return index;
+        return size_t.max;
+    }
+
+    void set(Value key, Value value)
+    {
+        auto index = find(key);
+        if (index != size_t.max)
+        {
+            entries[index].value = value.valueCopy();
+            return;
+        }
+        entries ~= AssociativeEntry(key.keyCopy(), value.valueCopy());
+        ScalarAssociativeKey scalar;
+        if (indexed)
+        {
+            if (ScalarAssociativeKey.fromValue(entries[$ - 1].key, scalar))
+                scalarPositions[scalar] = entries.length - 1;
+        }
+        else if (entries.length >= indexThreshold)
+        {
+            foreach (position, entry; entries)
+                if (ScalarAssociativeKey.fromValue(entry.key, scalar))
+                    scalarPositions[scalar] = position;
+            indexed = true;
+        }
+    }
+
+    bool remove(Value key)
+    {
+        auto index = find(key);
+        if (index == size_t.max) return false;
+        entries = entries[0 .. index] ~ entries[index + 1 .. $];
+        if (indexed)
+        {
+            ScalarAssociativeKey scalar;
+            if (ScalarAssociativeKey.fromValue(key, scalar)) scalarPositions.remove(scalar);
+            foreach (ref position; scalarPositions)
+                if (position > index) --position;
+        }
+        return true;
+    }
 }
 
 struct Value
@@ -255,27 +359,17 @@ struct Value
 
     package(dua) size_t associativeIndex(Value key) const
     {
-        foreach (index, entry; associativeStorage.entries)
-            if (associativeKeysEqual(cast(Value) entry.key, key)) return index;
-        return size_t.max;
+        return associativeStorage.find(key);
     }
 
     package(dua) void associativeSet(Value key, Value value)
     {
-        auto index = associativeIndex(key);
-        if (index == size_t.max)
-            associativeStorage.entries ~= AssociativeEntry(key.keyCopy(), value.valueCopy());
-        else
-            associativeStorage.entries[index].value = value.valueCopy();
+        associativeStorage.set(key, value);
     }
 
     package(dua) bool associativeRemove(Value key)
     {
-        auto index = associativeIndex(key);
-        if (index == size_t.max) return false;
-        associativeStorage.entries = associativeStorage.entries[0 .. index]
-            ~ associativeStorage.entries[index + 1 .. $];
-        return true;
+        return associativeStorage.remove(key);
     }
 
     /// Keys own their value contents; exposing a key never exposes stored data.

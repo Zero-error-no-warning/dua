@@ -26,6 +26,99 @@ private string chooseKeys(string[string] items) { return "string"; }
 
 unittest
 {
+    // Compare indexed storage with the original ordered linear model while
+    // crossing the index threshold, replacing, removing and reinserting keys.
+    auto actual = Value.associativeArray();
+    auto aliasValue = actual;
+    AssociativeEntry[] expected;
+    Value[] keys = [Value.nullValue(), Value.from(false), Value.from(true),
+        Value.from(0), Value.from(1), Value.from(long.min), Value.from(long.max),
+        Value.from(0.0), Value.from(-0.0), Value.from(1.0), Value.from(-1.5),
+        Value.from(double.min_normal), Value.from(double.max), Value.from(""),
+        Value.from("1"), Value.from("日本語"), Value.from("a\0b")];
+    foreach (i; 0 .. 40) keys ~= Value.from(i + 10);
+    foreach (step; 0 .. 600)
+    {
+        auto key = keys[(step * 17) % keys.length];
+        size_t found = size_t.max;
+        foreach (index, entry; expected)
+            if (entry.key.kind == key.kind && valuesEqual(entry.key, key))
+            {
+                found = index;
+                break;
+            }
+        if (step % 5 == 0)
+        {
+            assert(actual.associativeRemove(key) == (found != size_t.max));
+            if (found != size_t.max)
+                expected = expected[0 .. found] ~ expected[found + 1 .. $];
+        }
+        else
+        {
+            auto value = Value.from(step);
+            actual.associativeSet(key, value);
+            if (found == size_t.max) expected ~= AssociativeEntry(key, value);
+            else expected[found].value = value;
+        }
+        assert(aliasValue.associativeEntries.length == expected.length);
+        foreach (index, entry; expected)
+        {
+            assert(actual.associativeIndex(entry.key) == index);
+            assert(valuesEqual(cast(Value) aliasValue.associativeEntries[index].key, entry.key));
+            assert(aliasValue.associativeEntries[index].value.toInt() == entry.value.toInt());
+        }
+    }
+    // Non-finite keys are still rejected, without damaging the index.
+    auto count = actual.associativeEntries.length;
+    foreach (number; [double.nan, double.infinity, -double.infinity])
+    {
+        assert(actual.associativeIndex(Value.from(number)) == size_t.max);
+        assertThrown!Exception(actual.associativeSet(Value.from(number), Value.from(1)));
+        assert(actual.associativeEntries.length == count);
+    }
+    foreach (entry; expected) assert(actual.associativeRemove(entry.key));
+    assert(actual.associativeEntries.length == 0);
+    actual.associativeSet(Value.from(-0.0), Value.from(1));
+    actual.associativeSet(Value.from(0.0), Value.from(2));
+    assert(actual.associativeEntries.length == 1);
+    assert(actual.associativeEntries[0].value.toInt() == 2);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindType!EqualKey("EqualKey");
+    engine.bindAuto("objectKey", new ObjectKey());
+    assert(engine.run(q{
+        struct Point { int x; int y; }
+        auto items = [null: 0, true: 1, 1: 2, 1.0: 3, "1": 4,
+            [1, 2]: 5, Point(1, 2): 6, EqualKey(1, 2): 7, objectKey: 8];
+        items[EqualKey(1, 9)] = 70;
+        items[[1, 2]] = 50;
+        items[Point(1, 2)] = 60;
+        auto shared = items;
+        auto before = items.keys;
+        items.remove(true);
+        items.remove([1, 2]);
+        items[true] = 10;
+        auto after = items.keys;
+        auto ordered = after[0] == null && after[1] == 1 && after[2] == 1.0
+            && after[3] == "1" && after[4] == Point(1, 2) && after[5].id == 1
+            && after[5].ignored == 2 && after[6] == objectKey && after[7] == true;
+        auto valid = items[EqualKey(1, 3)] == 70 && items[Point(1, 2)] == 60
+            && items[objectKey] == 8 && !items.contains([1, 2]) && items[true] == 10;
+        auto visited = 0;
+        foreach (key, value; items) {
+            visited += 1;
+            items.remove(key);
+        }
+        return valid && length(before) == 9 && before[1] == true && before[5] == [1, 2]
+            && ordered && visited == 8 && shared.length == 0;
+    }).truthy());
+}
+
+unittest
+{
     auto engine = new ScriptEngine();
     RunOptions options;
     options.typeCheck = true;
