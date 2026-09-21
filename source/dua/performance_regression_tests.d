@@ -7,6 +7,31 @@ import dua;
 unittest
 {
     auto engine = new ScriptEngine();
+    assert(engine.run(q{
+        auto trace = "";
+        auto left = {
+            "opBinary+" = (any self, any other) { trace ~= "L"; return null; },
+            "opBinary==" = (any self, any other) { trace ~= "B"; return false; },
+            "__eq" = (any self, any other) { trace ~= "E"; return true; },
+            "opUnary-" = (any self) { trace ~= "U"; return null; },
+            "opUnary!" = (any self) { trace ~= "N"; return 42; }
+        };
+        auto right = { "opBinaryRight+" = (any self, any other) { trace ~= "R"; return 4; } };
+        auto empty = left + right;
+        auto reversed = 1 + right;
+        auto equal = left == right;
+        auto negative = -left;
+        auto negated = !left;
+        auto fallback = { "__eq" = (any self, any other) { trace ~= "E"; return false; } };
+        auto different = fallback != right;
+        return trace == "LRBUNE" && empty == null && reversed == 4 && !equal
+            && negative == null && negated == 42 && different;
+    }).truthy());
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
     assert(!engine.runSafe("return cast(Later) 1;").ok);
     engine.load("alias Later = int; alias Items = Later[];");
     assert(engine.run("Items values = [1, 2]; return values[1];").toInt() == 2);

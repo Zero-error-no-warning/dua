@@ -141,6 +141,28 @@ struct ExecutionResult
 }
 
 
+// Exact byte codes avoid a string-switch search on every arithmetic operation.
+// The length tag keeps all one- and two-byte spellings distinct.
+package(dua) uint operatorCode(string spelling) pure nothrow @safe @nogc
+{
+    if (spelling.length == 1) return spelling[0];
+    if (spelling.length == 2) return 0x10000 | (spelling[0] << 8) | spelling[1];
+    return uint.max;
+}
+
+package(dua) string binaryOperatorSlot(string spelling, bool right)
+{
+    switch (operatorCode(spelling))
+    {
+        static foreach (op; ["~", "+", "-", "*", "/", "%", "&", "|", "^",
+            "<<", ">>", "==", "!=", "<", "<=", ">", ">="])
+        {
+            case operatorCode(op): return right ? "opBinaryRight" ~ op : "opBinary" ~ op;
+        }
+        default: return (right ? "opBinaryRight" : "opBinary") ~ spelling;
+    }
+}
+
 /// Statement execution, expression evaluation, assignment, calls, and operators.
 mixin template EvaluatorImplementation()
 {
@@ -677,18 +699,20 @@ mixin template EvaluatorImplementation()
                             return Value.from(evaluatorContext.indexLengthStack[$ - 1]);
                         case "-":
                             auto right = evaluate((cast(UnaryExpression) expression).operand, environment);
-                            if (auto overloaded = tryCallUnaryOverload((cast(UnaryExpression) expression).operatorSymbol, right))
+                            Value overloaded;
+                            if (tryCallUnaryOverload("opUnary-", right, overloaded))
                             {
-                                return *overloaded;
+                                return overloaded;
                             }
                             return right.kind == ValueKind.integer
                                 ? Value.from(-right.integerValue)
                                 : Value.from(-right.toFloat());
                         case "!":
                             auto right = evaluate((cast(UnaryExpression) expression).operand, environment);
-                            if (auto overloaded = tryCallUnaryOverload((cast(UnaryExpression) expression).operatorSymbol, right))
+                            Value overloaded;
+                            if (tryCallUnaryOverload("opUnary!", right, overloaded))
                             {
-                                return *overloaded;
+                                return overloaded;
                             }
                             return Value.from(!right.truthy());
                         default:
@@ -986,14 +1010,15 @@ mixin template EvaluatorImplementation()
 
     private Value evaluateBinary(string operatorSymbol, Value left, Value right)
     {
-        if (auto overloaded = tryCallBinaryOverload(operatorSymbol, left, right))
+        if (left.isFieldAggregate || right.isFieldAggregate)
         {
-            return *overloaded;
+            Value overloaded;
+            if (tryCallBinaryOverload(operatorSymbol, left, right, overloaded)) return overloaded;
         }
 
-        switch (operatorSymbol)
+        switch (operatorCode(operatorSymbol))
         {
-            case "~":
+            case operatorCode("~"):
                 if (left.kind == ValueKind.array && right.kind == ValueKind.array)
                 {
                     auto combined = left.arrayValue.dup;
@@ -1001,57 +1026,59 @@ mixin template EvaluatorImplementation()
                     return Value.fromOwnedArray(combined);
                 }
                 return Value.from(stringify(left) ~ stringify(right));
-            case "+":
+            case operatorCode("+"):
                 if (left.kind == ValueKind.integer && right.kind == ValueKind.integer)
                 {
                     return Value.from(left.integerValue + right.integerValue);
                 }
                 return Value.from(left.toFloat() + right.toFloat());
-            case "-":
+            case operatorCode("-"):
                 if (left.kind == ValueKind.integer && right.kind == ValueKind.integer)
                 {
                     return Value.from(left.integerValue - right.integerValue);
                 }
                 return Value.from(left.toFloat() - right.toFloat());
-            case "*":
+            case operatorCode("*"):
                 if (left.kind == ValueKind.integer && right.kind == ValueKind.integer)
                 {
                     return Value.from(left.integerValue * right.integerValue);
                 }
                 return Value.from(left.toFloat() * right.toFloat());
-            case "/":
+            case operatorCode("/"):
                 return Value.from(left.toFloat() / right.toFloat());
-            case "%":
+            case operatorCode("%"):
                 return Value.from(left.toInt() % right.toInt());
-            case "&":
+            case operatorCode("&"):
                 return Value.from(left.toInt() & right.toInt());
-            case "|":
+            case operatorCode("|"):
                 return Value.from(left.toInt() | right.toInt());
-            case "^":
+            case operatorCode("^"):
                 return Value.from(left.toInt() ^ right.toInt());
-            case "<<":
+            case operatorCode("<<"):
                 return Value.from(left.toInt() << right.toInt());
-            case ">>":
+            case operatorCode(">>"):
                 return Value.from(left.toInt() >> right.toInt());
-            case "==":
-                if (auto overloadedEq = tryCallEqualityOverload(left, right))
+            case operatorCode("=="):
+                Value overloadedEq;
+                if (tryCallEqualityOverload(left, right, overloadedEq))
                 {
                     return Value.from(overloadedEq.truthy());
                 }
                 return Value.from(valuesEqual(left, right));
-            case "!=":
-                if (auto overloadedEq = tryCallEqualityOverload(left, right))
+            case operatorCode("!="):
+                Value overloadedEq;
+                if (tryCallEqualityOverload(left, right, overloadedEq))
                 {
                     return Value.from(!overloadedEq.truthy());
                 }
                 return Value.from(!valuesEqual(left, right));
-            case "<":
+            case operatorCode("<"):
                 return Value.from(left.toFloat() < right.toFloat());
-            case "<=":
+            case operatorCode("<="):
                 return Value.from(left.toFloat() <= right.toFloat());
-            case ">":
+            case operatorCode(">"):
                 return Value.from(left.toFloat() > right.toFloat());
-            case ">=":
+            case operatorCode(">="):
                 return Value.from(left.toFloat() >= right.toFloat());
             default:
                 enforce(false, format("Unsupported binary operator '%s'", operatorSymbol));
@@ -1146,58 +1173,59 @@ mixin template EvaluatorImplementation()
         return cast(Value) evaluatorContext.thisContextStack[$ - 1];
     }
 
-    private Value* tryCallBinaryOverload(string operatorSymbol, Value left, Value right)
+    private bool tryCallBinaryOverload(string operatorSymbol, Value left, Value right, out Value result)
     {
         if (left.isFieldAggregate)
         {
-            auto slot = "opBinary" ~ operatorSymbol;
+            auto slot = binaryOperatorSlot(operatorSymbol, false);
             Value functionValue;
             if (lookupMetamethod(left, slot, functionValue))
             {
-                return callTableBinaryOverload(functionValue, left, right);
+                result = callTableBinaryOverload(functionValue, left, right);
+                return true;
             }
         }
         if (right.isFieldAggregate)
         {
-            auto slot = "opBinaryRight" ~ operatorSymbol;
+            auto slot = binaryOperatorSlot(operatorSymbol, true);
             Value functionValue;
             if (lookupMetamethod(right, slot, functionValue))
             {
-                return callTableBinaryOverload(functionValue, right, left);
+                result = callTableBinaryOverload(functionValue, right, left);
+                return true;
             }
         }
-        return null;
+        return false;
     }
 
-    private Value* tryCallUnaryOverload(string operatorSymbol, Value operand)
+    private bool tryCallUnaryOverload(string slot, Value operand, out Value result)
     {
         if (!operand.isFieldAggregate)
         {
-            return null;
+            return false;
         }
 
-        auto slot = "opUnary" ~ operatorSymbol;
         Value functionValue;
         if (!lookupMetamethod(operand, slot, functionValue))
         {
-            return null;
+            return false;
         }
 
         enforce(functionValue.kind == ValueKind.function_,
             "Table unary operator overload must be a function value");
-        auto result = new Value();
-        *result = invokeFunctionValue(functionValue, [operand]);
-        return result;
+        result = invokeFunctionValue(functionValue, [operand]);
+        return true;
     }
 
-    private Value* tryCallEqualityOverload(Value left, Value right)
+    private bool tryCallEqualityOverload(Value left, Value right, out Value result)
     {
         if (left.isFieldAggregate)
         {
             Value functionValue;
             if (lookupMetamethod(left, "__eq", functionValue))
             {
-                return callTableBinaryOverload(functionValue, left, right);
+                result = callTableBinaryOverload(functionValue, left, right);
+                return true;
             }
         }
         if (right.isFieldAggregate)
@@ -1205,20 +1233,19 @@ mixin template EvaluatorImplementation()
             Value functionValue;
             if (lookupMetamethod(right, "__eq", functionValue))
             {
-                return callTableBinaryOverload(functionValue, right, left);
+                result = callTableBinaryOverload(functionValue, right, left);
+                return true;
             }
         }
-        return null;
+        return false;
     }
 
-    private Value* callTableBinaryOverload(Value functionValue, Value selfValue, Value otherValue)
+    private Value callTableBinaryOverload(Value functionValue, Value selfValue, Value otherValue)
     {
         enforce(functionValue.kind == ValueKind.function_,
             "Table operator overload must be a function value");
         Value[] args = [selfValue, otherValue];
-        auto result = new Value();
-        *result = invokeFunctionValue(functionValue, args);
-        return result;
+        return invokeFunctionValue(functionValue, args);
     }
 
     private Value invokeFunctionValue(Value callable, Value[] args)
