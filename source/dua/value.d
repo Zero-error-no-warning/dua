@@ -515,18 +515,102 @@ struct Value
     Value valueCopy() const
     {
         if (kind != ValueKind.struct_) return cast(Value) this;
+        return copyStructValue();
+    }
+
+    // Keep valueCopy's scalar/reference fast path small enough to inline in
+    // container loops; struct copying has its own, much less frequent path.
+    private Value copyStructValue() const
+    {
         if (tableStorage !is null && tableStorage.copier !is null)
             return tableStorage.copier();
+        // The old two-pass construction copies nested structs twice per level.
+        // Pure script data can avoid repeated copies once field ordering is
+        // stable. Reflected descendants keep their original callback sequence.
+        if (!needsOriginalStructCopy())
+        {
+            bool stable;
+            return copyPlainStruct(stable);
+        }
         Value[string] copied;
         foreach (key, value; tableValue) copied[key] = value.valueCopy();
         auto result = Value.fromStruct(copied);
+        copyStructMetadataTo(result);
+        return result;
+    }
+
+    private bool needsOriginalStructCopy() const
+    {
+        if (kind != ValueKind.struct_) return false;
+        if (tableStorage !is null && tableStorage.copier !is null) return true;
+        // Checking/rebuilding the order of a wide hash table can cost more
+        // than it saves. Keep the original path for those trees.
+        if (tableValue.length > 8) return true;
+        foreach (value; tableValue)
+            if (value.needsOriginalStructCopy()) return true;
+        return false;
+    }
+
+    private static bool sameFieldOrder(const(Value[string]) left, const(Value[string]) right)
+    {
+        if (left.length <= 1) return true; // Both maps have exactly the same keys.
+        auto names = left.byKey;
+        foreach (name; right.byKey)
+        {
+            if (name != names.front) return false;
+            names.popFront();
+        }
+        return true;
+    }
+
+    // Only used after checking the whole copy tree for callbacks. The output
+    // flag says whether another copy can change this result's field order.
+    private Value copyPlainStruct(out bool stable) const
+    {
+        Value[string] first;
+        bool childrenStable = true;
+        foreach (name, value; tableValue)
+        {
+            if (value.kind == ValueKind.struct_)
+            {
+                bool childStable;
+                first[name] = value.copyPlainStruct(childStable);
+                childrenStable = childrenStable && childStable;
+            }
+            else first[name] = cast(Value) value;
+        }
+        Value result;
+        result.kind = ValueKind.struct_;
+        result.tableStorage = new TableStorage();
+        if (childrenStable && sameFieldOrder(tableValue, first))
+        {
+            result.tableStorage.entries = first;
+            stable = true;
+        }
+        else
+        {
+            // Hash-table reinsertion can change display/iteration order. Keep
+            // the second pass, including recursive copies of unstable children.
+            foreach (name, value; first)
+            {
+                bool childStable;
+                result.tableStorage.entries[name] = !childrenStable && value.kind == ValueKind.struct_
+                    ? value.copyPlainStruct(childStable) : value;
+            }
+            stable = childrenStable && sameFieldOrder(first, result.tableStorage.entries);
+        }
+        copyStructMetadataTo(result);
+        return result;
+    }
+
+    private void copyStructMetadataTo(ref Value result) const
+    {
         result.setTypeChain(cast(Value[]) typeChain);
         result.setAliasThisMetadata(cast(Value[]) aliasThisTargets,
             cast(Value[]) aliasThisChain);
         if (tableStorage !is null)
             result.setPropertyMetadata(cast(Value[string]) tableStorage.propertyGetters,
                 cast(Value[string]) tableStorage.propertySetters);
-        return result;
     }
 
     package(dua) const(Value[]) typeChain() const
@@ -2127,6 +2211,56 @@ unittest
     assert(order == [1, 2] && original[1].toInt() == 99);
     assert(owned.arrayValue[0].tableValue["value"].toInt() == 10);
     assert(owned.arrayValue[1].tableValue["value"].toInt() == 20);
+}
+
+unittest
+{
+    auto leaf = Value.fromStruct(null);
+    size_t copies;
+    leaf.tableStorage.copier = () { ++copies; return leaf; };
+    auto middle = Value.fromStruct(["child": leaf]);
+    auto root = Value.fromStruct(["child": middle]);
+    copies = 0;
+    auto copied = root.valueCopy();
+    assert(copies == 4); // Two passes at each of the two script-struct levels.
+    assert(copied.kind == ValueKind.struct_);
+    assert(copied.tableStorage !is root.tableStorage);
+    assert(copied.tableValue["child"].tableStorage !is middle.tableStorage);
+    copies = 0;
+    leaf.tableStorage.copier = () {
+        if (++copies == 2) throw new Exception("copy failed");
+        return leaf;
+    };
+    try { root.valueCopy(); assert(0); }
+    catch (Exception error) assert(error.msg == "copy failed" && copies == 2);
+}
+
+unittest
+{
+    // Keep the observable hash iteration/display order of the two-pass copier.
+    Value originalCopy(Value value)
+    {
+        if (value.kind != ValueKind.struct_) return value;
+        Value[string] first;
+        foreach (name, field; value.tableValue) first[name] = originalCopy(field);
+        auto result = Value.fromStruct(null);
+        foreach (name, field; first) result.tableValue[name] = originalCopy(field);
+        return result;
+    }
+    foreach (fieldCount; [2, 4, 8, 40])
+    foreach (seed; 1 .. 41)
+    {
+        auto value = Value.fromStruct(null);
+        foreach (i; 0 .. fieldCount)
+            value.tableValue["field" ~ convTo!string((i * seed) % 53)] = Value.from(i);
+        foreach (_; 0 .. 3)
+        {
+            auto parent = Value.fromStruct(null);
+            parent.tableValue["child"] = value;
+            value = parent;
+        }
+        assert(value.valueCopy().toHostString() == originalCopy(value).toHostString());
+    }
 }
 
 private bool associativeKeysEqual(Value left, Value right)

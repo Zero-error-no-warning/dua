@@ -8,6 +8,30 @@ unittest
 {
     auto engine = new ScriptEngine();
     assert(engine.run(q{
+        struct Leaf { int value; table reference; }
+        struct Level1 { Leaf child; }
+        struct Level2 { Level1 child; }
+        struct Level3 { Level2 child; }
+        auto original = Level3(Level2(Level1(Leaf(7, { value = 8 }))));
+        auto copied = original;
+        copied.child.child.child.value = 70;
+        copied.child.child.child.reference.value = 80;
+        auto items = [original, original];
+        items[0].child.child.child.value = 700;
+        return original.child.child.child.value == 7
+            && copied.child.child.child.value == 70
+            && original.child.child.child.reference.value == 80
+            && items[0].child.child.child.value == 700
+            && items[1].child.child.child.value == 7
+            && copied is Level3 && copied.child is Level2
+            && copied.child.child.child is Leaf;
+    }).truthy());
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    assert(engine.run(q{
         auto trace = "";
         int next(int value) { trace ~= cast(string) value; return value; }
         any choose() {
