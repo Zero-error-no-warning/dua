@@ -5,14 +5,19 @@ import core.memory : GC;
 import std.algorithm : sort;
 import std.datetime.stopwatch : StopWatch;
 import std.exception : enforce;
+import std.format : format;
 import std.stdio : writefln;
 
 private long hostIncrement(long value) { return value + 1; }
 private long hostIncrement(string value) { return value.length; }
+private string selectedWorkload;
+private bool measured;
 
 // Parse once, then measure execution through the public embedding API.
 void measure(ScriptEngine engine, string name, long count, long expected)
 {
+    if (selectedWorkload.length && selectedWorkload != name) return;
+    measured = true;
     auto args = [Value.from(count)];
     enforce(engine.call(name, args).toInt() == expected, name ~ " checksum mismatch");
     long[7] samples;
@@ -35,13 +40,19 @@ void measure(ScriptEngine engine, string name, long count, long expected)
         samples[$ / 2], samples[0], allocations[$ / 2]);
 }
 
-void main()
+void main(string[] arguments)
 {
+    if (arguments.length > 1) selectedWorkload = arguments[1];
     auto engine = new ScriptEngine();
     engine.bindFunc!hostIncrement("hostIncrement");
     auto nested = Value.fromStruct(["value": Value.from(7)]);
     foreach (_; 0 .. 6) nested = Value.fromStruct(["child": nested]);
     engine.bind("nested", nested);
+    Value[string] wideFields;
+    foreach (i; 0 .. 40) wideFields["field" ~ format("%s", i)] = Value.from(i + 1);
+    auto wide = Value.fromStruct(wideFields);
+    foreach (_; 0 .. 3) wide = Value.fromStruct(["child": wide]);
+    engine.bind("wideNested", wide);
     engine.load(q{
         int integerKeys(int n) {
             auto items = [:];
@@ -118,6 +129,19 @@ void main()
             for (auto i = 0; i < n; i += 1) { sum += receiver + i; }
             return sum;
         }
+        int wideStructCopies(int n) {
+            auto sum = 0;
+            for (auto i = 0; i < n; i += 1) {
+                auto copied = wideNested;
+                sum += copied.child.child.child.field0;
+            }
+            return sum;
+        }
+        int rangeBuild(int n) {
+            auto ascending = iota(n);
+            auto descending = iota(n, 0, -1);
+            return length(ascending) + length(descending) + ascending[n - 1] + descending[n - 1];
+        }
     });
     foreach (count; [8L, 128L, 2048L])
     {
@@ -132,4 +156,7 @@ void main()
     measure(engine, "typedArrays", 300, 18_900);
     measure(engine, "structCopies", 500, 3_500);
     measure(engine, "operatorCalls", 5_000, 12_502_500);
+    measure(engine, "wideStructCopies", 100, 100);
+    measure(engine, "rangeBuild", 20_000, 60_000);
+    enforce(measured, "Unknown workload: " ~ selectedWorkload);
 }

@@ -1067,8 +1067,10 @@ mixin template EvaluatorImplementation()
             case operatorCode("~"):
                 if (left.kind == ValueKind.array && right.kind == ValueKind.array)
                 {
-                    auto combined = left.arrayValue.dup;
-                    combined ~= right.arrayValue;
+                    Value[] combined;
+                    combined.length = left.arrayValue.length + right.arrayValue.length;
+                    combined[0 .. left.arrayValue.length] = left.arrayValue;
+                    combined[left.arrayValue.length .. $] = right.arrayValue;
                     return Value.fromOwnedArray(combined);
                 }
                 return Value.from(stringify(left) ~ stringify(right));
@@ -1413,6 +1415,31 @@ mixin template EvaluatorImplementation()
         auto end = args.length == 1 ? args[0].integerValue : args[1].integerValue;
         auto step = args.length == 3 ? args[2].integerValue : 1L;
         enforce(step != 0, "iota step must not be zero");
+        ulong count;
+        if (step > 0 ? start < end : start > end)
+        {
+            // Unsigned differences handle ranges spanning both signed limits;
+            // unsigned negation also handles a step equal to long.min.
+            auto distance = step > 0 ? cast(ulong) end - cast(ulong) start
+                : cast(ulong) start - cast(ulong) end;
+            auto stride = step > 0 ? cast(ulong) step : 0UL - cast(ulong) step;
+            count = distance / stride + (distance % stride != 0);
+        }
+        if (count <= size_t.max / Value.sizeof)
+        {
+            Value result;
+            result.kind = ValueKind.array;
+            result.arrayValue.length = cast(size_t) count;
+            auto current = start;
+            foreach (index, ref value; result.arrayValue)
+            {
+                value = Value.from(current);
+                if (index + 1 < result.arrayValue.length) current += step;
+            }
+            return result;
+        }
+        // Preserve incremental behavior when the computed size cannot be
+        // represented as one allocation on this platform.
         Value[] values;
         for (auto value = start; step > 0 ? value < end : value > end;)
         {

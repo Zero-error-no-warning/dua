@@ -7,6 +7,23 @@ import dua;
 unittest
 {
     auto engine = new ScriptEngine();
+    long[] range(long start, long end, long step)
+    {
+        return engine.call("iota", [Value.from(start), Value.from(end), Value.from(step)]).to!(long[])();
+    }
+    assert(range(long.min, long.max, long.max) == [long.min, -1, long.max - 1]);
+    assert(range(long.max, long.min, long.min) == [long.max, -1]);
+    assert(range(long.min, long.min + 3, 1) == [long.min, long.min + 1, long.min + 2]);
+    assert(range(long.max, long.max - 3, -1) == [long.max, long.max - 1, long.max - 2]);
+    assert(range(long.max - 1, long.max, 10) == [long.max - 1]);
+    assert(range(long.min + 1, long.min, -10) == [long.min + 1]);
+    assert(range(0, 10, -1).length == 0 && range(10, 0, 1).length == 0);
+    assert(range(0, 0, long.min).length == 0);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
     engine.load(q{
         int descend(int depth) {
             if (depth == 0) { error("deep failure"); }
