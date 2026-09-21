@@ -48,8 +48,12 @@ struct EvaluatorContext
 final class Environment
 {
     Environment parent;
-    private Value[string] values;
-    private Value delegate(Value)[string] validators;
+    private struct Binding
+    {
+        Value value;
+        Value delegate(Value) validator;
+    }
+    private Binding[string] bindings;
 
     this(Environment parent = null)
     {
@@ -58,52 +62,76 @@ final class Environment
 
     void define(string name, Value value, Value delegate(Value) validator = null)
     {
-        enforce((name in values) is null,
+        enforce((name in bindings) is null,
             format("Variable '%s' is already defined in this scope", name));
-        values[name] = value.valueCopy();
-        if (validator !is null) validators[name] = validator;
+        bindings[name] = Binding(value.valueCopy(), validator);
     }
 
     bool contains(string name) const
     {
-        return (name in values) !is null || (parent !is null && parent.contains(name));
+        import std.typecons : Rebindable;
+        for (auto environment = Rebindable!(const Environment)(this);
+            environment !is null; environment = environment.parent)
+            if ((name in environment.bindings) !is null) return true;
+        return false;
     }
 
     Value get(string name)
     {
-        if (auto value = name in values)
-        {
-            return *value;
-        }
-        if (parent !is null)
-        {
-            return parent.get(name);
-        }
+        if (auto value = find(name)) return *value;
         enforce(false, format("Undefined variable '%s'", name));
         assert(0);
     }
 
     Value* find(string name)
     {
-        if (auto value = name in values) return value;
-        return parent is null ? null : parent.find(name);
+        for (auto environment = this; environment !is null; environment = environment.parent)
+            if (auto binding = name in environment.bindings) return &binding.value;
+        return null;
     }
 
     void assign(string name, Value value)
     {
-        if (auto slot = name in values)
+        for (auto environment = this; environment !is null; environment = environment.parent)
         {
-            if (auto validator = name in validators) value = (*validator)(value);
-            *slot = value.valueCopy();
-            return;
-        }
-        if (parent !is null)
-        {
-            parent.assign(name, value);
-            return;
+            if (auto binding = name in environment.bindings)
+            {
+                if (binding.validator !is null) value = binding.validator(value);
+                binding.value = value.valueCopy();
+                return;
+            }
         }
         enforce(false, format("Cannot assign undefined variable '%s'", name));
     }
+}
+
+unittest
+{
+    import std.exception : assertThrown;
+
+    auto root = new Environment();
+    int validations;
+    root.define("checked", Value.from(1), (Value next) {
+        ++validations;
+        enforce(next.kind == ValueKind.integer, "Expected integer");
+        return Value.from(next.toInt() * 2);
+    });
+    root.define("empty", Value.nullValue());
+    auto nested = root;
+    foreach (_; 0 .. 512) nested = new Environment(nested);
+    assert(nested.contains("empty") && !nested.contains("missing"));
+    assert(nested.find("checked") is root.find("checked"));
+    nested.assign("checked", Value.from(3));
+    assert(root.get("checked").toInt() == 6 && validations == 1);
+    assertThrown!Exception(nested.assign("checked", Value.from("invalid")));
+    assert(root.get("checked").toInt() == 6 && validations == 2);
+    nested.define("checked", Value.from(10));
+    nested.assign("checked", Value.from(11));
+    assert(nested.get("checked").toInt() == 11 && root.get("checked").toInt() == 6);
+    assert(validations == 2);
+    assertThrown!Exception(nested.define("checked", Value.from(12)));
+    assertThrown!Exception(nested.get("missing"));
+    assertThrown!Exception(nested.assign("missing", Value.from(1)));
 }
 
 struct ExecutionResult
@@ -1497,26 +1525,11 @@ mixin template EvaluatorImplementation()
 
     private Value* resolveUfcs(string functionName, Environment environment)
     {
-        if (environment.contains(functionName))
-        {
-            auto functionValue = environment.get(functionName);
-            if (functionValue.kind == ValueKind.function_)
-            {
-                auto resolved = new Value();
-                *resolved = functionValue;
-                return resolved;
-            }
-        }
-        if (globals.contains(functionName))
-        {
-            auto functionValue = globals.get(functionName);
-            if (functionValue.kind == ValueKind.function_)
-            {
-                auto resolved = new Value();
-                *resolved = functionValue;
-                return resolved;
-            }
-        }
+        if (auto functionValue = environment.find(functionName))
+            if (functionValue.kind == ValueKind.function_) return functionValue;
+        // A non-callable local still falls back to the global function.
+        if (auto functionValue = globals.find(functionName))
+            if (functionValue.kind == ValueKind.function_) return functionValue;
         return null;
     }
 

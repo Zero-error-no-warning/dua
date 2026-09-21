@@ -633,6 +633,31 @@ unittest
     assert(resumed.arrayValue[1].toHostString().canFind("@ worker.dua:"));
 }
 
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.load(`int offset(int value) { return value + 1; }`);
+    assert(engine.run(q{
+        auto value = 2;
+        auto first = value.offset();
+        auto offset = (int v) => v + 10;
+        auto second = value.offset();
+        offset = (int v) => v + 20;
+        auto third = value.offset();
+        auto fourth = 0;
+        { auto offset = 100; fourth = value.offset(); }
+        auto fifth = value.offset();
+        auto receiver = { offset = (int v) => v + 30 };
+        return [first, second, third, fourth, fifth, receiver.offset(2)];
+    }).to!(long[])() == [3, 12, 22, 3, 22, 32]);
+    auto moduleHandle = engine.newModule("ufcs.scope");
+    moduleHandle.load(`int offset(int value) { return value + 100; }`);
+    assert(moduleHandle.run(`auto value = 2; return value.offset();`).toInt() == 102);
+    assert(moduleHandle.run(`auto offset = false; auto value = 2; return value.offset();`).toInt() == 3);
+    assert(!engine.runSafe(`auto receiver = { offset = 0 }; return receiver.offset();`).ok);
+    assert(!engine.runSafe(`auto value = 2; return value.missing();`).ok);
+}
+
 final class ScriptCallable : CallableValue
 {
     private ScriptEngine engine;
