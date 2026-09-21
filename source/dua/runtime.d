@@ -20,6 +20,34 @@ import std.format : format;
 import std.string : join, replace, startsWith;
 import std.traits : BaseClassesTuple, isAggregateType, isNumeric;
 
+// Decide visibility before attempting conversion. Probing private renderer or
+// resource-management state with __traits(compiles) can instantiate unsupported
+// native types and trigger DMD frontend bugs even though the probe should fail.
+private template isPublicTypeMember(T, string memberName)
+{
+    static if (__traits(compiles, __traits(getOverloads, T, memberName))
+        && __traits(getOverloads, T, memberName).length > 0)
+    {
+        enum isPublicTypeMember = () {
+            static foreach (overload; __traits(getOverloads, T, memberName))
+                static if (__traits(getVisibility, overload) == "public"
+                    || __traits(getVisibility, overload) == "export")
+                    return true;
+            return false;
+        }();
+    }
+    else static if (__traits(compiles,
+        __traits(getVisibility, __traits(getMember, T, memberName))))
+    {
+        enum visibility = __traits(getVisibility, __traits(getMember, T, memberName));
+        enum isPublicTypeMember = visibility == "public" || visibility == "export";
+    }
+    else
+        // Some type aliases have no declaration visibility. The existing enum
+        // and conversion checks below determine whether they can be exposed.
+        enum isPublicTypeMember = true;
+}
+
 private string bindFuncOverload(long value)
 {
     return "integer:" ~ value.to!string;
@@ -61,6 +89,37 @@ private struct StaticPropertyFixture
     static double p() { return stored; }
     static void p(long value) { stored = value; }
     static void p(double value) { stored = value + 0.5; }
+}
+
+private final class BindTypeVisibilityFixture
+{
+    private struct Resource { @disable this(this); int handle; }
+    private static Resource[4] scratch;
+    private enum secret = 99;
+    private static int hidden() { return 99; }
+    protected static int protectedFunction() { return 99; }
+    package static int packageFunction() { return 99; }
+    // A private overload must not hide a public overload with the same name.
+    private static int pick(string value) { return 99; }
+    public static int pick(long value) { return cast(int) value + 1; }
+    public enum exposed = 7;
+    private static int stored;
+    public static int setting() { return stored; }
+    public static void setting(int value) { stored = value; }
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindType!BindTypeVisibilityFixture("Visible");
+    auto type = engine["Visible"];
+    foreach (hidden; ["scratch", "secret", "hidden", "protectedFunction",
+        "packageFunction", "stored"])
+        assert((hidden in type.tableValue) is null, hidden);
+    auto pick = type.tableValue["pick"].functionValue;
+    assert(cast(ReflectedCallable) pick !is null); // only the public overload
+    assert(engine.run("Visible.setting = 12; return Visible.setting;").toInt() == 12);
+    assert(engine.run("return Visible.pick(4) + Visible.exposed;").toInt() == 12);
 }
 
 private struct MixedBinaryFixture
@@ -543,7 +602,8 @@ final class ScriptEngine
         typeTable["new"] = constructor;
         static foreach (memberName; __traits(allMembers, T))
         {{
-            static if (memberName != "this" && memberName != "__ctor")
+            static if (memberName != "this" && memberName != "__ctor"
+                && isPublicTypeMember!(T, memberName))
             {
                 static if (__traits(compiles, is(__traits(getMember, T, memberName) == enum))
                     && is(__traits(getMember, T, memberName) == enum))
@@ -572,7 +632,9 @@ final class ScriptEngine
                     ReflectedCallable[] staticOverloads;
                     static foreach (overload; __traits(getOverloads, T, memberName))
                     {
-                        static if (__traits(compiles,
+                        static if ((__traits(getVisibility, overload) == "public"
+                            || __traits(getVisibility, overload) == "export")
+                            && __traits(compiles,
                             makeStaticReflectedCallable!overload(name ~ "." ~ memberName)))
                         {
                             staticOverloads ~= makeStaticReflectedCallable!overload(
