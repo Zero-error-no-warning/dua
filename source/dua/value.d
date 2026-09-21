@@ -479,7 +479,18 @@ struct Value
     {
         Value result;
         result.kind = ValueKind.array;
-        foreach (value; values) result.arrayValue ~= value.valueCopy();
+        result.arrayValue = copyValues(values);
+        return result;
+    }
+
+    // The caller relinquishes an unexposed scratch array. Copying elements at
+    // the same language boundary preserves reflected-copy effects and order.
+    package(dua) static Value fromOwnedArray(Value[] values)
+    {
+        foreach (ref value; values) value = value.valueCopy();
+        Value result;
+        result.kind = ValueKind.array;
+        result.arrayValue = values;
         return result;
     }
 
@@ -613,11 +624,7 @@ struct Value
         enforce(member.kind == ValueKind.function_,
             format("Module export '%s' is not callable", functionName));
 
-        Value[] copiedArgs;
-        foreach (arg; args)
-        {
-            copiedArgs ~= cast(Value) arg;
-        }
+        auto copiedArgs = (cast(Value[]) args).dup;
         return member.functionValue.invoke(copiedArgs);
     }
 
@@ -643,11 +650,12 @@ struct Value
         if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
     {
         Value[] converted;
-        foreach (ref value; values)
+        converted.length = values.length;
+        foreach (index, ref value; values)
         {
-            converted ~= convertToValue(value);
+            converted[index] = convertToValue(value);
         }
-        return Value.from(converted);
+        return Value.fromOwnedArray(converted);
     }
 
     static Value from(T)(T entries)
@@ -1603,8 +1611,9 @@ private Value convertToTypedValue(T)(auto ref T value)
     else static if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
     {
         Value[] elements;
-        foreach (element; value) elements ~= convertToTypedValue(element);
-        return Value.from(elements);
+        elements.length = value.length;
+        foreach (index, element; value) elements[index] = convertToTypedValue(element);
+        return Value.fromOwnedArray(elements);
     }
     else
     {
@@ -2083,6 +2092,41 @@ private T convertAssociativeKey(T)(const Value value)
     else static if (isFloatingPoint!T)
         enforce(value.isNumber, "Expected numeric associative array key");
     return convertFromValue!T(value);
+}
+
+package(dua) Value[] copyValues(scope const(Value)[] values)
+{
+    Value[] result;
+    result.length = values.length;
+    foreach (index, value; values) result[index] = value.valueCopy();
+    return result;
+}
+
+unittest
+{
+    Value[] original;
+    int[] order;
+    auto first = Value.fromStruct(null);
+    auto second = Value.fromStruct(null);
+    first.tableStorage.copier = () {
+        order ~= 1;
+        original[1] = Value.from(99);
+        return Value.fromStruct(["value": Value.from(10)]);
+    };
+    second.tableStorage.copier = () {
+        order ~= 2;
+        return Value.fromStruct(["value": Value.from(20)]);
+    };
+    original = [first, second];
+    auto copied = Value.from(original);
+    assert(order == [1] && copied.arrayValue[1].toInt() == 99);
+    original = [first, second];
+    order = null;
+    // Private scratch storage must preserve the snapshot taken before copying.
+    auto owned = Value.fromOwnedArray(original.dup);
+    assert(order == [1, 2] && original[1].toInt() == 99);
+    assert(owned.arrayValue[0].tableValue["value"].toInt() == 10);
+    assert(owned.arrayValue[1].tableValue["value"].toInt() == 20);
 }
 
 private bool associativeKeysEqual(Value left, Value right)

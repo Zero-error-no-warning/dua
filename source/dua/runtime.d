@@ -861,11 +861,7 @@ final class ScriptEngine
             }
             if (matchedConstructor !is null)
             {
-                Value[] copiedArgs;
-                foreach (arg; userArgs)
-                {
-                    copiedArgs ~= cast(Value) arg;
-                }
+                auto copiedArgs = (cast(Value[]) userArgs).dup;
                 return matchedConstructor.invoke(copiedArgs);
             }
 
@@ -1173,11 +1169,7 @@ final class ScriptEngine
     private Value callInModule(ModuleHandle handle, string functionName, scope const(Value)[] args)
     {
         auto callable = handle.get(functionName);
-        Value[] copiedArgs;
-        foreach (arg; args)
-        {
-            copiedArgs ~= cast(Value) arg;
-        }
+        auto copiedArgs = (cast(Value[]) args).dup;
         return invokeFunctionValue(callable, copiedArgs);
     }
 
@@ -1350,13 +1342,14 @@ final class ScriptEngine
         {
             enforce(value.kind == ValueKind.array, "Expected array for " ~ typeName);
             Value[] elements;
-            foreach (element; value.arrayValue)
+            elements.length = value.arrayValue.length;
+            foreach (index, element; value.arrayValue)
             {
                 auto prepared = prepareContainerValue(element, elementType);
                 enforce(valueMatchesType(prepared, elementType), "Array element expected " ~ elementType);
-                elements ~= prepared;
+                elements[index] = prepared;
             }
-            return Value.from(elements);
+            return Value.fromOwnedArray(elements);
         }
         // [] may initialize an empty typed AA; {} remains a distinct table.
         if (value.kind == ValueKind.array && value.arrayValue.length == 0)

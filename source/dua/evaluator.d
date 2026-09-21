@@ -14,8 +14,6 @@ import dua.ast;
 import dua.execution;
 import dua.value;
 import dua.type_syntax;
-import std.algorithm : map;
-import std.array : array;
 import std.conv : to;
 import std.exception : enforce;
 import std.format : format;
@@ -272,12 +270,8 @@ mixin template EvaluatorImplementation()
                     }
                     else
                     {
-                        Value[] values;
-                        foreach (expression; statement.expressions)
-                        {
-                            values ~= evaluate(expression, environment);
-                        }
-                        result.lastValue = Value.from(values);
+                        result.lastValue = Value.fromOwnedArray(
+                            evaluateExpressionList(statement.expressions, environment));
                     }
                     result.returned = true;
                     break;
@@ -538,9 +532,10 @@ mixin template EvaluatorImplementation()
         }
 
         Value[] values;
-        foreach (expression; expressions)
+        values.length = expressions.length;
+        foreach (index, expression; expressions)
         {
-            values ~= evaluate(expression, environment);
+            values[index] = evaluate(expression, environment);
         }
         return values;
     }
@@ -738,7 +733,7 @@ mixin template EvaluatorImplementation()
                         ? evaluate((cast(TernaryExpression) expression).whenTrue, environment)
                         : evaluate((cast(TernaryExpression) expression).whenFalse, environment);
                 case Expression.Kind.call:
-                    auto args = (cast(CallExpression) expression).arguments.map!(arg => evaluate(arg, environment)).array;
+                    auto args = evaluateExpressionList((cast(CallExpression) expression).arguments, environment);
                     return evaluateCall((cast(CallExpression) expression).callee, args, environment);
                 case Expression.Kind.array:
                     Value[] items;
@@ -756,7 +751,7 @@ mixin template EvaluatorImplementation()
                             items ~= value;
                         }
                     }
-                    return Value.from(items);
+                    return Value.fromOwnedArray(items);
                 case Expression.Kind.associativeArray:
                     auto literal = cast(AssociativeArrayExpression) expression;
                     auto result = Value.associativeArray();
@@ -863,7 +858,7 @@ mixin template EvaluatorImplementation()
                         {
                             sliced = container.arrayValue[lowerBound .. upperBound].dup;
                         }
-                        return Value.from(sliced);
+                        return Value.fromOwnedArray(sliced);
                     }
                     auto index = evaluate((cast(IndexExpression) expression).index, environment);
                     return readIndex(container, index);
@@ -1003,7 +998,7 @@ mixin template EvaluatorImplementation()
                 {
                     auto combined = left.arrayValue.dup;
                     combined ~= right.arrayValue;
-                    return Value.from(combined);
+                    return Value.fromOwnedArray(combined);
                 }
                 return Value.from(stringify(left) ~ stringify(right));
             case "+":
@@ -1243,9 +1238,7 @@ mixin template EvaluatorImplementation()
         }
         try
         {
-            Value[] copiedArgs;
-            foreach (arg; args) copiedArgs ~= arg.valueCopy();
-            return callable.functionValue.invoke(copiedArgs).valueCopy();
+            return callable.functionValue.invoke(copyValues(args)).valueCopy();
         }
         catch (Exception error)
         {
@@ -1355,7 +1348,7 @@ mixin template EvaluatorImplementation()
             }
             value += step;
         }
-        return Value.from(values);
+        return Value.fromOwnedArray(values);
     }
 
     private Value[] extractTypeChain(Value value)
@@ -1435,11 +1428,12 @@ mixin template EvaluatorImplementation()
         if (collection.kind == ValueKind.array)
         {
             Value[] mapped;
+            mapped.length = collection.arrayValue.length;
             foreach (index, item; collection.arrayValue)
             {
-                mapped ~= invokeCollectionCallback(mapper, item, Value.from(cast(long) index));
+                mapped[index] = invokeCollectionCallback(mapper, item, Value.from(cast(long) index));
             }
-            return Value.from(mapped);
+            return Value.fromOwnedArray(mapped);
         }
 
         if (collection.kind == ValueKind.table)
@@ -1474,7 +1468,7 @@ mixin template EvaluatorImplementation()
                     filtered ~= item;
                 }
             }
-            return Value.from(filtered);
+            return Value.fromOwnedArray(filtered);
         }
 
         if (collection.kind == ValueKind.table)
