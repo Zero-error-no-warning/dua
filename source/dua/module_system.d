@@ -23,7 +23,10 @@ mixin template ModuleImplementation()
 {
     private string[string] moduleSources;
     private ModuleHandle[string] modules;
-    private Value[string][] moduleExportScopes;
+    // Retain table identity, not a copy of its associative-array handle. In
+    // particular, inserting the first export must update an empty table that
+    // has already been handed to an importer during a cycle.
+    private Value[] moduleExportScopes;
     private string[] moduleSearchPaths;
     private Value[] moduleLoaders;
 
@@ -132,17 +135,16 @@ mixin template ModuleImplementation()
     {
         if (options.sourceName.length == 0)
             options.sourceName = hostModule.moduleName;
-        moduleExportScopes ~= hostModule.moduleValue.tableValue;
+        moduleExportScopes ~= hostModule.moduleValue;
+        scope (exit) moduleExportScopes.length -= 1;
         auto outcome = runInEnvironmentSafe(source, environment, options);
         if (hostModule.visibility == ModuleVisibility.explicitExports)
         {
-            hostModule.moduleValue.tableValue = moduleExportScopes[$ - 1];
             // Keep the historical `return table` form when no export was declared.
             if (hostModule.moduleValue.tableValue.length == 0
                 && outcome.ok && outcome.value.kind == ValueKind.table)
                 hostModule.moduleValue.tableValue = outcome.value.tableValue.dup;
         }
-        moduleExportScopes.length -= 1;
         return outcome;
     }
 
@@ -253,7 +255,7 @@ mixin template ModuleImplementation()
     {
         enforce(moduleExportScopes.length > 0,
             "export can only be used inside module source");
-        moduleExportScopes[$ - 1][name] = value.valueCopy();
+        moduleExportScopes[$ - 1].tableValue[name] = value.valueCopy();
     }
 
     private string resolveModuleSource(string moduleName)

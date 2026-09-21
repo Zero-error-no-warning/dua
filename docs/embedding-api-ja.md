@@ -88,6 +88,8 @@ auto settings = engine.loadModuleFile("config/settings.dua");
 
 `exportsValue()` は Dua の `import name as alias` と低レベル連携のための export テーブルです。通常の D 埋め込みコードでは、エンジン管理を迂回しない `ModuleHandle.call` とハンドルの添字を推奨します。後方互換の `Value.call` は一般テーブルの簡易呼び出しとして残っていますが、エンジンの call depth、call stack、実行量管理の対象外です。
 
+`export` 文は実行時に公開テーブルを直接更新します。`load` / `run` の完了前でも、循環 import やDへのコールバックから実行済みの export を参照できます。先に取得した `exportsValue()` も後続の追加を観測します。未実行の export はまだ参照できません。初期化失敗時は失敗したソースモジュールをキャッシュから除去しますが、既に他のモジュールへ渡った値や参照を巻き戻すことはありません。
+
 ### 3.3 D から空のモジュールを作る
 
 `newModule(name)` は、エンジンのグローバルとは別のトップレベル状態を持つ空の `ModuleHandle` を作り、同時に import 可能にします。`bind`、`bindAuto`、`bindNative` で追加した値はモジュールの export として公開されます。

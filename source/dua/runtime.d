@@ -2514,6 +2514,112 @@ unittest
 
 unittest
 {
+    // A cycle sees each export as it executes, including the first entry in
+    // an initially empty table. All importers retain that same table.
+    auto engine = new ScriptEngine();
+    size_t executions;
+    engine.bindNative("markModule", (scope const(Value)[] args) {
+        ++executions;
+        return Value.nullValue();
+    });
+    engine.registerModule("A", q{
+        markModule();
+        auto self = require("A");
+        export int before = 1;
+        auto named = 3;
+        export named;
+        export int add(int amount) { return before + amount; }
+        import B;
+        before = 2;
+        export auto during = B.seen;
+        export auto after = 4;
+        export auto selfAfter = self.after;
+    });
+    engine.registerModule("B", q{
+        markModule();
+        import A;
+        export auto seen = A.add(A.named);
+        export auto missing = rawget(A, "after");
+        export int readAfter() { return A.after; }
+    });
+
+    auto a = engine.loadModule("A");
+    auto b = engine.loadModule("B");
+    assert(a["during"].toInt() == 4);
+    assert(a["selfAfter"].toInt() == 4);
+    assert(b["missing"].kind == ValueKind.null_);
+    assert(b.call("readAfter").toInt() == 4);
+    // Publishing immediately does not introduce live variable bindings.
+    assert(a["before"].toInt() == 1);
+    assert(a.call("add", [Value.from(0)]).toInt() == 2);
+    assert(engine.loadModule("A") is a);
+    assert(executions == 2);
+}
+
+unittest
+{
+    // Forward access is still an error; neither module may stay cached after
+    // this nested load fails, and the export scope must be restored.
+    auto engine = new ScriptEngine();
+    engine.registerModule("earlyA", "import earlyB; export auto later = 1;");
+    engine.registerModule("earlyB", "import earlyA; export auto seen = earlyA.later;");
+    auto failed = engine.loadModuleSafe("earlyA");
+    assert(!failed.ok);
+    assert(failed.errorMessage.canFind("Unknown property 'later'"));
+    assert(engine.run(q{
+        return package.loaded("earlyA") == null && package.loaded("earlyB") == null;
+    }).truthy());
+    engine.registerModule("healthy", "export auto ready = 7;");
+    auto healthy = engine.loadModule("healthy");
+    assert(healthy["ready"].toInt() == 7);
+    assert(healthy.exportsValue().tableValue.length == 1);
+}
+
+unittest
+{
+    // Failure removes the failing module from the cache, but does not roll
+    // back exports already observed by a successfully loaded dependency.
+    auto engine = new ScriptEngine();
+    engine.registerModule("failing", q{
+        export auto before = 1;
+        import observer;
+        error("initialization failed");
+    });
+    engine.registerModule("observer", q{
+        import failing;
+        export auto seen = failing.before;
+        export int read() { return failing.before; }
+    });
+    auto failed = engine.loadModuleSafe("failing");
+    assert(!failed.ok);
+    assert(failed.errorMessage.canFind("initialization failed"));
+    assert(engine.run("return package.loaded(\"failing\") == null;").truthy());
+    auto observer = engine.loadModule("observer");
+    assert(observer["seen"].toInt() == 1);
+    assert(observer.call("read").toInt() == 1);
+}
+
+unittest
+{
+    // Host-created handles and export tables obtained before loading also
+    // observe publication while load/run is still executing.
+    auto engine = new ScriptEngine();
+    auto moduleHandle = engine.newModule("live");
+    auto exports = moduleHandle.exportsValue();
+    engine.bindNative("observe", (scope const(Value)[] args) {
+        auto name = args[0].toHostString();
+        assert(moduleHandle[name].toInt() == args[1].toInt());
+        assert(exports[name].toInt() == args[1].toInt());
+        return Value.nullValue();
+    });
+    moduleHandle.load("export auto first = 1; observe(\"first\", 1);");
+    moduleHandle.run("export auto second = 2; observe(\"second\", 2);");
+    assert(exports["first"].toInt() == 1);
+    assert(exports["second"].toInt() == 2);
+}
+
+unittest
+{
     auto engine = new ScriptEngine();
     engine.globalModule.bindAuto("base", 40);
     engine.bindAuto("offset", 2);

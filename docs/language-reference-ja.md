@@ -370,6 +370,32 @@ return rules.add(5);
 - `require("game.rules")` は同じキャッシュ機構からモジュール値を返します。
 - export が1つ以上あれば export テーブルがモジュール値です。export がなく、トップレベルの結果がテーブルならその内容を取り込みます。数値などの任意の戻り値が `require` の結果になるわけではありません。
 
+### export の公開タイミングと循環 import
+
+`export` は、その文を実行した時点で共有の公開テーブルへ値を追加します。モジュール全体の読み込み完了を待ちません。初期化中のモジュールを再び import した場合は、その時点までに公開した値を持つ同じテーブルが返ります。
+
+```dua
+// A.dua
+export auto before = 1;
+import B;
+export auto result = B.seen;
+export auto after = 2;
+```
+
+```dua
+// B.dua
+import A;
+export auto seen = A.before; // Aの初期化途中でも1を読める
+export int readAfter() { return A.after; }
+```
+
+D側から `engine.loadModule("A")` で読み込むと、A → B → A の循環があっても `B.seen` は `1` になります。Aの読み込み完了後なら `B.readAfter()` は `2` を返します。Bのトップレベルで `A.after` を読むと、まだその export を実行していないのでエラーです。後から追加した export も、既に取得済みのモジュールテーブルから参照できます。
+
+- `export Type name = expression;` は初期値の評価と検査が成功してから公開します。関数の export と `export existingName;` も実行時に反映します。
+- 公開は既存の値コピー規則に従います。`before = 3;` のような変数への再代入だけでは、公開済みの数値は更新されません。配列・テーブルの参照は共有されます。
+- 初期化に失敗したモジュールはキャッシュから除去します。ただし、既に公開した値や副作用を巻き戻す処理はありません。読み込みが成功済みの依存モジュールが保持する公開テーブルの参照も残ります。
+- キャッシュはモジュール名をキーにします。上の例ではD側も `loadModule("A")` を使用します。`loadModuleFile("A.dua")` のパスキーと、`import A` の名前キーは別です。
+
 ## 12. 標準関数・ライブラリ一覧
 
 | 名前 | 概要 |
