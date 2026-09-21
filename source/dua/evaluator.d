@@ -649,10 +649,11 @@ mixin template EvaluatorImplementation()
                     environment.assign((cast(VariableExpression) target).name, value);
                     return;
                 case Expression.Kind.get:
-                    auto container = evaluate((cast(GetExpression) target).target, environment);
+                    auto get = cast(GetExpression) target;
+                    auto container = evaluate(get.target, environment);
                     enforce(container.isFieldAggregate,
                         "Property assignment currently supports tables/reflected structs/classes");
-                    if (auto property = (cast(GetExpression) target).memberName in container.tableValue)
+                    if (auto property = get.memberName in container.tableValue)
                     {
                         if (property.kind == ValueKind.function_
                             && property.functionValue.acceptsArity(1))
@@ -661,20 +662,21 @@ mixin template EvaluatorImplementation()
                             return;
                         }
                     }
-                    if (auto setter = container.propertySetter((cast(GetExpression) target).memberName))
+                    if (auto setter = container.propertySetter(get.memberName))
                     {
                         invokeFunctionValue(*setter, [value]);
                         return;
                     }
-                    if (!applyTableNewIndex(container, (cast(GetExpression) target).memberName, value))
+                    if (!applyTableNewIndex(container, get.memberName, value))
                     {
-                        container.tableValue[(cast(GetExpression) target).memberName] = value.valueCopy();
+                        container.tableValue[get.memberName] = value.valueCopy();
                     }
                     return;
                 case Expression.Kind.index:
-                    auto container = evaluate((cast(IndexExpression) target).target, environment);
-                    enforce(!(cast(IndexExpression) target).isSlice, "Slice cannot be an assignment target");
-                    auto index = evaluate((cast(IndexExpression) target).index, environment);
+                    auto indexed = cast(IndexExpression) target;
+                    auto container = evaluate(indexed.target, environment);
+                    enforce(!indexed.isSlice, "Slice cannot be an assignment target");
+                    auto index = evaluate(indexed.index, environment);
                     if (container.kind == ValueKind.associativeArray)
                     {
                         index = checkedAssociativeKey(container, index);
@@ -729,15 +731,16 @@ mixin template EvaluatorImplementation()
                     auto conversion = cast(CastExpression) expression;
                     return castValue(evaluate(conversion.operand, environment), conversion.targetType);
                 case Expression.Kind.unary:
-                    switch ((cast(UnaryExpression) expression).operatorSymbol)
+                    auto unary = cast(UnaryExpression) expression;
+                    switch (unary.operatorSymbol)
                     {
                         case "$":
                             enforce(evaluatorContext.indexLengthStack.length > 0, "$ is only available inside index expressions");
                             return Value.from(evaluatorContext.indexLengthStack.top());
                         case "-":
-                            auto right = evaluate((cast(UnaryExpression) expression).operand, environment);
+                            auto right = evaluate(unary.operand, environment);
                             Value overloaded;
-                            if (tryCallUnaryOverload("opUnary-", right, overloaded))
+                            if (tryCallUnaryOverload(unary.operatorSymbol, right, overloaded))
                             {
                                 return overloaded;
                             }
@@ -745,63 +748,66 @@ mixin template EvaluatorImplementation()
                                 ? Value.from(-right.integerValue)
                                 : Value.from(-right.toFloat());
                         case "!":
-                            auto right = evaluate((cast(UnaryExpression) expression).operand, environment);
+                            auto right = evaluate(unary.operand, environment);
                             Value overloaded;
-                            if (tryCallUnaryOverload("opUnary!", right, overloaded))
+                            if (tryCallUnaryOverload(unary.operatorSymbol, right, overloaded))
                             {
                                 return overloaded;
                             }
                             return Value.from(!right.truthy());
                         default:
-                            enforce(false, format("Unsupported unary operator '%s'", (cast(UnaryExpression) expression).operatorSymbol));
+                            enforce(false, format("Unsupported unary operator '%s'", unary.operatorSymbol));
                             assert(0);
                     }
                 case Expression.Kind.binary:
-                    if ((cast(BinaryExpression) expression).operatorSymbol == "is")
+                    auto binary = cast(BinaryExpression) expression;
+                    if (binary.operatorSymbol == "is")
                     {
                         return Value.from(valueIsType(
-                            evaluate((cast(BinaryExpression) expression).left, environment), (cast(VariableExpression) (cast(BinaryExpression) expression).right).name));
+                            evaluate(binary.left, environment), (cast(VariableExpression) binary.right).name));
                     }
-                    if ((cast(BinaryExpression) expression).operatorSymbol == "&&")
+                    if (binary.operatorSymbol == "&&")
                     {
-                        auto left = evaluate((cast(BinaryExpression) expression).left, environment);
+                        auto left = evaluate(binary.left, environment);
                         if (!left.truthy())
                         {
                             return Value.from(false);
                         }
 
-                        auto right = evaluate((cast(BinaryExpression) expression).right, environment);
+                        auto right = evaluate(binary.right, environment);
                         return Value.from(right.truthy());
                     }
 
-                    if ((cast(BinaryExpression) expression).operatorSymbol == "||")
+                    if (binary.operatorSymbol == "||")
                     {
-                        auto left = evaluate((cast(BinaryExpression) expression).left, environment);
+                        auto left = evaluate(binary.left, environment);
                         if (left.truthy())
                         {
                             return Value.from(true);
                         }
 
-                        auto right = evaluate((cast(BinaryExpression) expression).right, environment);
+                        auto right = evaluate(binary.right, environment);
                         return Value.from(right.truthy());
                     }
 
-                    return evaluateBinary((cast(BinaryExpression) expression).operatorSymbol,
-                        evaluate((cast(BinaryExpression) expression).left, environment),
-                        evaluate((cast(BinaryExpression) expression).right, environment));
+                    return evaluateBinary(binary.operatorSymbol,
+                        evaluate(binary.left, environment), evaluate(binary.right, environment));
                 case Expression.Kind.ternary:
-                    return evaluate((cast(TernaryExpression) expression).condition, environment).truthy()
-                        ? evaluate((cast(TernaryExpression) expression).whenTrue, environment)
-                        : evaluate((cast(TernaryExpression) expression).whenFalse, environment);
+                    auto ternary = cast(TernaryExpression) expression;
+                    return evaluate(ternary.condition, environment).truthy()
+                        ? evaluate(ternary.whenTrue, environment)
+                        : evaluate(ternary.whenFalse, environment);
                 case Expression.Kind.call:
-                    auto args = evaluateExpressionList((cast(CallExpression) expression).arguments, environment);
-                    return evaluateCall((cast(CallExpression) expression).callee, args, environment);
+                    auto call = cast(CallExpression) expression;
+                    auto args = evaluateExpressionList(call.arguments, environment);
+                    return evaluateCall(call.callee, args, environment);
                 case Expression.Kind.array:
+                    auto array = cast(ArrayExpression) expression;
                     Value[] items;
-                    foreach (index, argument; (cast(ArrayExpression) expression).elements)
+                    foreach (index, argument; array.elements)
                     {
                         auto value = evaluate(argument, environment);
-                        if (index < (cast(ArrayExpression) expression).elementSpreads.length && (cast(ArrayExpression) expression).elementSpreads[index])
+                        if (index < array.elementSpreads.length && array.elementSpreads[index])
                         {
                             enforce(value.kind == ValueKind.array,
                                 "Array spread requires an array value");
@@ -855,26 +861,28 @@ mixin template EvaluatorImplementation()
                     }
                     return Value.from(entries);
                 case Expression.Kind.function_:
+                    auto functionExpression = cast(FunctionExpression) expression;
                     return Value.fromFunction(new ScriptCallable("anonymous", this, environment,
-                        (cast(FunctionExpression) expression).parameters, (cast(FunctionExpression) expression).variadic, (cast(FunctionExpression) expression).body,
-                        (cast(FunctionExpression) expression).parameterTypes, (cast(FunctionExpression) expression).returnType));
+                        functionExpression.parameters, functionExpression.variadic, functionExpression.body,
+                        functionExpression.parameterTypes, functionExpression.returnType));
                 case Expression.Kind.get:
-                    auto container = evaluate((cast(GetExpression) expression).target, environment);
+                    auto get = cast(GetExpression) expression;
+                    auto container = evaluate(get.target, environment);
                     if (container.kind == ValueKind.associativeArray)
-                        return associativeProperty(container, (cast(GetExpression) expression).memberName);
+                        return associativeProperty(container, get.memberName);
                     enforce(container.isFieldAggregate,
                         "Property access currently supports tables/reflected structs/classes");
-                    if (auto getter = container.propertyGetter((cast(GetExpression) expression).memberName))
+                    if (auto getter = container.propertyGetter(get.memberName))
                     {
                         auto refreshed = invokeFunctionValueWithThis(*getter, [], container);
-                        auto property = (cast(GetExpression) expression).memberName in container.tableValue;
+                        auto property = get.memberName in container.tableValue;
                         if (property is null || property.kind != ValueKind.function_)
                         {
-                            container.tableValue[(cast(GetExpression) expression).memberName] = refreshed;
+                            container.tableValue[get.memberName] = refreshed;
                         }
                         return refreshed;
                     }
-                    if (auto value = (cast(GetExpression) expression).memberName in container.tableValue)
+                    if (auto value = get.memberName in container.tableValue)
                     {
                         if (value.kind == ValueKind.function_
                             && value.functionValue.acceptsArity(0))
@@ -884,14 +892,15 @@ mixin template EvaluatorImplementation()
                         return *value;
                     }
                     Value resolved;
-                    if (resolveTableIndex(container, (cast(GetExpression) expression).memberName, resolved))
+                    if (resolveTableIndex(container, get.memberName, resolved))
                     {
                         return resolved;
                     }
-                    enforce(false, format("Unknown property '%s'", (cast(GetExpression) expression).memberName));
+                    enforce(false, format("Unknown property '%s'", get.memberName));
                     assert(0);
                 case Expression.Kind.index:
-                    auto container = evaluate((cast(IndexExpression) expression).target, environment);
+                    auto indexed = cast(IndexExpression) expression;
+                    auto container = evaluate(indexed.target, environment);
                     bool pushedLengthContext;
                     if (canMeasureLength(container))
                     {
@@ -905,11 +914,11 @@ mixin template EvaluatorImplementation()
                             evaluatorContext.indexLengthStack.pop();
                         }
                     }
-                    if ((cast(IndexExpression) expression).isSlice)
+                    if (indexed.isSlice)
                     {
                         enforce(container.kind == ValueKind.array, "Slicing currently supports arrays only");
-                        auto start = evaluate((cast(IndexExpression) expression).sliceStart, environment).toInt();
-                        auto finish = evaluate((cast(IndexExpression) expression).sliceEnd, environment).toInt();
+                        auto start = evaluate(indexed.sliceStart, environment).toInt();
+                        auto finish = evaluate(indexed.sliceEnd, environment).toInt();
                         enforce(start >= 0 && finish >= start, "Invalid slice range");
                         auto lowerBound = cast(size_t) start;
                         auto upperBound = cast(size_t) finish;
@@ -921,7 +930,7 @@ mixin template EvaluatorImplementation()
                         }
                         return Value.fromOwnedArray(sliced);
                     }
-                    auto index = evaluate((cast(IndexExpression) expression).index, environment);
+                    auto index = evaluate(indexed.index, environment);
                     return readIndex(container, index);
             }
         }
@@ -1127,8 +1136,9 @@ mixin template EvaluatorImplementation()
     {
         if (calleeExpression.kind == Expression.Kind.get)
         {
-            auto receiver = evaluate((cast(GetExpression) calleeExpression).target, environment);
-            return callMethodOrUfcs(receiver, (cast(GetExpression) calleeExpression).memberName, args, environment);
+            auto get = cast(GetExpression) calleeExpression;
+            auto receiver = evaluate(get.target, environment);
+            return callMethodOrUfcs(receiver, get.memberName, args, environment);
         }
 
         auto callee = evaluate(calleeExpression, environment);
@@ -1235,13 +1245,15 @@ mixin template EvaluatorImplementation()
         return false;
     }
 
-    private bool tryCallUnaryOverload(string slot, Value operand, out Value result)
+    private bool tryCallUnaryOverload(string operatorSymbol, Value operand, out Value result)
     {
         if (!operand.isFieldAggregate)
         {
             return false;
         }
 
+        auto slot = operatorSymbol == "-" ? "opUnary-"
+            : operatorSymbol == "!" ? "opUnary!" : "opUnary" ~ operatorSymbol;
         Value functionValue;
         if (!lookupMetamethod(operand, slot, functionValue))
         {
