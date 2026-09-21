@@ -7,8 +7,10 @@ import std.exception : enforce;
 import std.format : format;
 import std.string : indexOf, join;
 import std.meta : AliasSeq, staticIndexOf, staticMap;
-import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, KeyType, OriginalType, ParameterDefaults, Parameters, ReturnType, Unqual, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
+import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, KeyType, OriginalType, ParameterDefaults, Parameters, ReturnType, Unqual, ValueType, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
 import std.typecons : Tuple;
+import std.math : isFinite;
+import dua.type_syntax;
 
 abstract class CallableValue
 {
@@ -178,6 +180,7 @@ enum ValueKind
     boolean,
     string_,
     array,
+    associativeArray,
     table,
     struct_,
     function_,
@@ -206,6 +209,20 @@ private final class TableStorage
     Value[] aliasThisChain;
     Value[string] propertyGetters;
     Value[string] propertySetters;
+    bool delegate(Value) keyEquals;
+}
+
+struct AssociativeEntry
+{
+    Value key;
+    Value value;
+}
+
+private final class AssociativeStorage
+{
+    string keyType;
+    string valueType;
+    AssociativeEntry[] entries;
 }
 
 struct Value
@@ -217,9 +234,77 @@ struct Value
     string stringValue;
     Value[] arrayValue;
     private TableStorage tableStorage;
+    private AssociativeStorage associativeStorage;
     CallableValue functionValue;
     string nativeTypeName;
     string nativeDisplay;
+
+    static Value associativeArray(string valueType = "any", string keyType = "any")
+    {
+        Value result;
+        result.kind = ValueKind.associativeArray;
+        result.associativeStorage = new AssociativeStorage();
+        result.associativeStorage.valueType = valueType;
+        result.associativeStorage.keyType = keyType;
+        return result;
+    }
+
+    string associativeKeyType() const { return associativeStorage.keyType; }
+    string associativeValueType() const { return associativeStorage.valueType; }
+    const(AssociativeEntry)[] associativeEntries() const { return associativeStorage.entries; }
+
+    package(dua) size_t associativeIndex(Value key) const
+    {
+        foreach (index, entry; associativeStorage.entries)
+            if (associativeKeysEqual(cast(Value) entry.key, key)) return index;
+        return size_t.max;
+    }
+
+    package(dua) void associativeSet(Value key, Value value)
+    {
+        auto index = associativeIndex(key);
+        if (index == size_t.max)
+            associativeStorage.entries ~= AssociativeEntry(key.keyCopy(), value.valueCopy());
+        else
+            associativeStorage.entries[index].value = value.valueCopy();
+    }
+
+    package(dua) bool associativeRemove(Value key)
+    {
+        auto index = associativeIndex(key);
+        if (index == size_t.max) return false;
+        associativeStorage.entries = associativeStorage.entries[0 .. index]
+            ~ associativeStorage.entries[index + 1 .. $];
+        return true;
+    }
+
+    /// Keys own their value contents; exposing a key never exposes stored data.
+    package(dua) Value keyCopy() const
+    {
+        switch (kind)
+        {
+            case ValueKind.null_, ValueKind.integer, ValueKind.boolean, ValueKind.string_:
+                return cast(Value) this;
+            case ValueKind.floating:
+                enforce(isFinite(floatingValue), "Associative array keys must be finite");
+                return cast(Value) this;
+            case ValueKind.array:
+                Value[] elements;
+                foreach (element; arrayValue) elements ~= element.keyCopy();
+                return Value.from(elements);
+            case ValueKind.struct_:
+                if (tableStorage.nativeOwner !is null) return valueCopy();
+                auto result = valueCopy();
+                foreach (name, field; tableValue) result.tableValue[name] = field.keyCopy();
+                return result;
+            case ValueKind.table:
+                if (tableStorage.nativeClass !is null) return cast(Value) this;
+                goto default;
+            default:
+                enforce(false, format("Unsupported associative array key kind: %s", kind));
+                assert(0);
+        }
+    }
 
     ref Value[string] tableValue()
     {
@@ -461,6 +546,21 @@ struct Value
         return Value.from(converted);
     }
 
+    static Value from(T)(T entries)
+        if (isAssociativeArray!T && !isSomeString!(KeyType!T))
+    {
+        return fromAssociativeArray(entries);
+    }
+
+    /// Preserve the key/value types, including for string-keyed host AAs.
+    static Value fromAssociativeArray(T)(T entries) if (isAssociativeArray!T)
+    {
+        auto result = associativeArray(hostTypeName!(ValueType!T), hostTypeName!(KeyType!T));
+        foreach (key, value; entries)
+            result.associativeSet(convertToTypedValue(key), convertToTypedValue(value));
+        return result;
+    }
+
     static Value reflect(T)(auto ref T value)
         if (isAggregateType!T)
     {
@@ -660,6 +760,11 @@ struct Value
             auto owner = reflectedTarget;
             result.tableStorage.nativeOwner = owner;
             result.tableStorage.copier = () => Value.reflect(owner.value);
+            static if (__traits(compiles, owner.value == owner.value))
+                result.tableStorage.keyEquals = (Value other) {
+                    auto otherOwner = cast(ReflectedStructStorage!T) other.tableStorage.nativeOwner;
+                    return otherOwner !is null && owner.value == otherOwner.value;
+                };
         }
         else static if (is(T == class))
         {
@@ -728,6 +833,11 @@ struct Value
                 return stringValue;
             case ValueKind.array:
                 return "[" ~ arrayValue.map!(item => item.toHostString()).array.join(", ") ~ "]";
+            case ValueKind.associativeArray:
+                string[] entries;
+                foreach (entry; associativeEntries)
+                    entries ~= entry.key.toHostString() ~ ": " ~ entry.value.toHostString();
+                return entries.length ? "[" ~ entries.join(", ") ~ "]" : "[:]";
             case ValueKind.table:
             case ValueKind.struct_:
                 string[] parts;
@@ -759,6 +869,12 @@ struct Value
                 return '"' ~ stringValue ~ '"';
             case ValueKind.array:
                 return "[" ~ arrayValue.map!(item => item.toScriptLiteral()).array.join(", ") ~ "]";
+            case ValueKind.associativeArray:
+                string[] entries;
+                foreach (entry; associativeEntries)
+                    entries ~= entry.key.toScriptLiteral() ~ ": " ~ entry.value.toScriptLiteral();
+                return "cast(" ~ associativeValueType ~ "[" ~ associativeKeyType ~ "]) "
+                    ~ (entries.length ? "[" ~ entries.join(", ") ~ "]" : "[:]");
             case ValueKind.table:
             case ValueKind.struct_:
                 string[] parts;
@@ -790,6 +906,8 @@ struct Value
                 return stringValue.length > 0;
             case ValueKind.array:
                 return arrayValue.length > 0;
+            case ValueKind.associativeArray:
+                return associativeEntries.length > 0;
             case ValueKind.table:
             case ValueKind.struct_:
                 return tableValue.length > 0;
@@ -1353,6 +1471,47 @@ private ReflectedCallable makeBoundEqualityOperator(T)(string debugName, auto re
     });
 }
 
+private string hostTypeName(T)()
+{
+    static if (is(T == Value)) return "any";
+    else static if (isSomeString!T) return "string";
+    else static if (isAssociativeArray!T)
+        return hostTypeName!(ValueType!T) ~ "[" ~ hostTypeName!(KeyType!T) ~ "]";
+    else static if (isDynamicArray!T || isStaticArray!T)
+        return hostTypeName!(ForeachType!T) ~ "[]";
+    else return Unqual!T.stringof;
+}
+
+private Value convertToTypedValue(T)(auto ref T value)
+{
+    static if (isAssociativeArray!T) return Value.fromAssociativeArray(value);
+    else static if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
+    {
+        Value[] elements;
+        foreach (element; value) elements ~= convertToTypedValue(element);
+        return Value.from(elements);
+    }
+    else
+    {
+        static if (is(Unqual!T == ulong))
+            enforce(value <= long.max, "Dua integers cannot represent ulong values above long.max");
+        return convertToValue(value);
+    }
+}
+
+private bool associativeKeyTypeMatches(T)(string name)
+{
+    if (name == "any" || name == hostTypeName!T) return true;
+    static if (isIntegral!T || isFloatingPoint!T)
+    {
+        foreach (integerType; ["byte", "ubyte", "short", "ushort", "int", "uint", "long", "ulong"])
+            if (name == integerType) return true;
+        static if (isFloatingPoint!T)
+            return name == "float" || name == "double" || name == "real";
+    }
+    return false;
+}
+
 private Value convertToValue(T)(auto ref T value)
 {
     static if (is(T == Value))
@@ -1385,7 +1544,7 @@ private Value convertToValue(T)(auto ref T value)
     {
         return Value.from(value);
     }
-    else static if (isAssociativeArray!T && isSomeString!(KeyType!T))
+    else static if (isAssociativeArray!T)
     {
         return Value.from(value);
     }
@@ -1430,7 +1589,7 @@ private int conversionScore(T)(const(Value) value)
         if (value.kind == ValueKind.string_) return 100;
         return aliasThisConversionScore!T(value, 10);
     }
-    else static if (is(T == bool))
+    else static if (is(Unqual!T == bool))
     {
         if (value.kind == ValueKind.boolean) return 100;
         return aliasThisConversionScore!T(value, 10);
@@ -1471,9 +1630,35 @@ private int conversionScore(T)(const(Value) value)
         }
         return score;
     }
-    else static if (isAssociativeArray!T && isSomeString!(KeyType!T))
+    else static if (isAssociativeArray!T)
     {
-        return value.isFieldAggregate ? 80 : -1;
+        if (value.kind == ValueKind.associativeArray)
+        {
+            if (!associativeKeyTypeMatches!(KeyType!T)(value.associativeKeyType)) return -1;
+            int score = 80;
+            if (value.associativeKeyType == hostTypeName!(KeyType!T)) score += 1000;
+            if (value.associativeValueType == hostTypeName!(ValueType!T)) score += 1000;
+            foreach (entry; value.associativeEntries)
+            {
+                auto keyScore = conversionScore!(KeyType!T)(entry.key);
+                auto elementScore = conversionScore!(ValueType!T)(entry.value);
+                if (keyScore < 0 || elementScore < 0) return -1;
+                score += keyScore + elementScore;
+            }
+            return score;
+        }
+        static if (!isSomeString!(KeyType!T)) return -1;
+        if (!value.isFieldAggregate)
+            return -1;
+        int score = 80;
+        foreach (element; value.tableValue)
+        {
+            auto elementScore = conversionScore!(ValueType!T)(element);
+            if (elementScore < 0)
+                return -1;
+            score += elementScore;
+        }
+        return score;
     }
     else static if (is(T == class))
     {
@@ -1579,17 +1764,17 @@ private T convertFromValue(T)(const(Value) value)
     {
         if (value.kind != ValueKind.string_)
         {
-            T aliased;
-            if (convertAliasThisTarget!T(value, aliased)) return aliased;
+            Unqual!T aliased;
+            if (convertAliasThisTarget!(Unqual!T)(value, aliased)) return aliased;
         }
         return convTo!T(value.toHostString());
     }
-    else static if (is(T == bool))
+    else static if (is(Unqual!T == bool))
     {
         if (value.kind != ValueKind.boolean)
         {
-            T aliased;
-            if (convertAliasThisTarget!T(value, aliased)) return aliased;
+            Unqual!T aliased;
+            if (convertAliasThisTarget!(Unqual!T)(value, aliased)) return aliased;
         }
         return value.truthy();
     }
@@ -1597,8 +1782,8 @@ private T convertFromValue(T)(const(Value) value)
     {
         if (value.kind != ValueKind.integer)
         {
-            T aliased;
-            if (convertAliasThisTarget!T(value, aliased)) return aliased;
+            Unqual!T aliased;
+            if (convertAliasThisTarget!(Unqual!T)(value, aliased)) return aliased;
         }
         return cast(T) value.toInt();
     }
@@ -1606,8 +1791,8 @@ private T convertFromValue(T)(const(Value) value)
     {
         if (!value.isNumber)
         {
-            T aliased;
-            if (convertAliasThisTarget!T(value, aliased)) return aliased;
+            Unqual!T aliased;
+            if (convertAliasThisTarget!(Unqual!T)(value, aliased)) return aliased;
         }
         return cast(T) value.toFloat();
     }
@@ -1648,13 +1833,47 @@ private T convertFromValue(T)(const(Value) value)
         static if (isDynamicArray!T)
         {
             Element[] result;
-            result.length = value.arrayValue.length;
+            foreach (element; value.arrayValue)
+                result ~= convertFromValue!Element(element);
+            return result;
         }
         else
+        {
             T result;
-        foreach (index, element; value.arrayValue)
-            result[index] = convertFromValue!Element(element);
-        return result;
+            foreach (index, element; value.arrayValue)
+                result[index] = convertFromValue!Element(element);
+            return result;
+        }
+    }
+    else static if (isAssociativeArray!T)
+    {
+        // Materialize a new AA; host mutations do not write back to the table.
+        Unqual!T result;
+        if (value.kind == ValueKind.associativeArray)
+        {
+            enforce(associativeKeyTypeMatches!(KeyType!T)(value.associativeKeyType),
+                "Incompatible D associative array key type: " ~ T.stringof);
+            foreach (entry; value.associativeEntries)
+            {
+                auto key = convertAssociativeKey!(KeyType!T)(entry.key);
+                enforce((key in result) is null, "Distinct associative array keys collide after D conversion");
+                result.require(key, convertFromValue!(ValueType!T)(entry.value));
+            }
+            return result;
+        }
+        static if (isSomeString!(KeyType!T))
+        {
+            enforce(value.isFieldAggregate,
+                format("Expected table or associative array to convert into '%s' but got %s", T.stringof, value.kind));
+            foreach (key, element; value.tableValue)
+                result.require(convTo!(KeyType!T)(key), convertFromValue!(ValueType!T)(element));
+            return result;
+        }
+        else
+        {
+            enforce(false, format("Expected associative array to convert into '%s' but got %s", T.stringof, value.kind));
+            assert(0);
+        }
     }
     else static if (is(T == class))
     {
@@ -1735,6 +1954,51 @@ private T convertFromValue(T)(const(Value) value)
     }
 }
 
+private T convertAssociativeKey(T)(const Value value)
+{
+    static if (isIntegral!T)
+    {
+        enforce(value.kind == ValueKind.integer, "Expected integer associative array key");
+        return convTo!T(value.integerValue);
+    }
+    else static if (isSomeString!T)
+        enforce(value.kind == ValueKind.string_, "Expected string associative array key");
+    else static if (is(Unqual!T == bool))
+        enforce(value.kind == ValueKind.boolean, "Expected bool associative array key");
+    else static if (isFloatingPoint!T)
+        enforce(value.isNumber, "Expected numeric associative array key");
+    return convertFromValue!T(value);
+}
+
+private bool associativeKeysEqual(Value left, Value right)
+{
+    if (left.kind != right.kind) return false;
+    if (left.kind == ValueKind.table)
+        return left.tableStorage.nativeClass !is null && right.tableStorage.nativeClass !is null
+            && left.tableStorage.nativeClass.instance is right.tableStorage.nativeClass.instance;
+    if (left.kind == ValueKind.array)
+    {
+        if (left.arrayValue.length != right.arrayValue.length) return false;
+        foreach (index, item; left.arrayValue)
+            if (!associativeKeysEqual(item, right.arrayValue[index])) return false;
+        return true;
+    }
+    if (left.kind == ValueKind.struct_)
+    {
+        if (!valuesEqual(Value.from(cast(Value[]) left.typeChain), Value.from(cast(Value[]) right.typeChain)))
+            return false;
+        if (left.tableStorage.keyEquals !is null) return left.tableStorage.keyEquals(right);
+        if (left.tableValue.length != right.tableValue.length) return false;
+        foreach (name, field; left.tableValue)
+        {
+            auto other = name in right.tableValue;
+            if (other is null || !associativeKeysEqual(field, *other)) return false;
+        }
+        return true;
+    }
+    return valuesEqual(left, right);
+}
+
 bool valuesEqual(Value left, Value right)
 {
     if (left.kind == right.kind)
@@ -1777,6 +2041,15 @@ bool valuesEqual(Value left, Value right)
                     {
                         return false;
                     }
+                }
+                return true;
+            case ValueKind.associativeArray:
+                if (left.associativeEntries.length != right.associativeEntries.length) return false;
+                foreach (entry; left.associativeEntries)
+                {
+                    auto index = right.associativeIndex(cast(Value) entry.key);
+                    if (index == size_t.max || !valuesEqual(cast(Value) entry.value,
+                        cast(Value) right.associativeEntries[index].value)) return false;
                 }
                 return true;
             case ValueKind.function_:

@@ -232,15 +232,16 @@ private struct Parser
             return statement;
         }
 
-        if (check(TokenKind.identifier) && peekAt(1).kind == TokenKind.identifier)
+        if (isTypedDeclaration())
         {
-            auto typeToken = advance();
+            auto typeToken = peek();
+            auto declaredType = parseTypeName();
             auto nameToken = advance();
             if (check(TokenKind.leftParen))
             {
                 auto statement = locatedStatement(Statement.Kind.functionDecl, typeToken);
                 statement.isExported = exportPrefix;
-                statement.returnType = typeToken.lexeme;
+                statement.returnType = declaredType;
                 statement.name = nameToken.lexeme;
                 parseTypedFunctionSignature(statement.parameterTypes, statement.parameters,
                     statement.variadic, statement.body);
@@ -249,11 +250,21 @@ private struct Parser
 
             auto statement = locatedStatement(Statement.Kind.variableDecl, typeToken);
             statement.isExported = exportPrefix;
-            statement.declaredType = typeToken.lexeme;
+            statement.declaredType = declaredType;
             statement.name = nameToken.lexeme;
             statement.names = [statement.name];
-            consume(TokenKind.equal, "Expected '=' after typed variable name");
-            statement.expression = parseExpression();
+            if (check(TokenKind.semicolon) && declaredType[$ - 1] == ']')
+            {
+                if (declaredType.length >= 2 && declaredType[$ - 2 .. $] == "[]")
+                    statement.expression = locatedExpression(new ArrayExpression(null), typeToken);
+                else
+                    statement.expression = locatedExpression(new AssociativeArrayExpression(), typeToken);
+            }
+            else
+            {
+                consume(TokenKind.equal, "Expected '=' after typed variable name");
+                statement.expression = parseExpression();
+            }
             statement.expressions = [statement.expression];
             consume(TokenKind.semicolon, "Expected ';' after typed binding");
             return statement;
@@ -850,8 +861,9 @@ private struct Parser
                     body = parseImplicitSubroutineBody();
                 }
             }
-            return locatedExpression(
-                new FunctionExpression(parameters, false, body, returnType), startToken);
+            auto functionNode = new FunctionExpression(parameters, false, body, returnType);
+            functionNode.parameterTypes = parameterTypes;
+            return locatedExpression(functionNode, startToken);
         }
         if (check(TokenKind.identifier)
             && peek().lexeme == "i"
@@ -1068,6 +1080,11 @@ private struct Parser
 
     Expression parseArrayLiteral(Token startToken)
     {
+        if (match(TokenKind.colon))
+        {
+            consume(TokenKind.rightBracket, "Expected ']' after ':' in empty associative array");
+            return locatedExpression(new AssociativeArrayExpression(), startToken);
+        }
         auto items = appender!(Expression[])();
         auto spreads = appender!(bool[])();
         if (!check(TokenKind.rightBracket))
@@ -1077,6 +1094,19 @@ private struct Parser
                 auto isSpread = match(TokenKind.ellipsis);
                 items.put(parseExpression());
                 spreads.put(isSpread);
+                if (items.data.length == 1 && !isSpread && match(TokenKind.colon))
+                {
+                    Expression[] keys = [items.data[0]];
+                    Expression[] values = [parseExpression()];
+                    while (match(TokenKind.comma) && !check(TokenKind.rightBracket))
+                    {
+                        keys ~= parseExpression();
+                        consume(TokenKind.colon, "Expected ':' after associative array key");
+                        values ~= parseExpression();
+                    }
+                    consume(TokenKind.rightBracket, "Expected ']' after associative array literal");
+                    return locatedExpression(new AssociativeArrayExpression(keys, values), startToken);
+                }
             }
             while (match(TokenKind.comma));
         }
@@ -1168,6 +1198,13 @@ private struct Parser
         {
             result = consume(TokenKind.identifier, "Expected type name").lexeme;
         }
+        while (match(TokenKind.leftBracket))
+        {
+            result ~= "[";
+            if (!check(TokenKind.rightBracket)) result ~= parseTypeName();
+            consume(TokenKind.rightBracket, "Expected ']' after container key type");
+            result ~= "]";
+        }
         if (match(TokenKind.keywordDelegate))
         {
             result ~= " delegate(";
@@ -1248,6 +1285,41 @@ private struct Parser
         return [assignment, returnStatement];
     }
 
+    bool scanType(ref size_t cursor) const
+    {
+        if (cursor >= tokens.length || (tokens[cursor].kind != TokenKind.identifier
+            && tokens[cursor].kind != TokenKind.keywordNull)) return false;
+        ++cursor;
+        while (cursor < tokens.length && tokens[cursor].kind == TokenKind.leftBracket)
+        {
+            ++cursor;
+            if (cursor < tokens.length && tokens[cursor].kind != TokenKind.rightBracket
+                && !scanType(cursor)) return false;
+            if (cursor >= tokens.length || tokens[cursor++].kind != TokenKind.rightBracket) return false;
+        }
+        if (cursor < tokens.length && tokens[cursor].kind == TokenKind.keywordDelegate)
+        {
+            ++cursor;
+            if (cursor >= tokens.length || tokens[cursor++].kind != TokenKind.leftParen) return false;
+            if (cursor < tokens.length && tokens[cursor].kind != TokenKind.rightParen)
+                while (true)
+                {
+                    if (!scanType(cursor)) return false;
+                    if (cursor >= tokens.length || tokens[cursor].kind != TokenKind.comma) break;
+                    ++cursor;
+                }
+            if (cursor >= tokens.length || tokens[cursor++].kind != TokenKind.rightParen) return false;
+        }
+        return true;
+    }
+
+    bool isTypedDeclaration() const
+    {
+        size_t cursor = position;
+        return check(TokenKind.identifier) && scanType(cursor)
+            && cursor < tokens.length && tokens[cursor].kind == TokenKind.identifier;
+    }
+
     bool isTypedLambdaExpressionWithParen() const
     {
         if (!check(TokenKind.leftParen)) return false;
@@ -1257,8 +1329,7 @@ private struct Parser
         {
             while (cursor < tokens.length)
             {
-                if (tokens[cursor].kind != TokenKind.identifier) return false;
-                ++cursor;
+                if (!scanType(cursor)) return false;
                 if (cursor >= tokens.length || tokens[cursor].kind != TokenKind.identifier) return false;
                 ++cursor;
                 if (cursor < tokens.length && tokens[cursor].kind == TokenKind.comma)

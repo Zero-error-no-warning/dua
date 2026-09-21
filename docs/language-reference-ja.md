@@ -26,7 +26,7 @@ auto empty = null;
 
 ### 1.2 値の種類と真偽
 
-実行時の値は `null`、整数、浮動小数、真偽値、文字列、配列、参照型テーブル、値型struct、関数、native 値です。条件式では `null`、`false`、数値の `0`、空文字列が偽です。配列・テーブル・struct・関数など、それ以外の値は真として扱われます。
+実行時の値は `null`、整数、浮動小数、真偽値、文字列、配列、型付き連想配列、参照型テーブル、値型struct、関数、native 値です。条件式では `null`、`false`、数値の `0`、空文字列、空の配列・連想配列・テーブル・structが偽です。それ以外の値は真として扱われます。
 
 ## 2. 変数、代入、スコープ
 
@@ -141,6 +141,55 @@ auto tableCopy = { ...user, hp = 50 };
 - ネストした配列・テーブルの参照は共有されます。
 - テーブルのメタテーブルと実行時型情報は spread されません。
 - テーブルの列挙順序に依存しないでください。
+
+### 5.1 型付き連想配列
+
+テーブル `{ ... }` と別の値として、`値型[キー型]` の連想配列を使えます。リテラルは `[キー: 値, ...]` です。
+
+```dua
+string[int] names = [1: "Alice", 2: "Bob"];
+names[3] = "Carol";
+auto first = names[1];
+
+int[int] counts;             // 空の連想配列
+int[int] alsoEmpty = [:];    // [] での初期化も可
+counts[10] = 42;
+
+foreach (key, value; names) {
+    // key は整数、value は文字列
+}
+
+bool found = names.contains(1);
+auto fallback = names.get(9, "unknown");
+bool removed = names.remove(2);
+auto keys = names.keys;
+auto values = names.values;
+auto size = names.length;   // length(names)、names.length() も可
+```
+
+型注釈は初期化、変数への再代入、要素の追加・更新、添字参照、関数の引数・戻り値で検査されます。例えば `names["1"]` や `names[1] = 42` はエラーです。存在しないキーの `names[key]` もエラーです。既定値付き取得には `get` を使います。`keys()` / `values()` もプロパティ形式と同じ内容を返します。
+
+```dua
+struct Position { int x; int y; }
+string[Position] labels = [Position(1, 2): "start"];
+auto label = labels[Position(1, 2)];
+int[bool] switches = [true: 1, false: 0];
+string[double] fractions = [1.5: "one and a half"];
+int[int][string] teams = ["red": [1: 100]];
+
+alias Names = string[int];
+Names copy = [1: "Alice"];
+auto explicitlyTyped = cast(string[int]) [1: "Alice"];
+string[int] identity(string[int] value) { return value; }
+```
+
+- キーは整数・有限の浮動小数・真偽値・文字列・配列・struct・reflect 済み D クラスに対応します。通常のテーブル、連想配列自身、関数、opaque native 値はキーにできません。
+- 配列および Dua struct のキーは内容で比較し、保存時と取り出し時にコピーします。reflect 済み D struct は D のコピーと等値比較を使います。D クラスのキーはインスタンスの同一性で比較します。
+- キーを文字列化しません。型注釈のないリテラルは `any[any]` で、`auto mixed = [7: "number", "7": "text"];` は別々の2要素を保持します。型を固定するには宣言または `cast` を使います。
+- 連想配列は参照型です。同じ型の代入や `auto alias = names;` は内容を共有します。型のないリテラルを型付き連想配列へ変換するときは、新しいコンテナを作ります。
+- `typeof(names).kind` は `"associativeArray"` です。`keyType` と `valueType` でも宣言型を確認でき、`names is string[int]` で型を検査できます。
+- 現在のキー検索は線形です。列挙順序に依存しないでください。テーブル専用のメタテーブル操作、spread、`map` / `filter`、`json.encode` は型付き連想配列には対応していません。
+- 数値の内部表現は従来と同じ符号付き64ビット整数と倍精度浮動小数です。D に渡す整数キーは変換先の範囲を検査します。D の `ulong` 全域など、内部表現を超える値は扱えません。
 
 ## 6. 型、alias、Union
 

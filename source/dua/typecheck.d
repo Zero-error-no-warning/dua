@@ -5,6 +5,7 @@ import dua.execution : CheckDiagnostic;
 import dua.lexer : lex;
 import dua.parser : parse;
 import dua.value : ValueKind;
+import dua.type_syntax;
 import std.algorithm : canFind;
 import std.format : format;
 
@@ -37,11 +38,17 @@ private void checkStatements(Statement[] statements, ref string[string] variable
     string expectedReturnType)
 {
     foreach (statement; statements)
+        if (statement.kind == Statement.Kind.alias_)
+            variables["#type_" ~ statement.name] = statement.names.length == 1 ? statement.names[0] : "any";
+    expectedReturnType = resolveStaticType(expectedReturnType, variables);
+    foreach (statement; statements)
     {
         if (statement.kind == Statement.Kind.functionDecl)
         {
+            string[] parameterTypes;
+            foreach (type; statement.parameterTypes) parameterTypes ~= resolveStaticType(type, variables);
             functions[statement.name] = StaticFunctionInfo(
-                statement.parameterTypes.dup, statement.returnType);
+                parameterTypes, resolveStaticType(statement.returnType, variables));
         }
     }
     foreach (statement; statements)
@@ -55,9 +62,9 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                         ? inferExpressionType(statement.expressions[index], variables, functions, diagnostics)
                         : "any";
                     auto declared = statement.declaredType.length > 0
-                        ? statement.declaredType : actual;
+                        ? resolveStaticType(statement.declaredType, variables) : actual;
                     if (statement.declaredType.length > 0 && statement.declaredType != "auto"
-                        && !staticTypesCompatible(actual, statement.declaredType))
+                        && !staticTypesCompatible(actual, declared))
                         addDiagnostic(diagnostics, statement,
                             format("Variable '%s' expects %s but expression has type %s",
                                 name, statement.declaredType, actual));
@@ -78,6 +85,13 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                                 format("Assignment to '%s' expects %s but expression has type %s",
                                     (cast(VariableExpression) target).name, *expected, actual));
                     }
+                    else if (target.kind == Expression.Kind.index)
+                    {
+                        auto expected = inferExpressionType(target, variables, functions, diagnostics);
+                        if (!staticTypesCompatible(actual, expected))
+                            diagnostics ~= CheckDiagnostic(target.line, target.column,
+                                format("Indexed assignment expects %s but has type %s", expected, actual));
+                    }
                 }
                 break;
             case Statement.Kind.return_:
@@ -95,7 +109,7 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                 auto childVariables = variables.dup;
                 foreach (index, parameter; statement.parameters)
                     childVariables[parameter] = index < statement.parameterTypes.length
-                        ? statement.parameterTypes[index] : "any";
+                        ? resolveStaticType(statement.parameterTypes[index], variables) : "any";
                 checkStatements(statement.body, childVariables, functions, diagnostics,
                     statement.returnType);
                 break;
@@ -110,6 +124,18 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                 foreach (child; statement.body)
                 {
                     auto nestedVariables = variables.dup;
+                    if (statement.kind == Statement.Kind.foreach_)
+                    {
+                        auto iterableType = inferExpressionType(statement.iterable, variables, functions, diagnostics);
+                        string element, key;
+                        if (splitContainerType(iterableType, element, key))
+                        {
+                            nestedVariables[statement.iteratorName] = statement.iteratorSecondName.length
+                                ? (key.length ? key : "int") : element;
+                            if (statement.iteratorSecondName.length)
+                                nestedVariables[statement.iteratorSecondName] = element;
+                        }
+                    }
                     checkStatements([child], nestedVariables, functions, diagnostics, expectedReturnType);
                 }
                 if (statement.elseBranch !is null)
@@ -151,6 +177,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
                 case ValueKind.string_: return "string";
                 case ValueKind.null_: return "null";
                 case ValueKind.array: return "array";
+                case ValueKind.associativeArray: return "associativeArray";
                 case ValueKind.table: return "table";
                 case ValueKind.struct_: return "struct";
                 case ValueKind.function_: return "function";
@@ -160,6 +187,14 @@ private string inferExpressionType(Expression expression, ref string[string] var
             auto found = (cast(VariableExpression) expression).name in variables;
             return found is null ? "any" : *found;
         case Expression.Kind.array: return "array";
+        case Expression.Kind.associativeArray:
+            auto aa = cast(AssociativeArrayExpression) expression;
+            foreach (index, key; aa.keys)
+            {
+                inferExpressionType(key, variables, functions, diagnostics);
+                inferExpressionType(aa.values[index], variables, functions, diagnostics);
+            }
+            return "associativeArray";
         case Expression.Kind.table: return "table";
         case Expression.Kind.function_: return "function";
         case Expression.Kind.unary:
@@ -201,14 +236,44 @@ private string inferExpressionType(Expression expression, ref string[string] var
                 }
             }
             return "any";
-        case Expression.Kind.get, Expression.Kind.index:
+        case Expression.Kind.index:
+            auto indexExpression = cast(IndexExpression) expression;
+            auto container = inferExpressionType(indexExpression.target, variables, functions, diagnostics);
+            string element, key;
+            if (splitContainerType(container, element, key) && !indexExpression.isSlice)
+            {
+                auto actual = inferExpressionType(indexExpression.index, variables, functions, diagnostics);
+                auto expected = key.length ? key : "int";
+                if (!staticTypesCompatible(actual, expected))
+                    diagnostics ~= CheckDiagnostic(expression.line, expression.column,
+                        format("Index expects %s but has type %s", expected, actual));
+                return element;
+            }
+            return "any";
+        case Expression.Kind.get:
             return "any";
     }
+}
+
+private string resolveStaticType(string name, ref string[string] variables, size_t depth = 0)
+{
+    if (depth >= 64) return "any";
+    if (auto aliasType = "#type_" ~ name in variables)
+        return resolveStaticType(*aliasType, variables, depth + 1);
+    string element, key;
+    if (splitContainerType(name, element, key))
+        return resolveStaticType(element, variables, depth + 1) ~ "["
+            ~ (key.length ? resolveStaticType(key, variables, depth + 1) : "") ~ "]";
+    return name;
 }
 
 private bool staticTypesCompatible(string actual, string expected)
 {
     if (actual == "any" || expected == "any" || expected == "auto") return true;
+    string element, key;
+    if (splitContainerType(expected, element, key))
+        return actual == expected || actual == (key.length ? "associativeArray" : "array")
+            || (key.length && actual == "array");
     if (canFind(expected, " delegate(")) return actual == "function";
     if (!["int", "double", "bool", "string", "null", "void", "array", "table"].canFind(expected))
         return actual == "table" || actual == expected;

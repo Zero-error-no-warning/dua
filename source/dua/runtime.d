@@ -11,6 +11,7 @@ import dua.parser : parse;
 import dua.stdlib.core : StdlibContext, installStandardLibraries;
 import dua.typecheck : checkSource;
 import dua.value;
+import dua.type_syntax;
 import std.algorithm : canFind, map;
 import std.array : array;
 import std.conv : to;
@@ -411,17 +412,24 @@ final class ScriptCallable : CallableValue
             }
             if (index < parameterTypes.length)
             {
+                args[index] = engine.prepareContainerValue(args[index], parameterTypes[index]);
                 enforce(engine.valueMatchesType(args[index], parameterTypes[index]),
                     format("Function '%s' argument '%s' expected %s but got %s",
                         debugName, parameter, parameterTypes[index], args[index].kind));
             }
-            environment.define(parameter, args[index]);
+            string elementType, keyType;
+            if (index < parameterTypes.length && splitContainerType(
+                engine.resolveContainerType(parameterTypes[index]), elementType, keyType))
+                environment.define(parameter, args[index], engine.containerValidator(parameterTypes[index]));
+            else
+                environment.define(parameter, args[index]);
         }
 
         auto result = engine.executeStatements(body, environment);
         auto returnValue = result.returned ? result.lastValue : Value.nullValue();
         if (returnType.length > 0)
         {
+            returnValue = engine.prepareContainerValue(returnValue, returnType);
             enforce(engine.valueMatchesType(returnValue, returnType),
                 format("Function '%s' expected return type %s but got %s",
                     debugName, returnType, returnValue.kind));
@@ -981,14 +989,16 @@ final class ScriptEngine
                 {
                     auto field = fieldName in args[0].tableValue;
                     enforce(field !is null, format("%s initializer is missing '%s'", typeName, fieldName));
-                    enforce(valueMatchesType(cast(Value) *field, types[index]), format("%s.%s expected %s", typeName, fieldName, types[index]));
-                    entries[fieldName] = field.valueCopy();
+                    auto prepared = prepareContainerValue(cast(Value) *field, types[index]);
+                    enforce(valueMatchesType(prepared, types[index]), format("%s.%s expected %s", typeName, fieldName, types[index]));
+                    entries[fieldName] = prepared.valueCopy();
                 }
             }
             else foreach (index, fieldName; names)
             {
-                enforce(valueMatchesType(cast(Value) args[index], types[index]), format("%s.%s expected %s", typeName, fieldName, types[index]));
-                entries[fieldName] = args[index].valueCopy();
+                auto prepared = prepareContainerValue(cast(Value) args[index], types[index]);
+                enforce(valueMatchesType(prepared, types[index]), format("%s.%s expected %s", typeName, fieldName, types[index]));
+                entries[fieldName] = prepared.valueCopy();
             }
             auto result = Value.fromStruct(entries);
             result.setTypeChain(chain);
@@ -997,8 +1007,76 @@ final class ScriptEngine
         globals.define(typeName, constructor);
     }
 
+    private string resolveContainerType(string name, size_t depth = 0)
+    {
+        enforce(depth < 64, "Cyclic or excessively nested container type");
+        if (auto definition = globals.find("__dua_type_" ~ name))
+            if (!definition.tableValue["isTable"].truthy())
+            {
+                auto alternatives = definition.tableValue["alternatives"].arrayValue;
+                if (alternatives.length == 1)
+                    return resolveContainerType(alternatives[0].toHostString(), depth + 1);
+            }
+        string element, key;
+        if (splitContainerType(name, element, key))
+            return resolveContainerType(element, depth + 1) ~ "["
+                ~ (key.length ? resolveContainerType(key, depth + 1) : "") ~ "]";
+        return name;
+    }
+
+    private Value prepareContainerValue(Value value, string typeName)
+    {
+        typeName = resolveContainerType(typeName);
+        string elementType, keyType;
+        if (!splitContainerType(typeName, elementType, keyType)) return value;
+        if (keyType.length == 0)
+        {
+            enforce(value.kind == ValueKind.array, "Expected array for " ~ typeName);
+            Value[] elements;
+            foreach (element; value.arrayValue)
+            {
+                auto prepared = prepareContainerValue(element, elementType);
+                enforce(valueMatchesType(prepared, elementType), "Array element expected " ~ elementType);
+                elements ~= prepared;
+            }
+            return Value.from(elements);
+        }
+        // [] may initialize an empty typed AA; {} remains a distinct table.
+        if (value.kind == ValueKind.array && value.arrayValue.length == 0)
+            value = Value.associativeArray();
+        enforce(value.kind == ValueKind.associativeArray, "Expected associative array for " ~ typeName);
+        if (value.associativeKeyType == keyType && value.associativeValueType == elementType)
+            return value;
+        enforce(value.associativeKeyType == "any" || value.associativeKeyType == keyType,
+            "Incompatible associative array key type for " ~ typeName);
+        enforce(value.associativeValueType == "any" || value.associativeValueType == elementType,
+            "Incompatible associative array value type for " ~ typeName);
+        auto result = Value.associativeArray(elementType, keyType);
+        foreach (entry; value.associativeEntries)
+        {
+            auto key = prepareContainerValue(cast(Value) entry.key, keyType);
+            auto element = prepareContainerValue(cast(Value) entry.value, elementType);
+            enforce(valueMatchesType(key, keyType), "Associative array key expected " ~ keyType);
+            enforce(valueMatchesType(element, elementType), "Associative array value expected " ~ elementType);
+            result.associativeSet(key, element);
+        }
+        return result;
+    }
+
     private bool valueMatchesType(Value value, string typeName)
     {
+        string elementType, keyType;
+        if (splitContainerType(resolveContainerType(typeName), elementType, keyType))
+        {
+            if (keyType.length == 0)
+            {
+                if (value.kind != ValueKind.array) return false;
+                foreach (item; value.arrayValue) if (!valueMatchesType(item, elementType)) return false;
+                return true;
+            }
+            return value.kind == ValueKind.associativeArray
+                && value.associativeKeyType == keyType && value.associativeValueType == elementType;
+        }
         if (canFind(typeName, " delegate(")) return value.kind == ValueKind.function_;
         if (value.isFieldAggregate)
         {
@@ -1010,10 +1088,19 @@ final class ScriptEngine
         switch (typeName)
         {
             case "auto", "any": return true;
-            case "int": return value.kind == ValueKind.integer;
-            case "double": return value.kind == ValueKind.floating;
+            case "byte": return value.kind == ValueKind.integer && value.integerValue >= byte.min && value.integerValue <= byte.max;
+            case "ubyte": return value.kind == ValueKind.integer && value.integerValue >= 0 && value.integerValue <= ubyte.max;
+            case "short": return value.kind == ValueKind.integer && value.integerValue >= short.min && value.integerValue <= short.max;
+            case "ushort": return value.kind == ValueKind.integer && value.integerValue >= 0 && value.integerValue <= ushort.max;
+            case "uint": return value.kind == ValueKind.integer && value.integerValue >= 0 && value.integerValue <= uint.max;
+            case "ulong": return value.kind == ValueKind.integer && value.integerValue >= 0;
+            case "int", "long": return value.kind == ValueKind.integer;
+            case "double", "float", "real": return value.kind == ValueKind.floating;
             case "bool": return value.kind == ValueKind.boolean;
             case "string": return value.kind == ValueKind.string_;
+            case "array": return value.kind == ValueKind.array;
+            case "table": return value.kind == ValueKind.table;
+            case "associativeArray": return value.kind == ValueKind.associativeArray;
             case "null", "void": return value.kind == ValueKind.null_;
             default: break;
         }
@@ -1424,6 +1511,76 @@ unittest
     assert(result.arrayValue[6].toHostString() == "class-string:member");
     assert(result.arrayValue[7].toHostString() == "struct-integer:8");
     assert(result.arrayValue[8].toHostString() == "struct-string:member");
+}
+
+version (unittest)
+{
+    private string describeBoundAA(long[string] values) { return "integers"; }
+    private string describeBoundAA(string[string] values) { return "strings"; }
+    private string describeBoundAA(long[][string] values) { return "arrays"; }
+
+    private class BindingAAFixture
+    {
+        int total(int[string] values) { return values["alice"] + values["bob"]; }
+    }
+}
+
+unittest
+{
+    import std.exception : assertThrown;
+
+    auto engine = new ScriptEngine();
+    engine.bindFunc!((int[string] values) => values["alice"] + values["bob"])("total");
+    engine.bindFunc!((const(int)[string] values) => values["alice"])("readOnly");
+    engine.bindFunc!((int[string][string] values) => values["team"]["alice"])("nested");
+    engine.bindFunc!((int[][string] values) => values["scores"][1])("arrayValue");
+    engine.bindFunc!((int[string][] values) => values[0]["alice"])("arrayOfTables");
+    engine.bindFunc!((int[string] values) => values)("roundTrip");
+    engine.bindFunc!((int[string] values) => values.length)("countEntries");
+    engine.bindFunc!describeBoundAA("describeAA");
+    engine.bindAuto("aaReader", new BindingAAFixture());
+    int received;
+    engine.bindFunc("receive", (int[string] values) {
+        received = values["alice"];
+        values["alice"] = 0;
+        values["newKey"] = 1;
+    });
+
+    assert(engine.run("return total({ alice = 100, bob = 80 });").toInt() == 180);
+    assert(engine.run("return readOnly({ alice = 100 });").toInt() == 100);
+    assert(engine.run("return nested({ team = { alice = 100 } });").toInt() == 100);
+    assert(engine.run("return arrayValue({ scores = [100, 80] });").toInt() == 80);
+    assert(engine.run("return arrayOfTables([{ alice = 100 }]);").toInt() == 100);
+    assert(engine.run("return roundTrip({ alice = 100 }).alice;").toInt() == 100);
+    assert(engine.run("return countEntries({});").toInt() == 0);
+    assert(engine.run("return aaReader.total({ alice = 100, bob = 80 });").toInt() == 180);
+    assert(engine.run(q{
+        auto scores = { alice = 100 };
+        receive(scores);
+        return scores.alice == 100 && length(scores) == 1;
+    }).truthy());
+    assert(received == 100);
+
+    assert(engine.run("return describeAA({ score = 42 });").toHostString() == "integers");
+    assert(engine.run("return describeAA({ name = \"Dua\" });").toHostString() == "strings");
+    assert(engine.run("return describeAA({ scores = [42] });").toHostString() == "arrays");
+    auto ambiguous = engine.runSafe("return describeAA({});");
+    assert(!ambiguous.ok);
+    assert(ambiguous.errorMessage.canFind("multiple matching overloads"));
+    assert(!engine.runSafe("return total([100, 80]);").ok);
+    assert(!engine.runSafe("return total(null);").ok);
+    assert(!engine.runSafe("return total({ alice = \"wrong\", bob = 80 });").ok);
+    assert(!engine.runSafe("return nested({ team = [100] });").ok);
+
+    auto table = engine.run("return { alice = 100, bob = 80 };");
+    assert(table.to!(int[string])() == ["alice": 100, "bob": 80]);
+    assert(table.to!(int[wstring])()["alice"w] == 100);
+    assert(table.to!(int[dstring])()["alice"d] == 100);
+    assert(table.to!(const(int[string]))()["alice"] == 100);
+    assert(Value.from(["enabled": true]).to!(const(bool)[string])()["enabled"]);
+    assert(Value.from(["ratio": 1.5]).to!(const(double)[string])()["ratio"] == 1.5);
+    assertThrown!Exception(table.to!(int[int])());
+    assert(engine.run("return { [7] = 42 };").to!(int[string])()["7"] == 42);
 }
 
 version (unittest)

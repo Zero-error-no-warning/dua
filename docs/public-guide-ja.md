@@ -45,7 +45,7 @@ void main()
 
 ## 4. D の値をスクリプトへ渡す
 
-`bindAuto` はプリミティブ、配列、文字列キーの連想配列を自動変換します。`engine["name"] = value` も同じ変換を行う短縮記法です。
+`bindAuto` はプリミティブ、配列、対応するキー型の連想配列を自動変換します。文字列キーの連想配列はテーブルへ、それ以外は型付き連想配列へ変換します。`engine["name"] = value` も同じ変換を行う短縮記法です。
 
 ```d
 auto engine = new Dua.ScriptEngine();

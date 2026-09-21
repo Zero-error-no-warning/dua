@@ -39,6 +39,7 @@ private JSONValue toJsonValue(const Value value)
             return JSONValue(object);
         case ValueKind.function_:
         case ValueKind.native:
+        case ValueKind.associativeArray:
             enforce(false, "json.encode cannot encode " ~ value.kind.stringof);
             assert(0);
     }

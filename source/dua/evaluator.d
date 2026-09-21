@@ -13,6 +13,7 @@ module dua.evaluator;
 import dua.ast;
 import dua.execution;
 import dua.value;
+import dua.type_syntax;
 import std.algorithm : map;
 import std.array : array;
 import std.conv : to;
@@ -48,17 +49,19 @@ final class Environment
 {
     Environment parent;
     private Value[string] values;
+    private Value delegate(Value)[string] validators;
 
     this(Environment parent = null)
     {
         this.parent = parent;
     }
 
-    void define(string name, Value value)
+    void define(string name, Value value, Value delegate(Value) validator = null)
     {
         enforce((name in values) is null,
             format("Variable '%s' is already defined in this scope", name));
         values[name] = value.valueCopy();
+        if (validator !is null) validators[name] = validator;
     }
 
     bool contains(string name) const
@@ -90,6 +93,7 @@ final class Environment
     {
         if (auto slot = name in values)
         {
+            if (auto validator = name in validators) value = (*validator)(value);
             *slot = value.valueCopy();
             return;
         }
@@ -145,11 +149,17 @@ mixin template EvaluatorImplementation()
                         auto value = index < values.length ? values[index] : Value.nullValue();
                         if (statement.declaredType.length > 0 && statement.declaredType != "auto")
                         {
+                            value = prepareContainerValue(value, statement.declaredType);
                             enforce(valueMatchesType(value, statement.declaredType),
                                 format("Variable '%s' expected %s but got %s",
                                     name, statement.declaredType, value.kind));
                         }
-                        environment.define(name, value);
+                        auto declaredType = statement.declaredType;
+                        string elementType, keyType;
+                        if (splitContainerType(resolveContainerType(declaredType), elementType, keyType))
+                            environment.define(name, value, containerValidator(declaredType));
+                        else
+                            environment.define(name, value);
                         result.lastValue = value;
                         if (statement.isExported)
                         {
@@ -356,6 +366,24 @@ mixin template EvaluatorImplementation()
                             }
                         }
                     }
+                    else if (iterable.kind == ValueKind.associativeArray)
+                    {
+                        foreach (entry; (cast(AssociativeEntry[]) iterable.associativeEntries).dup)
+                        {
+                            auto itemEnvironment = new Environment(environment);
+                            if (statement.iteratorSecondName.length == 0)
+                                itemEnvironment.define(statement.iteratorName, cast(Value) entry.value);
+                            else
+                            {
+                                itemEnvironment.define(statement.iteratorName, entry.key.keyCopy());
+                                itemEnvironment.define(statement.iteratorSecondName, cast(Value) entry.value);
+                            }
+                            result = executeStatement(statement.body[0], itemEnvironment);
+                            if (result.returned) return result;
+                            if (result.broke) { result.broke = false; break; }
+                            result.continued = false;
+                        }
+                    }
                     else if (iterable.kind == ValueKind.table)
                     {
                         foreach (key, value; iterable.tableValue)
@@ -389,7 +417,7 @@ mixin template EvaluatorImplementation()
                     }
                     else
                     {
-                        enforce(false, "foreach expects array or table");
+                        enforce(false, "foreach expects array, associative array, or table");
                     }
                     break;
                 case Statement.Kind.switch_:
@@ -523,6 +551,15 @@ mixin template EvaluatorImplementation()
                     auto container = evaluate((cast(IndexExpression) target).target, environment);
                     enforce(!(cast(IndexExpression) target).isSlice, "Slice cannot be an assignment target");
                     auto index = evaluate((cast(IndexExpression) target).index, environment);
+                    if (container.kind == ValueKind.associativeArray)
+                    {
+                        index = checkedAssociativeKey(container, index);
+                        value = prepareContainerValue(value, container.associativeValueType);
+                        enforce(valueMatchesType(value, container.associativeValueType),
+                            "Associative array value expected " ~ container.associativeValueType);
+                        container.associativeSet(index, value);
+                        return;
+                    }
                     if (container.kind == ValueKind.array)
                     {
                         auto position = cast(size_t) index.toInt();
@@ -658,6 +695,16 @@ mixin template EvaluatorImplementation()
                         }
                     }
                     return Value.from(items);
+                case Expression.Kind.associativeArray:
+                    auto literal = cast(AssociativeArrayExpression) expression;
+                    auto result = Value.associativeArray();
+                    foreach (index, keyExpression; literal.keys)
+                    {
+                        auto key = evaluate(keyExpression, environment);
+                        auto value = evaluate(literal.values[index], environment);
+                        result.associativeSet(key, value);
+                    }
+                    return result;
                 case Expression.Kind.table:
                     Value[string] entries;
                     foreach (entry; (cast(TableExpression) expression).entries)
@@ -692,9 +739,11 @@ mixin template EvaluatorImplementation()
                 case Expression.Kind.function_:
                     return Value.fromFunction(new ScriptCallable("anonymous", this, environment,
                         (cast(FunctionExpression) expression).parameters, (cast(FunctionExpression) expression).variadic, (cast(FunctionExpression) expression).body,
-                        null, (cast(FunctionExpression) expression).returnType));
+                        (cast(FunctionExpression) expression).parameterTypes, (cast(FunctionExpression) expression).returnType));
                 case Expression.Kind.get:
                     auto container = evaluate((cast(GetExpression) expression).target, environment);
+                    if (container.kind == ValueKind.associativeArray)
+                        return associativeProperty(container, (cast(GetExpression) expression).memberName);
                     enforce(container.isFieldAggregate,
                         "Property access currently supports tables/reflected structs/classes");
                     if (auto getter = container.propertyGetter((cast(GetExpression) expression).memberName))
@@ -755,6 +804,13 @@ mixin template EvaluatorImplementation()
                         return Value.from(sliced);
                     }
                     auto index = evaluate((cast(IndexExpression) expression).index, environment);
+                    if (container.kind == ValueKind.associativeArray)
+                    {
+                        index = checkedAssociativeKey(container, index);
+                        auto position = container.associativeIndex(index);
+                        enforce(position != size_t.max, "Associative array key not found");
+                        return container.associativeEntries[position].value.valueCopy();
+                    }
                     if (container.kind == ValueKind.array)
                     {
                         auto position = cast(size_t) index.toInt();
@@ -802,6 +858,9 @@ mixin template EvaluatorImplementation()
     private Value castValue(Value value, string targetType, size_t depth = 0)
     {
         enforce(depth < 64, "Cyclic or excessively nested cast type alias");
+        string elementType, keyType;
+        if (splitContainerType(resolveContainerType(targetType), elementType, keyType))
+            return prepareContainerValue(value, targetType);
         // A pure alias uses the same conversion as its target. Union casts
         // only check membership, since choosing a conversion would be ambiguous.
         if (auto definition = globals.find("__dua_type_" ~ targetType))
@@ -967,6 +1026,27 @@ mixin template EvaluatorImplementation()
 
     private Value callMethodOrUfcs(Value receiver, string functionName, Value[] args, Environment environment)
     {
+        if (receiver.kind == ValueKind.associativeArray)
+        {
+            if (functionName == "keys" || functionName == "values" || functionName == "length")
+            {
+                enforce(args.length == 0, functionName ~ " expects no arguments");
+                return associativeProperty(receiver, functionName);
+            }
+            if (functionName == "contains" || functionName == "remove" || functionName == "get")
+            {
+                enforce(args.length == (functionName == "get" ? 2 : 1), "Invalid associative array method arity");
+                auto key = checkedAssociativeKey(receiver, args[0]);
+                if (functionName == "remove") return Value.from(receiver.associativeRemove(key));
+                auto position = receiver.associativeIndex(key);
+                if (functionName == "contains") return Value.from(position != size_t.max);
+                if (position != size_t.max) return receiver.associativeEntries[position].value.valueCopy();
+                auto fallback = prepareContainerValue(args[1], receiver.associativeValueType);
+                enforce(valueMatchesType(fallback, receiver.associativeValueType),
+                    "Associative array default value expected " ~ receiver.associativeValueType);
+                return fallback.valueCopy();
+            }
+        }
         if (receiver.isFieldAggregate)
         {
             if (auto method = functionName in receiver.tableValue)
@@ -1126,15 +1206,40 @@ mixin template EvaluatorImplementation()
         return value.toHostString();
     }
 
+    private Value delegate(Value) containerValidator(string declaredType)
+    {
+        return (Value next) => prepareContainerValue(next, declaredType);
+    }
+
+    private Value checkedAssociativeKey(Value container, Value key)
+    {
+        key = prepareContainerValue(key, container.associativeKeyType);
+        enforce(valueMatchesType(key, container.associativeKeyType),
+            "Associative array key expected " ~ container.associativeKeyType);
+        return key.keyCopy();
+    }
+
+    private Value associativeProperty(Value container, string name)
+    {
+        if (name == "length") return Value.from(cast(long) container.associativeEntries.length);
+        enforce(name == "keys" || name == "values", "Unknown associative array property: " ~ name);
+        Value[] items;
+        foreach (entry; container.associativeEntries)
+            items ~= name == "keys" ? entry.key.keyCopy() : entry.value.valueCopy();
+        return Value.from(items);
+    }
+
     private bool canMeasureLength(Value value) const
     {
         return value.kind == ValueKind.array
+            || value.kind == ValueKind.associativeArray
             || value.kind == ValueKind.table
             || value.kind == ValueKind.string_;
     }
 
     private long measuredLength(Value value)
     {
+        if (value.kind == ValueKind.associativeArray) return cast(long) value.associativeEntries.length;
         if (value.kind == ValueKind.array)
         {
             return cast(long) value.arrayValue.length;
@@ -1213,6 +1318,11 @@ mixin template EvaluatorImplementation()
         info["kind"] = Value.from(value.kind.to!string);
         info["chain"] = Value.from(chain.dup);
         info["aliasThisChain"] = Value.from(aliasThisChain);
+        if (value.kind == ValueKind.associativeArray)
+        {
+            info["keyType"] = Value.from(value.associativeKeyType);
+            info["valueType"] = Value.from(value.associativeValueType);
+        }
         return Value.from(info);
     }
 

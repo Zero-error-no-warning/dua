@@ -200,6 +200,56 @@ engine.bindFunc("addOffset", (long value) => value + offset);
 
 同名関数のオーバーロード集合もそのまま渡せます。Duaの実引数に対して、完全一致する型、損失のない数値変換、その他の変換の順で最適な候補を選びます。同じ優先度の候補が複数残る場合は曖昧エラーになります。クラス・構造体のreflectされたメンバー関数と `bindType` で公開されるstatic関数にも同じ規則を適用します。Dの型安全な可変長引数にも対応しますが、C形式variadicと引数型を省略したgeneric lambdaは対象外です。
 
+#### テーブルを D の連想配列引数へ渡す
+
+文字列キーの D 連想配列引数には、Dua のテーブルをそのまま渡せます。
+
+```d
+import dua;
+
+int total(int[string] scores)
+{
+    return scores["alice"] + scores["bob"];
+}
+
+auto engine = new Dua.ScriptEngine();
+engine.bindFunc!total("total");
+assert(engine.run(q{
+    auto scores = { alice = 100, bob = 80 };
+    return total(scores);
+}).toInt() == 180);
+```
+
+- テーブルからの変換はキー型 `string` / `wstring` / `dstring` に対応します。整数などのキーには次の型付き連想配列を使います。テーブルの数値キーは内部の文字列表現で渡されます（例: `[7]` → `"7"`）。
+- 値は D 側の要素型へ再帰的に変換します。`int[][string]` や `int[string][string]` など、配列や連想配列の入れ子も使えます。
+- 呼び出しごとに新しい連想配列を作ります。D 側で要素を代入・追加・削除しても元のテーブルへ書き戻しません。ただし、値に含まれる reflect 済み D クラスのインスタンスは共有されます。
+- 空テーブル `{}` も渡せます。同名関数に連想配列型のオーバーロードが複数ある場合は、要素の型を使って選択します。空テーブルなどで候補が同順位なら曖昧エラーです。
+- Dua 側で `int[string]` のような型宣言を追加する必要はありません。D の引数型が変換先を決めます。
+
+#### 型付き連想配列を D と受け渡す
+
+```d
+string firstName(string[int] names) { return names[1]; }
+engine.bindFunc!firstName("firstName");
+assert(engine.run(q{
+    string[int] names = [1: "Alice", 2: "Bob"];
+    return firstName(names);
+}).toHostString() == "Alice");
+
+auto counts = engine.run("int[int] counts = [10: 42]; return counts;")
+    .to!(int[int])();
+engine.bindAuto("counts", counts); // 非文字列キーなので型付き連想配列になる
+
+// 文字列キーも明示的に型付き連想配列として公開できる
+engine.bind("typedScores", Dua.Value.fromAssociativeArray(["alice": 100]));
+```
+
+`bindFunc`、reflect されたメソッド、`Value.to!T()` は、キーと値をそれぞれ D の型へ再帰的に変換します。整数・真偽値・浮動小数・配列・struct・reflect 済み D クラスなどのキーを使えます。D の struct をキー型として共有する場合は `bindType!T` でコンストラクタを公開できます。空の型付き連想配列にも型情報があり、オーバーロード選択では宣言型の一致を優先します。
+
+変換では新しい D 連想配列を作り、要素の代入・追加・削除を元の Dua 値へ書き戻しません。逆方向も新しい Dua コンテナを作ります。D クラスのインスタンスは共有されます。整数キーの範囲外変換や、異なるキーが変換後に衝突する場合はエラーです。
+
+D → Dua では、従来の `Value.from` / `bindAuto` は文字列キーをテーブルへ、非文字列キーを型付き連想配列へ変換します。`Value.fromAssociativeArray` は文字列キーを含め常に型付き連想配列を作り、その内部の連想配列も再帰的に型を保持します。数値範囲やキーの比較規則は言語リファレンスの「型付き連想配列」を参照してください。
+
 ### 4.3 bindNative
 
 ```d
@@ -217,7 +267,7 @@ engine.bindNative("sum", (scope const(Dua.Value)[] args) {
 
 ### 5.1 ValueKind と格納フィールド
 
-`ValueKind` は `null_`, `integer`, `floating`, `boolean`, `string_`, `array`, `table`, `struct_`, `function_`, `native` です。`struct_` は値境界で浅くコピーされるフィールドaggregateで、`table` は参照型です。`kind` を確認したうえで、必要に応じて `integerValue`, `floatingValue`, `booleanValue`, `stringValue`, `arrayValue`, `tableValue`, `functionValue` を参照できます。通常は変換メソッドを優先してください。
+`ValueKind` は `null_`, `integer`, `floating`, `boolean`, `string_`, `array`, `associativeArray`, `table`, `struct_`, `function_`, `native` です。`struct_` は値境界で浅くコピーされるフィールドaggregateで、`table` と `associativeArray` は参照型です。`kind` を確認したうえで、必要に応じて `integerValue`, `floatingValue`, `booleanValue`, `stringValue`, `arrayValue`, `tableValue`, `functionValue` を参照できます。型付き連想配列には `associativeEntries`、`associativeKeyType`、`associativeValueType` があります。通常は変換メソッドを優先してください。
 
 ### 5.2 D から Value を作る
 
@@ -231,7 +281,7 @@ auto array = Dua.Value.from([1, 2, 3]);
 auto table = Dua.Value.from(["hp": 80, "mp": 30]);
 ```
 
-`from` は `long` / `int` / `double` / `bool` / `string`、配列、文字列キーの連想配列を受けます。独自 aggregate は `reflect`、Dua から変換しない opaque な表示値には `native` があります。
+`from` は `long` / `int` / `double` / `bool` / `string`、配列、対応するキー型の連想配列を受けます。文字列キーはテーブル、その他は型付き連想配列になります。`fromAssociativeArray` は文字列キーも型付き連想配列にします。独自 aggregate は `reflect`、Dua から変換しない opaque な表示値には `native` があります。
 
 ### 5.3 Value から取り出す
 
@@ -243,6 +293,7 @@ auto literal = engine.run("return { hp = 3 };").toScriptLiteral();
 
 struct Status { int hp; bool active; }
 auto status = engine.run("return { hp = 3, active = true };").to!Status();
+auto scores = engine.run("return { alice = 100, bob = 80 };").to!(int[string])();
 ```
 
 | メソッド | 用途 |
@@ -252,7 +303,7 @@ auto status = engine.run("return { hp = 3, active = true };").to!Status();
 | `toHostString()` | ホスト表示用文字列 |
 | `toScriptLiteral()` | Dua リテラル風の表現 |
 | `truthy()` | Dua の条件規則で真か |
-| `to!T()` | 対応する D 型へ変換。テーブルから struct も可 |
+| `to!T()` | 対応する D 型へ変換。テーブルから struct・文字列キーの連想配列も可 |
 
 `to!T()` および reflection による引数変換では、Dua の関数値を対応する D の
 `ReturnType delegate(Parameters)` 型へ変換できます。生成された delegate を D 側から

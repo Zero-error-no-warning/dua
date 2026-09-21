@@ -120,6 +120,7 @@ abstract class Expression : AstNode
         ternary,
         call,
         array,
+        associativeArray,
         table,
         function_,
         get,
@@ -223,6 +224,18 @@ final class ArrayExpression : Expression
     }
 }
 
+final class AssociativeArrayExpression : Expression
+{
+    Expression[] keys;
+    Expression[] values;
+    this(Expression[] keys = null, Expression[] values = null)
+    {
+        super(Kind.associativeArray);
+        this.keys = keys;
+        this.values = values;
+    }
+}
+
 final class TableExpression : Expression
 {
     TableEntry[] entries;
@@ -232,6 +245,7 @@ final class TableExpression : Expression
 final class FunctionExpression : Expression
 {
     string[] parameters;
+    string[] parameterTypes;
     bool variadic;
     Statement[] body;
     string returnType;
