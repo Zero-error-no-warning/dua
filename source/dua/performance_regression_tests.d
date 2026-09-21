@@ -7,6 +7,22 @@ import dua;
 unittest
 {
     auto engine = new ScriptEngine();
+    assert(!engine.runSafe("return cast(Later) 1;").ok);
+    engine.load("alias Later = int; alias Items = Later[];");
+    assert(engine.run("Items values = [1, 2]; return values[1];").toInt() == 2);
+    auto definition = engine.getGlobal("__dua_type_Later");
+    definition.tableValue["alternatives"] = Value.from([Value.from("string")]);
+    assert(engine.run("return cast(Later) 1;").toHostString() == "1");
+    assert(!engine.runSafe("Items values = [1, 2];").ok);
+    assert(engine.run(`Items values = ["a", "b"]; return values[1];`).toHostString() == "b");
+    assert(!engine.runSafe("return cast(HostAlias) 1;").ok);
+    engine.bind("__dua_type_HostAlias", definition);
+    assert(engine.run("return cast(HostAlias) 2;").toHostString() == "2");
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
     assert(engine.run(q{
         struct Leaf { int value; table reference; }
         struct Level1 { Leaf child; }

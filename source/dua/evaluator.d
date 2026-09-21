@@ -914,7 +914,7 @@ mixin template EvaluatorImplementation()
             return prepareContainerValue(value, targetType);
         // A pure alias uses the same conversion as its target. Union casts
         // only check membership, since choosing a conversion would be ambiguous.
-        if (auto definition = globals.find("__dua_type_" ~ targetType))
+        if (auto definition = findTypeDefinition(targetType))
         {
             if (!definition.tableValue["isTable"].truthy())
             {

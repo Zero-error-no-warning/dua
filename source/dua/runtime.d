@@ -765,6 +765,9 @@ final class ScriptCallable : CallableValue
 final class ScriptEngine
 {
     private Environment globals;
+    // Cache only immutable registry-name spellings, never mutable definitions
+    // or negative lookups. Host bindings and script metadata remain observable.
+    private string[string] typeRegistryNames;
     mixin ModuleImplementation;
     mixin CoroutineImplementation;
     private EvaluatorContext evaluatorContext;
@@ -1236,7 +1239,7 @@ final class ScriptEngine
             Value[] typeChain = [Value.from(statement.name)];
             foreach (baseName; statement.names)
             {
-                auto base = globals.find("__dua_type_" ~ baseName);
+                auto base = findTypeDefinition(baseName);
                 enforce(base !is null && base.kind == ValueKind.table
                     && base.tableValue["isTable"].truthy(),
                     format("Base type '%s' must be a previously declared table type", baseName));
@@ -1316,10 +1319,33 @@ final class ScriptEngine
         globals.define(typeName, constructor);
     }
 
+    private Value* findTypeDefinition(string name)
+    {
+        // Common spellings need neither concatenation nor a cache lookup.
+        // Still consult globals: even these registry entries can be rebound.
+        switch (name)
+        {
+            static foreach (builtin; ["", "auto", "any", "void", "null", "bool",
+                "byte", "ubyte", "short", "ushort", "int", "uint", "long", "ulong",
+                "float", "double", "real", "string", "array", "table", "associativeArray"])
+            {
+                case builtin: return globals.find("__dua_type_" ~ builtin);
+            }
+            default: break;
+        }
+        auto registryName = name in typeRegistryNames;
+        if (registryName is null)
+        {
+            typeRegistryNames[name] = "__dua_type_" ~ name;
+            registryName = name in typeRegistryNames;
+        }
+        return globals.find(*registryName);
+    }
+
     private string resolveContainerType(string name, size_t depth = 0)
     {
         enforce(depth < 64, "Cyclic or excessively nested container type");
-        if (auto definition = globals.find("__dua_type_" ~ name))
+        if (auto definition = findTypeDefinition(name))
             if (!definition.tableValue["isTable"].truthy())
             {
                 auto alternatives = definition.tableValue["alternatives"].arrayValue;
@@ -1328,8 +1354,12 @@ final class ScriptEngine
             }
         string element, key;
         if (splitContainerType(name, element, key))
-            return resolveContainerType(element, depth + 1) ~ "["
-                ~ (key.length ? resolveContainerType(key, depth + 1) : "") ~ "]";
+        {
+            auto resolvedElement = resolveContainerType(element, depth + 1);
+            auto resolvedKey = key.length ? resolveContainerType(key, depth + 1) : "";
+            if (resolvedElement != element || resolvedKey != key)
+                return resolvedElement ~ "[" ~ resolvedKey ~ "]";
+        }
         return name;
     }
 
@@ -1415,7 +1445,7 @@ final class ScriptEngine
             default: break;
         }
 
-        auto definition = globals.find("__dua_type_" ~ typeName);
+        auto definition = findTypeDefinition(typeName);
         if (definition is null)
         {
             if (value.isFieldAggregate)
@@ -1446,7 +1476,7 @@ final class ScriptEngine
 
     private bool valueIsType(Value value, string typeName)
     {
-        auto definition = globals.find("__dua_type_" ~ typeName);
+        auto definition = findTypeDefinition(typeName);
         if (definition is null) return valueMatchesType(value, typeName);
         if (!definition.tableValue["isTable"].truthy())
         {
