@@ -74,8 +74,11 @@ private void checkStatements(Statement[] statements, ref string[string] variable
             case Statement.Kind.assign:
                 foreach (index, target; statement.targets)
                 {
+                    auto expression = index < statement.expressions.length ? statement.expressions[index] : null;
+                    if (statement.assignmentOperator.length)
+                        expression = new BinaryExpression(target, statement.assignmentOperator, expression);
                     auto actual = index < statement.expressions.length
-                        ? inferExpressionType(statement.expressions[index], variables, functions, diagnostics)
+                        ? inferExpressionType(expression, variables, functions, diagnostics)
                         : "any";
                     if (target.kind == Expression.Kind.variable)
                     {
@@ -117,7 +120,17 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                 auto childVariables = variables.dup;
                 checkStatements(statement.body, childVariables, functions, diagnostics, expectedReturnType);
                 break;
-            case Statement.Kind.if_, Statement.Kind.while_, Statement.Kind.for_,
+            case Statement.Kind.for_:
+                auto loopVariables = variables.dup;
+                if (statement.init !is null)
+                    checkStatements([statement.init], loopVariables, functions, diagnostics, expectedReturnType);
+                if (statement.condition !is null)
+                    inferExpressionType(statement.condition, loopVariables, functions, diagnostics);
+                checkStatements(statement.body, loopVariables, functions, diagnostics, expectedReturnType);
+                if (statement.incrementStatement !is null)
+                    checkStatements([statement.incrementStatement], loopVariables, functions, diagnostics, expectedReturnType);
+                break;
+            case Statement.Kind.if_, Statement.Kind.while_,
                  Statement.Kind.foreach_, Statement.Kind.switch_:
                 if (statement.condition !is null)
                     inferExpressionType(statement.condition, variables, functions, diagnostics);
@@ -210,7 +223,19 @@ private string inferExpressionType(Expression expression, ref string[string] var
                 : inferExpressionType((cast(BinaryExpression) expression).right, variables, functions, diagnostics);
             if (["==", "!=", "<", "<=", ">", ">=", "&&", "||", "is"].canFind((cast(BinaryExpression) expression).operatorSymbol))
                 return "bool";
-            if ((cast(BinaryExpression) expression).operatorSymbol == "~") return "string";
+            auto op = (cast(BinaryExpression) expression).operatorSymbol;
+            if (op == "~")
+            {
+                string element, key;
+                auto leftArray = left == "array" || (splitContainerType(left, element, key) && !key.length);
+                auto rightArray = right == "array" || (splitContainerType(right, element, key) && !key.length);
+                if (leftArray && rightArray) return left;
+                if (left == "any" || right == "any" || left == "table" || right == "table") return "any";
+                return "string";
+            }
+            if (left == "any" || right == "any" || left == "table" || right == "table") return "any";
+            if (op == "/") return "double";
+            if (["%", "&", "|", "^", "<<", ">>"].canFind(op)) return "int";
             return left == "int" && right == "int" ? "int" : "double";
         case Expression.Kind.ternary:
             auto middle = inferExpressionType((cast(TernaryExpression) expression).whenTrue, variables, functions, diagnostics);

@@ -211,6 +211,16 @@ mixin template EvaluatorImplementation()
                     }
                     break;
                 case Statement.Kind.assign:
+                    if (statement.assignmentOperator.length)
+                    {
+                        Value left;
+                        auto target = resolveCompoundTarget(statement.target, environment, left);
+                        auto right = evaluate(statement.expression, environment);
+                        auto value = evaluateBinary(statement.assignmentOperator, left, right);
+                        assignTarget(target, value, environment);
+                        result.lastValue = value;
+                        break;
+                    }
                     auto values = evaluateExpressionList(statement.expressions, environment,
                         statement.targets.length > 1);
                     foreach (index, target; statement.targets)
@@ -507,6 +517,46 @@ mixin template EvaluatorImplementation()
         return values;
     }
 
+    // Freeze the receiver and index so reading and writing use the same location,
+    // including when the RHS changes a variable used by the original target.
+    private Expression resolveCompoundTarget(Expression target, Environment environment, out Value current)
+    {
+        Expression resolved;
+        switch (target.kind)
+        {
+            case Expression.Kind.variable:
+                current = evaluate(target, environment);
+                return target;
+            case Expression.Kind.get:
+                auto property = cast(GetExpression) target;
+                auto container = evaluate(property.target, environment);
+                resolved = new GetExpression(new LiteralExpression(container), property.memberName);
+                resolved.line = target.line;
+                resolved.column = target.column;
+                current = evaluate(resolved, environment);
+                break;
+            case Expression.Kind.index:
+                auto indexed = cast(IndexExpression) target;
+                enforce(!indexed.isSlice, "Slice cannot be an assignment target");
+                auto container = evaluate(indexed.target, environment);
+                auto pushedLength = canMeasureLength(container);
+                if (pushedLength) evaluatorContext.indexLengthStack ~= measuredLength(container);
+                scope (exit)
+                {
+                    if (pushedLength) --evaluatorContext.indexLengthStack.length;
+                }
+                auto index = evaluate(indexed.index, environment);
+                resolved = new IndexExpression(new LiteralExpression(container), new LiteralExpression(index));
+                current = readIndex(container, index);
+                break;
+            default:
+                enforce(false, "Invalid compound assignment target");
+        }
+        resolved.line = target.line;
+        resolved.column = target.column;
+        return resolved;
+    }
+
     private void assignTarget(Expression target, Value value, Environment environment)
     {
         try
@@ -788,31 +838,7 @@ mixin template EvaluatorImplementation()
                         return Value.from(sliced);
                     }
                     auto index = evaluate((cast(IndexExpression) expression).index, environment);
-                    if (container.kind == ValueKind.associativeArray)
-                    {
-                        index = checkedAssociativeKey(container, index);
-                        auto position = container.associativeIndex(index);
-                        enforce(position != size_t.max, "Associative array key not found");
-                        return container.associativeEntries[position].value.valueCopy();
-                    }
-                    if (container.kind == ValueKind.array)
-                    {
-                        auto position = cast(size_t) index.toInt();
-                        enforce(position < container.arrayValue.length, "Array index out of range");
-                        return container.arrayValue[position];
-                    }
-                    if (container.isFieldAggregate)
-                    {
-                        auto key = index.toHostString();
-                        Value resolved;
-                        if (resolveTableIndex(container, key, resolved))
-                        {
-                            return resolved;
-                        }
-                        return Value.nullValue();
-                    }
-                    enforce(false, "Indexing currently supports arrays and tables");
-                    assert(0);
+                    return readIndex(container, index);
             }
         }
         catch (Exception error)
@@ -820,6 +846,32 @@ mixin template EvaluatorImplementation()
             auto location = expressionLocation(expression);
             throw withSourceContext(error, evaluatorContext.sourceName, location, "expression");
         }
+    }
+
+    private Value readIndex(Value container, Value index)
+    {
+        if (container.kind == ValueKind.associativeArray)
+        {
+            index = checkedAssociativeKey(container, index);
+            auto position = container.associativeIndex(index);
+            enforce(position != size_t.max, "Associative array key not found");
+            return container.associativeEntries[position].value.valueCopy();
+        }
+        if (container.kind == ValueKind.array)
+        {
+            auto position = cast(size_t) index.toInt();
+            enforce(position < container.arrayValue.length, "Array index out of range");
+            return container.arrayValue[position];
+        }
+        if (container.isFieldAggregate)
+        {
+            auto key = index.toHostString();
+            Value resolved;
+            if (resolveTableIndex(container, key, resolved)) return resolved;
+            return Value.nullValue();
+        }
+        enforce(false, "Indexing currently supports arrays and tables");
+        assert(0);
     }
 
     private string statementLocation(Statement statement) const

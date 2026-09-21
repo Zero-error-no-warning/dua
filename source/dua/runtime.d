@@ -469,6 +469,153 @@ unittest
 unittest
 {
     auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto number = 20;
+        number += 2 * 3;
+        number -= 6;
+        number *= 3;
+        number /= 8;
+        auto quotient = number;
+        number %= 4;
+        number <<= 3;
+        number >>= 1;
+        number &= 10;
+        number |= 1;
+        number ^= 3;
+        auto text = "answer";
+        text ~= 42;
+        auto items = [1];
+        auto original = items;
+        items ~= [2, 3];
+        return quotient == 7.5 && number == 10 && text == "answer42"
+            && length(items) == 3 && items[2] == 3 && length(original) == 1;
+    });
+    assert(result.booleanValue);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    assert(engine.run(q{
+        auto total = 0;
+        for (auto i = 0; i < 4; i += 1) {
+            if (i == 2) continue;
+            total += i;
+        }
+        auto j = 0;
+        for (j += 1; j < 3; j += 1) total += j;
+        auto add = (int amount) :> total += amount;
+        add(5);
+        return total;
+    }).toInt() == 12);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    assert(engine.run(q{
+        auto calls = 0;
+        auto indices = 0;
+        auto rhsCalls = 0;
+        auto items = [10, 20];
+        auto saved = items;
+        auto receiver = () { calls += 1; return items; };
+        auto index = () { indices += 1; return 1; };
+        auto rhs = () { rhsCalls += 1; items = [99]; return 3; };
+        receiver()[index()] += rhs();
+        saved[$ - 1] *= 2;
+        auto box = { value = 5 };
+        auto getBox = () { calls += 1; return box; };
+        getBox().value += 7;
+        getBox()["value"] -= 2;
+        int[string] scores = ["alice": 8];
+        scores["alice"] *= 3;
+        struct Point { int x; }
+        auto point = Point(4);
+        point.x += 6;
+        auto lengths = 0;
+        auto reads = 0;
+        auto writes = 0;
+        auto stored = 6;
+        auto proxy = {};
+        setmetatable(proxy, {
+            __len = (any self) { lengths += 1; return 1; },
+            __index = (any self, any key) { reads += 1; return stored; },
+            __newindex = (any self, any key, any value) { writes += 1; stored = value; }
+        });
+        proxy[$ - 1] += 4;
+        return calls == 3 && indices == 1 && rhsCalls == 1
+            && saved[1] == 46 && items[0] == 99 && box.value == 10
+            && scores["alice"] == 24 && point.x == 10
+            && lengths == 1 && reads == 1 && writes == 1 && stored == 10;
+    }).booleanValue);
+}
+
+unittest
+{
+    final class CompoundProperty
+    {
+        int stored = 7;
+        int reads;
+        int writes;
+        int value() { ++reads; return stored; }
+        void value(int next) { ++writes; stored = next; }
+    }
+    auto property = new CompoundProperty();
+    auto engine = new ScriptEngine();
+    engine.bindAuto("property", property);
+    engine.run("property.value *= 3;");
+    assert(property.stored == 21 && property.reads == 1 && property.writes == 1);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindAuto("reflected", OverloadedBinaryFixture(10));
+    assert(engine.run(q{
+        reflected.value += 5;
+        reflected += 2;
+        auto box = { value = 10, "opBinary+" = (any self, int rhs) => self.value + rhs };
+        box += 3;
+        return reflected == 17 && box == 13;
+    }).booleanValue);
+
+    foreach (source; ["1 += 2;", "auto a = [1]; a[0..1] += [2];",
+        "auto a, b = 1, 2; a, b += 3;", "auto a = 1; a += 2, 3;",
+        "auto a = 1; return a += 2;", "missing += 1;",
+        "auto a = [1]; a[2] += 1;", "int[string] a = [:]; a[\"missing\"] += 1;"])
+        assert(!engine.runSafe(source).ok, source);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    RunOptions options;
+    options.typeCheck = true;
+    assert(engine.run(q{
+        int count = 1;
+        count += 2;
+        double fraction = 9.0;
+        fraction /= 2;
+        string text = "n=";
+        text ~= count;
+        int[] items = [1];
+        items ~= [2];
+        int[string] scores = ["alice": 3];
+        scores["alice"] += count;
+        for (auto i = 0; i < 2; i += 1) count += i;
+        return count == 4 && fraction == 4.5 && text == "n=3"
+            && items[1] == 2 && scores["alice"] == 6;
+    }, options).booleanValue);
+    assert(engine.check("int n = 1; n ~= 2;").length == 1);
+    assert(engine.check("int n = 1; n /= 2;").length == 1);
+    assert(engine.check("int[] a = [1]; a[0] ~= 2;").length == 1);
+    assert(engine.check("for (auto i = 0; i < 2; i ~= 1) {}").length == 1);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
     RunOptions options;
     options.sourceName = "worker.dua";
     auto loaded = engine.loadSafe(q{

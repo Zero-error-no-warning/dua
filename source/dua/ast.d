@@ -89,6 +89,7 @@ final class Statement : AstNode
     Expression[] expressions;
     Expression target;
     Expression[] targets;
+    string assignmentOperator; // Empty for plain assignment; otherwise the binary operator.
     string[] parameters;
     string[] parameterTypes;
     bool variadic;

@@ -56,6 +56,7 @@ enum TokenKind
     tilde,
     bang,
     equal,
+    compoundAssign,
     equalEqual,
     bangEqual,
     less,
@@ -372,6 +373,23 @@ Token[] lex(string source)
         }
 
         enforce(consumed, format("Unexpected character '%s' at %s:%s", current.to!string, line, column));
+        // Extend only the arithmetic, concatenation, bitwise and shift tokens.
+        switch (kind)
+        {
+            case TokenKind.plus, TokenKind.minus, TokenKind.star, TokenKind.slash,
+                 TokenKind.percent, TokenKind.tilde, TokenKind.amp, TokenKind.pipe,
+                 TokenKind.caret, TokenKind.shiftLeft, TokenKind.shiftRight:
+                if (peek(source, index + 1) == '=')
+                {
+                    kind = TokenKind.compoundAssign;
+                    lexeme ~= "=";
+                    ++index;
+                    ++column;
+                }
+                break;
+            default:
+                break;
+        }
         tokens.put(Token(kind, lexeme, line, startColumn));
         ++index;
         ++column;
@@ -419,6 +437,28 @@ private TokenKind keywordFor(string identifier)
 private char peek(string source, size_t index)
 {
     return index < source.length ? source[index] : '\0';
+}
+
+unittest
+{
+    auto tokens = lex("+= -= *= /= %= ~= &= |= ^= <<= >>=\n== != <= >= => << >> && || =");
+    size_t column = 1;
+    foreach (index, spelling; ["+=", "-=", "*=", "/=", "%=", "~=", "&=", "|=", "^=", "<<=", ">>="])
+    {
+        assert(tokens[index].kind == TokenKind.compoundAssign);
+        assert(tokens[index].lexeme == spelling);
+        assert(tokens[index].line == 1);
+        assert(tokens[index].column == column);
+        column += spelling.length + 1;
+    }
+    foreach (index, kind; [TokenKind.equalEqual, TokenKind.bangEqual, TokenKind.lessEqual,
+        TokenKind.greaterEqual, TokenKind.fatArrow, TokenKind.shiftLeft, TokenKind.shiftRight,
+        TokenKind.ampAmp, TokenKind.pipePipe, TokenKind.equal])
+    {
+        assert(tokens[index + 11].kind == kind);
+        assert(tokens[index + 11].line == 2);
+        assert(tokens[index + 11].column == index * 3 + 1);
+    }
 }
 
 unittest
