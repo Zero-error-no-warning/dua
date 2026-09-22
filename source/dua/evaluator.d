@@ -14,6 +14,8 @@ import dua.ast;
 import dua.execution;
 import dua.value;
 import dua.type_syntax;
+import dua.scope_layout;
+import dua.scope_planner;
 import std.conv : to;
 import std.exception : enforce;
 import std.format : format;
@@ -87,19 +89,59 @@ final class Environment
     {
         Value value;
         Value delegate(Value) validator;
+        bool defined;
     }
-    private Binding[string] bindings;
+    private struct Storage
+    {
+        ScopeLayout layout;
+        Binding[] slots;
+        Binding[string] bindings;
+    }
+    // Keep empty block environments as small as the original map-only frame.
+    private Storage* storage;
 
     this(Environment parent = null)
     {
         this.parent = parent;
     }
 
+    package(dua) this(Environment parent, ScopeLayout layout)
+    {
+        this.parent = parent;
+        reserveSlots(layout);
+    }
+
+    package(dua) bool hasStorage() const { return storage !is null; }
+
+    package(dua) void reserveSlots(ScopeLayout layout)
+    {
+        assert(storage is null);
+        // Never resize this array: public find() pointers must remain stable.
+        if (layout !is null && layout.length)
+        {
+            storage = new Storage;
+            storage.layout = layout;
+            storage.slots.length = layout.length;
+        }
+    }
+
     void define(string name, Value value, Value delegate(Value) validator = null)
     {
-        enforce((name in bindings) is null,
+        if (storage is null) storage = new Storage;
+        if (storage.layout !is null)
+        {
+            auto slot = storage.layout.find(name);
+            if (slot != size_t.max)
+            {
+                enforce(!storage.slots[slot].defined,
+                    format("Variable '%s' is already defined in this scope", name));
+                storage.slots[slot] = Binding(value.valueCopy(), validator, true);
+                return;
+            }
+        }
+        enforce((name in storage.bindings) is null,
             format("Variable '%s' is already defined in this scope", name));
-        bindings[name] = Binding(value.valueCopy(), validator);
+        storage.bindings[name] = Binding(value.valueCopy(), validator, true);
     }
 
     bool contains(string name) const
@@ -107,7 +149,16 @@ final class Environment
         import std.typecons : Rebindable;
         for (auto environment = Rebindable!(const Environment)(this);
             environment !is null; environment = environment.parent)
-            if ((name in environment.bindings) !is null) return true;
+        {
+            auto data = environment.storage;
+            if (data is null) continue;
+            if (data.layout !is null)
+            {
+                auto slot = data.layout.find(name);
+                if (slot != size_t.max && data.slots[slot].defined) return true;
+            }
+            if ((name in data.bindings) !is null) return true;
+        }
         return false;
     }
 
@@ -120,23 +171,114 @@ final class Environment
 
     Value* find(string name)
     {
+        if (auto binding = findBinding(name)) return &binding.value;
+        return null;
+    }
+
+    private Binding* findBinding(string name)
+    {
         for (auto environment = this; environment !is null; environment = environment.parent)
-            if (auto binding = name in environment.bindings) return &binding.value;
+        {
+            auto data = environment.storage;
+            if (data is null) continue;
+            if (data.layout !is null)
+            {
+                auto slot = data.layout.find(name);
+                if (slot != size_t.max && data.slots[slot].defined)
+                    return &data.slots[slot];
+            }
+            if (auto binding = name in data.bindings) return binding;
+        }
         return null;
     }
 
     void assign(string name, Value value)
     {
-        for (auto environment = this; environment !is null; environment = environment.parent)
+        if (auto binding = findBinding(name))
         {
-            if (auto binding = name in environment.bindings)
-            {
-                if (binding.validator !is null) value = binding.validator(value);
-                binding.value = value.valueCopy();
-                return;
-            }
+            assignBinding(binding, value);
+            return;
         }
         enforce(false, format("Cannot assign undefined variable '%s'", name));
+    }
+
+    private static void assignBinding(Binding* binding, Value value)
+    {
+        if (binding.validator !is null) value = binding.validator(value);
+        binding.value = value.valueCopy();
+    }
+
+    package(dua) Value get(string name, ref VariableSlots cache)
+    {
+        if (auto binding = findBinding(name, cache)) return binding.value;
+        enforce(false, format("Undefined variable '%s'", name));
+        assert(0);
+    }
+
+    package(dua) void assign(string name, Value value, ref VariableSlots cache)
+    {
+        if (auto binding = findBinding(name, cache))
+        {
+            assignBinding(binding, value);
+            return;
+        }
+        enforce(false, format("Cannot assign undefined variable '%s'", name));
+    }
+
+    private Binding* findBinding(string name, ref VariableSlots cache)
+    {
+        auto environment = this;
+        if (cache.name is name)
+        {
+            foreach (step; cache.steps)
+            {
+                // Public ASTs and Environment.parent may be reused or changed.
+                if (environment is null)
+                    return resolveSlots(name, cache);
+                auto data = environment.storage;
+                if ((data is null ? null : data.layout) !is step.layout)
+                    return resolveSlots(name, cache);
+                if (data !is null)
+                {
+                    if (step.slot != size_t.max && data.slots[step.slot].defined)
+                        return &data.slots[step.slot];
+                    if (data.bindings !is null)
+                        if (auto binding = name in data.bindings) return binding;
+                }
+                environment = environment.parent;
+            }
+            if (environment is null) return null;
+        }
+        return resolveSlots(name, cache);
+    }
+
+    private Binding* resolveSlots(string name, ref VariableSlots cache)
+    {
+        VariableSlots resolved;
+        resolved.name = name;
+        for (auto environment = this; environment !is null;
+            environment = environment.parent)
+        {
+            auto data = environment.storage;
+            auto layout = data is null ? null : data.layout;
+            auto slot = layout is null ? size_t.max : layout.find(name);
+            resolved.steps ~= VariableSlots.Step(layout, slot);
+            if (data !is null)
+            {
+                if (slot != size_t.max && data.slots[slot].defined)
+                {
+                    cache = resolved;
+                    return &data.slots[slot];
+                }
+                if (auto binding = name in data.bindings)
+                {
+                    cache = resolved;
+                    return binding;
+                }
+            }
+        }
+        cache = resolved;
+        return null;
     }
 }
 
@@ -167,6 +309,61 @@ unittest
     assertThrown!Exception(nested.define("checked", Value.from(12)));
     assertThrown!Exception(nested.get("missing"));
     assertThrown!Exception(nested.assign("missing", Value.from(1)));
+}
+
+unittest
+{
+    import std.exception : assertThrown;
+
+    auto layout = new ScopeLayout(["value", "checked", "empty"]);
+    auto outer = new Environment();
+    outer.define("value", Value.from(1));
+    auto first = new Environment(outer, layout);
+    VariableSlots cache;
+    assert(first.get("value", cache).toInt() == 1);
+    assert(!first.contains("checked"));
+    first.define("value", Value.from(2));
+    assert(first.get("value", cache).toInt() == 2);
+    auto pointer = first.find("value");
+    // Dynamic additions must neither move slots nor bypass closer bindings.
+    foreach (i; 0 .. 128) first.define("extra" ~ to!string(i), Value.from(i));
+    first.assign("value", Value.from(3), cache);
+    assert(pointer is first.find("value") && pointer.toInt() == 3);
+    auto second = new Environment(outer, layout);
+    assert(second.get("value", cache).toInt() == 1);
+    second.define("value", Value.from(4));
+    assert(second.get("value", cache).toInt() == 4);
+    auto otherLayout = new ScopeLayout(["empty", "value"]);
+    auto third = new Environment(outer, otherLayout);
+    third.define("empty", Value.from(99));
+    third.define("value", Value.from(5));
+    assert(third.get("value", cache).toInt() == 5);
+    auto child = new Environment(first, new ScopeLayout(null));
+    assert(child.get("value", cache).toInt() == 3);
+    child.parent = second;
+    assert(child.get("value", cache).toInt() == 4);
+    child.define("value", Value.from(6));
+    assert(child.get("value", cache).toInt() == 6);
+    child.parent = null;
+    assert(child.get("value", cache).toInt() == 6);
+    VariableSlots missing;
+    assertThrown!Exception(child.get("later", missing));
+    child.define("later", Value.from(7));
+    assert(child.get("later", missing).toInt() == 7);
+    first.define("empty", Value.nullValue());
+    assert(first.contains("empty") && first.find("empty") !is null);
+    int validations;
+    first.define("checked", Value.from(8), (Value next) {
+        ++validations;
+        enforce(next.kind == ValueKind.integer, "Expected integer");
+        return Value.from(next.toInt() * 2);
+    });
+    VariableSlots checked;
+    first.assign("checked", Value.from(9), checked);
+    assert(first.get("checked").toInt() == 18 && validations == 1);
+    assertThrown!Exception(first.assign("checked", Value.from("bad"), checked));
+    assert(first.get("checked").toInt() == 18 && validations == 2);
+    assertThrown!Exception(first.define("value", Value.from(0)));
 }
 
 struct ExecutionResult
@@ -267,7 +464,7 @@ mixin template EvaluatorImplementation()
                 case Statement.Kind.try_:
                     try
                     {
-                        result = executeStatements(statement.body, new Environment(environment));
+                        result = executeStatements(statement.body, new Environment(environment, layoutFor(statement)));
                     }
                     catch (Exception error)
                     {
@@ -290,7 +487,7 @@ mixin template EvaluatorImplementation()
                         errorInfo["message"] = Value.from(error.msg);
                         errorInfo["value"] = original;
                         errorInfo["stack"] = Value.from(frames);
-                        auto catchEnvironment = new Environment(environment);
+                        auto catchEnvironment = new Environment(environment, catchLayoutFor(statement));
                         catchEnvironment.define(statement.name, Value.from(errorInfo));
                         result = executeStatements(statement.elseBranch.body, catchEnvironment);
                     }
@@ -337,7 +534,7 @@ mixin template EvaluatorImplementation()
                 case Statement.Kind.functionDecl:
                     auto callable = Value.fromFunction(new ScriptCallable(statement.name, this, environment,
                         statement.parameters, statement.variadic, statement.body,
-                        statement.parameterTypes, statement.returnType));
+                        statement.parameterTypes, statement.returnType, layoutFor(statement)));
                     environment.define(statement.name, callable);
                     result.lastValue = callable;
                     if (statement.isExported)
@@ -354,7 +551,7 @@ mixin template EvaluatorImplementation()
                     exportSymbol(statement.name, environment.get(statement.name));
                     break;
                 case Statement.Kind.block:
-                    return executeStatements(statement.body, new Environment(environment));
+                    return executeStatements(statement.body, new Environment(environment, layoutFor(statement)));
                 case Statement.Kind.if_:
                     if (evaluate(statement.condition, environment).truthy())
                     {
@@ -386,7 +583,7 @@ mixin template EvaluatorImplementation()
                     }
                     break;
                 case Statement.Kind.for_:
-                    auto loopEnvironment = new Environment(environment);
+                    auto loopEnvironment = new Environment(environment, layoutFor(statement));
                     if (statement.init !is null)
                     {
                         auto initResult = executeStatement(statement.init, loopEnvironment);
@@ -430,7 +627,7 @@ mixin template EvaluatorImplementation()
                     {
                         foreach (index, item; iterable.arrayValue)
                         {
-                            auto itemEnvironment = new Environment(environment);
+                            auto itemEnvironment = new Environment(environment, layoutFor(statement));
                             if (statement.iteratorSecondName.length == 0)
                             {
                                 itemEnvironment.define(statement.iteratorName, item);
@@ -461,7 +658,7 @@ mixin template EvaluatorImplementation()
                     {
                         foreach (entry; (cast(AssociativeEntry[]) iterable.associativeEntries).dup)
                         {
-                            auto itemEnvironment = new Environment(environment);
+                            auto itemEnvironment = new Environment(environment, layoutFor(statement));
                             if (statement.iteratorSecondName.length == 0)
                                 itemEnvironment.define(statement.iteratorName, cast(Value) entry.value);
                             else
@@ -479,7 +676,7 @@ mixin template EvaluatorImplementation()
                     {
                         foreach (key, value; iterable.tableValue)
                         {
-                            auto itemEnvironment = new Environment(environment);
+                            auto itemEnvironment = new Environment(environment, layoutFor(statement));
                             if (statement.iteratorSecondName.length == 0)
                             {
                                 itemEnvironment.define(statement.iteratorName, value);
@@ -530,7 +727,7 @@ mixin template EvaluatorImplementation()
                             continue;
                         }
 
-                        result = executeStatements(switchCase.body, new Environment(environment));
+                        result = executeStatements(switchCase.body, new Environment(environment, layoutFor(switchCase)));
                         if (result.returned)
                         {
                             return result;
@@ -646,7 +843,8 @@ mixin template EvaluatorImplementation()
             switch (target.kind)
             {
                 case Expression.Kind.variable:
-                    environment.assign((cast(VariableExpression) target).name, value);
+                    auto variable = cast(VariableExpression) target;
+                    environment.assign(variable.name, value, variable.slots);
                     return;
                 case Expression.Kind.get:
                     auto get = cast(GetExpression) target;
@@ -726,7 +924,8 @@ mixin template EvaluatorImplementation()
                 case Expression.Kind.literal:
                     return (cast(LiteralExpression) expression).value;
                 case Expression.Kind.variable:
-                    return environment.get((cast(VariableExpression) expression).name);
+                    auto variable = cast(VariableExpression) expression;
+                    return environment.get(variable.name, variable.slots);
                 case Expression.Kind.cast_:
                     auto conversion = cast(CastExpression) expression;
                     return castValue(evaluate(conversion.operand, environment), conversion.targetType);
@@ -864,7 +1063,7 @@ mixin template EvaluatorImplementation()
                     auto functionExpression = cast(FunctionExpression) expression;
                     return Value.fromFunction(new ScriptCallable("anonymous", this, environment,
                         functionExpression.parameters, functionExpression.variadic, functionExpression.body,
-                        functionExpression.parameterTypes, functionExpression.returnType));
+                        functionExpression.parameterTypes, functionExpression.returnType, layoutFor(functionExpression)));
                 case Expression.Kind.get:
                     auto get = cast(GetExpression) expression;
                     auto container = evaluate(get.target, environment);

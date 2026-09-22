@@ -4,6 +4,8 @@ import dua.ast;
 public import dua.binding;
 import dua.coroutine;
 import dua.evaluator;
+import dua.scope_layout;
+import dua.scope_planner;
 public import dua.execution;
 import dua.lexer : lex;
 import dua.module_system : ModuleImplementation;
@@ -668,9 +670,11 @@ final class ScriptCallable : CallableValue
     private string[] parameterTypes;
     private string returnType;
     private string sourceName;
+    private ScopeLayout scopeLayout;
 
     this(string name, ScriptEngine engine, Environment closure, string[] parameters, bool variadic,
-        Statement[] body, string[] parameterTypes = null, string returnType = "")
+        Statement[] body, string[] parameterTypes = null, string returnType = "",
+        ScopeLayout scopeLayout = null)
     {
         super(name);
         this.engine = engine;
@@ -681,6 +685,7 @@ final class ScriptCallable : CallableValue
         this.parameterTypes = parameterTypes.dup;
         this.returnType = returnType;
         this.sourceName = engine.evaluatorContext.sourceName;
+        this.scopeLayout = scopeLayout is null ? planScope(this.body, ["this"] ~ this.parameters) : scopeLayout;
     }
 
     override Value invoke(Value[] args)
@@ -708,7 +713,7 @@ final class ScriptCallable : CallableValue
                 format("Function '%s' expected %s arguments but got %s", debugName, parameters.length, args.length));
         }
 
-        auto environment = new Environment(closure);
+        auto environment = new Environment(closure, scopeLayout);
         if (engine.hasThisContext())
         {
             environment.define("this", engine.currentThisContext());
@@ -1197,6 +1202,7 @@ final class ScriptEngine
                         typeDiagnostics[0].line, typeDiagnostics[0].column, typeDiagnostics[0].message));
             }
             auto program = parse(lex(source));
+            if (!environment.hasStorage()) environment.reserveSlots(planScope(program.statements));
             auto result = executeStatements(program.statements, environment);
             outcome.ok = true;
             outcome.value = result.lastValue;
