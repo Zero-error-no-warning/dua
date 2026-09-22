@@ -134,7 +134,122 @@ tests in `source/dua/performance_regression_tests.d` also pass when compiled
 against the original implementation. The final `dub build --compiler=dmd` and
 `dub test --compiler=dmd` pass, with eight modules reporting successful unittests.
 
-The remaining major costs include hashed lexical-scope lookup and AST
-interpretation. Replacing these with local-variable slots or bytecode would
-require a separate execution-model change and additional closure, dynamic-binding,
-source-location and execution-limit compatibility work.
+At that revision, hashed lexical-scope lookup and AST interpretation remained
+major costs. The following change addresses local-variable storage and lookup.
+
+## Local-variable slots (2026-09-22)
+
+Baseline: `13343aaa` (runtime identical to `fe096909`). Final runtime: `5ef3d510`.
+Windows x86_64, DMD 2.113.0, `-O -release -inline`, the same drivers compiled
+against both trees. Each workload/revision ran in a fresh process, with seven
+timed samples after warmup. Three process pairs were collected, reversing the
+revision order in the second pair. Figures below are the median of those three
+process medians. Raw process medians, minima and allocation counts are in
+[results/slots-2026-09-22.txt](results/slots-2026-09-22.txt).
+
+| Workload | Count | Before (us) | After (us) | Before GC (MB) | After GC (MB) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Integer keys | 8 | 23 | 22 | 0.008 | 0.008 |
+| Integer keys | 128 | 200 | 199 | 0.127 | 0.127 |
+| Integer keys | 2,048 | 3,002 | 2,924 | 1.63 | 1.63 |
+| String keys | 8 | 24 | 22 | 0.008 | 0.008 |
+| String keys | 128 | 220 | 228 | 0.131 | 0.131 |
+| String keys | 2,048 | 3,442 | 3,330 | 1.70 | 1.70 |
+| Local-variable loop | 20,000 | 8,436 | 8,481 | 0.641 | 0.641 |
+| Nested scopes | 10,000 | 6,018 | 5,916 | 1.28 | 1.28 |
+| Capturing closure calls | 5,000 | 5,546 | 5,142 | 3.84 | 3.44 |
+| Recursive Fibonacci | 18 | 7,631 | 7,135 | 6.29 | 5.62 |
+| Four declarations per iteration | 5,000 | 10,008 | 8,420 | 7.60 | 6.80 |
+| UFCS calls | 5,000 | 6,228 | 6,041 | 4.48 | 4.08 |
+| Host overloads | 5,000 | 3,805 | 3,597 | 2.24 | 2.24 |
+| Eight arguments | 2,000 | 9,002 | 7,401 | 9.22 | 7.01 |
+| Array copies | 500 | 4,548 | 4,945 | 23.00 | 22.87 |
+| Typed arrays | 300 | 7,132 | 7,269 | 5.34 | 5.23 |
+| Nested structs | 500 | 1,614 | 1,671 | 2.66 | 2.52 |
+| Overloaded operators | 5,000 | 8,464 | 8,235 | 6.01 | 5.44 |
+| Wide nested structs | 100 | 11,771 | 12,304 | 20.58 | 20.56 |
+| Range construction | 20,000 | 945 | 897 | 4.80 | 4.80 |
+
+The clearest gains are scope construction (1.19x), eight-argument calls (1.22x)
+and capturing closures (1.08x). Eight-argument calls allocate about 24% fewer
+bytes. This is not a universal speedup: simple loops are essentially unchanged,
+and the aggregate-copy workloads show some slower medians. Variance is visible
+in the raw runs; do not interpret a few percent as a stable improvement or
+extrapolate these microbenchmarks to all applications. GC counts measure
+allocated bytes, not peak or retained memory.
+
+### First execution, including parsing
+
+`startup.d` repeatedly uses `ScriptEngine.run`, parsing a new AST on every call,
+so it includes planning and first-use costs. Engine construction is outside
+the timed region. Counts of 500 report the whole batch, not a per-run duration.
+
+```powershell
+dmd -O -release -inline -i -Isource benchmarks/startup.d -of=.dub/startup-after.exe
+.\.dub\startup-after.exe smallRun
+.\.dub\startup-after.exe smallLocals
+.\.dub\startup-after.exe freshFunction
+.\.dub\startup-after.exe topLevelLoop
+```
+
+| Workload | Runs/sample | Before (us) | After (us) | Before GC (MB) | After GC (MB) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Literal arithmetic | 500 | 460 | 488 | 0.864 | 0.864 |
+| Two local declarations | 500 | 1,443 | 1,399 | 2.400 | 2.376 |
+| Define and call a function | 500 | 2,541 | 2,469 | 4.048 | 4.104 |
+| Top-level loop, 20,000 iterations | 1 | 8,380 | 8,167 | 0.649 | 0.650 |
+
+These small differences varied between process pairs. Planning still has an
+initial cost, and first-run allocation reduction is not universal. Empty layouts
+are shared, small name lists avoid hash-table construction, and a variable
+reference gets a cached slot path only when used a second time.
+
+### Storage and compatibility
+
+Each syntax scope reserves fixed slots for its declarations. A slot becomes
+visible only when its declaration executes; reads of inactive slots continue
+searching outer scopes. Values and assignment validators remain together.
+Frames with up to eight reserved names allocate metadata and values together;
+larger frames use an exact-size array. Empty scopes remain small.
+
+Variable references cache only layout identities and slot indices. Every access
+checks the actual environment chain and declaration state. Caches retain no
+environment or value, so different closure instances, recursion, host changes
+to `Environment.parent`, and reuse of an AST across engines stay independent.
+Added declarations in a host-modified AST use dynamic bindings. Globals that
+already have bindings retain name lookup, and later host/module definitions
+remain visible. Slot arrays never resize, preserving public `Environment.find`
+pointers. Lookup remains O(scope depth); this is not a bytecode interpreter.
+
+The expanded compatibility driver emits **396 cases**. Baseline and final output
+matched byte for byte, including values, error text, traces, reflected-copy
+counts and execution-step counts. Both files had SHA-256:
+
+```text
+F6A6CE596F58759941194C4CCE1755DF8624AC2BE95DFF4B31D5A5185B5DFDC0
+```
+
+`slot_regression_tests.d` covers late shadowing, shared and independent closures,
+per-iteration captures, recursion, typed assignments, module isolation, late host
+binding, mutable/reused ASTs, receiver context and coroutine suspension. Escaped
+closures with 13 different frame sizes also survive explicit GC collections.
+The public regression module passes against both the baseline and final source;
+the final `dub build --compiler=dmd` and `dub test --compiler=dmd` pass (nine
+unittest modules). Internal environment tests additionally check slot-pointer
+stability, cache guards, changed parents and assignment-validator effects.
+
+### Existing coroutine limitation found during validation
+
+The following interleaved-resume example crashed the **unchanged baseline** with
+Windows access violation `0xC0000005`. It is excluded from the passing differential
+suite and remains a separate coroutine lifecycle issue. Single-coroutine
+suspension/resumption, including captured locals, is covered by this change.
+
+```dua
+any make(int n) {
+    return coroutine.create(() { yield n; n += 1; yield n; return n + 1; });
+}
+auto a = make(10); auto b = make(20);
+return [coroutine.resume(a), coroutine.resume(b), coroutine.resume(a),
+    coroutine.resume(b), coroutine.resume(a), coroutine.resume(b)];
+```

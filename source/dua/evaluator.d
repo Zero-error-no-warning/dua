@@ -375,6 +375,7 @@ unittest
     assert(child.get("value", cache).toInt() == 6);
     VariableSlots missing;
     assertThrown!Exception(child.get("later", missing));
+    assertThrown!Exception(child.get("later", missing));
     child.define("later", Value.from(7));
     assert(child.get("later", missing).toInt() == 7);
     first.define("empty", Value.nullValue());

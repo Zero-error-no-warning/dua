@@ -75,7 +75,10 @@ unittest
     auto second = new Environment(); second.define("value", Value.from(20));
     assert(engine.executeStatements(program.statements, first).lastValue.toInt() == 10);
     assert(engine.executeStatements(program.statements, second).lastValue.toInt() == 20);
+    auto anotherEngine = new ScriptEngine();
+    assert(anotherEngine.executeStatements(program.statements, first).lastValue.toInt() == 10);
     auto block = parse(lex("{ auto a = 1; auto b = 2; return a; }"));
+    assert(engine.executeStatements(block.statements, first).lastValue.toInt() == 1);
     assert(engine.executeStatements(block.statements, first).lastValue.toInt() == 1);
     auto reference = cast(VariableExpression) block.statements[0].body[2].expressions[0];
     reference.name = "b";
@@ -112,9 +115,10 @@ unittest
         auto receiver = { value = 42, read = () => this.value };
         auto read = receiver["read"];
         auto first = receiver.read();
+        auto second = receiver.read();
         auto failed = false;
         try { read(); } catch (err) { failed = true; }
-        return first == 42 && failed;
+        return first == 42 && second == 42 && failed && receiver.read() == 42;
     }).truthy());
 }
 
