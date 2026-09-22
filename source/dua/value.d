@@ -214,6 +214,22 @@ private struct ReflectedTypeMetadata(T)
     }
 }
 
+private template hasAggregateAliasThis(T)
+{
+    static if (!__traits(getAliasThis, T).length || isInstanceOf!(Tuple, T))
+        enum hasAggregateAliasThis = false;
+    else
+    {
+        enum member = __traits(getAliasThis, T)[0];
+        alias Member = typeof(mixin("(*cast(T*) null)." ~ member));
+        static if (isCallable!Member)
+            alias Target = Unqual!(ReturnType!Member);
+        else
+            alias Target = Unqual!Member;
+        enum hasAggregateAliasThis = isAggregateType!Target;
+    }
+}
+
 enum ValueKind
 {
     null_,
@@ -1010,14 +1026,14 @@ struct Value
     static Value reflect(T)(auto ref T value)
         if (isAggregateType!T)
     {
-        static if (is(T == struct) && __traits(getAliasThis, T).length == 0)
+        static if (is(T == struct) && !hasAggregateAliasThis!T)
             return reflectWithLayout(value);
         else
             return reflectEager(value);
     }
 
-    // Alias-this forwarding can evaluate user getters and classes have
-    // reference identity. Retain their existing reflection path for now.
+    // Forwarding to an aggregate can evaluate user getters while discovering
+    // equality methods. Classes also keep their existing reflection path.
     private static Value reflectEager(T)(auto ref T value)
     {
         static if (is(T == class))
@@ -1241,6 +1257,17 @@ struct Value
             static if (__traits(compiles, convertToValue(mixin("value." ~ name))))
                 data.fields[index++] = convertToValue(mixin("owner.value." ~ name));
         }}
+        Value[] aliasTargets;
+        auto aliasChain = ReflectedTypeMetadata!T.aliasChain;
+        static if (__traits(getAliasThis, T).length && !isInstanceOf!(Tuple, T))
+        {
+            // Scalar/array aliases add conversion targets, but no forwarded
+            // aggregate members. Keep their live receiver-bound conversions.
+            Value[string] aliasMembers;
+            addAliasThisReflection!(T, T, "root", AliasSeq!T)(aliasMembers,
+                aliasTargets, aliasChain, owner.value, owner);
+            assert(aliasMembers.length == 0);
+        }
         // Preserve conversion/copy callbacks and their original hash order.
         // Only the creation of side-effect-free bound callables is deferred.
         foreach (name; data.layout.copyOrder)
@@ -1253,6 +1280,9 @@ struct Value
         result.tableStorage = new TableStorage;
         result.tableStorage.reflected = data;
         result.tableStorage.typeChain = ReflectedTypeMetadata!T.chain();
+        ReflectedTypeMetadata!T.aliasChain = aliasChain;
+        result.tableStorage.aliasThisChain = aliasChain;
+        result.tableStorage.aliasThisTargets = aliasTargets;
         result.tableStorage.nativeOwner = owner;
         result.tableStorage.copier = () => Value.reflect(owner.value);
         static if (__traits(compiles, owner.value == owner.value))

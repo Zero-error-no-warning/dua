@@ -107,6 +107,49 @@ private class Camera
     Cell position;
 }
 
+private struct CellList
+{
+    Cell[] items;
+    alias items this;
+    int first() { return items[0].value; }
+}
+
+private struct NumberAlias
+{
+    static int reads;
+    long number;
+    ref long raw() { ++reads; return number; }
+    alias raw this;
+}
+
+unittest
+{
+    auto array = Value.reflect(CellList([Cell(3), Cell(7)]));
+    auto copy = array.valueCopy();
+    auto getter = *array.propertyGetter("items");
+    auto setter = *array.propertySetter("items");
+    setter.functionValue.invoke([Value.fromAuto([Cell(11)])]);
+    assert(array.to!CellList().items[0].value == 11);
+    assert(copy.to!CellList().items[0].value == 3);
+    auto aliasTarget = cast(Value) array.aliasThisTargets[0];
+    assert(aliasTarget.functionValue.invoke([]).to!(Cell[])()[0].value == 11);
+    assert(array.tableValue["first"].functionValue.invoke([]).toInt() == 11);
+    array = Value.nullValue();
+    GC.collect();
+    assert(getter.functionValue.invoke([]).to!(Cell[])()[0].value == 11);
+
+    NumberAlias.reads = 0;
+    auto scalar = Value.reflect(NumberAlias(13));
+    auto scalarCopy = scalar.valueCopy();
+    assert(NumberAlias.reads == 0); // Type discovery must not evaluate aliases.
+    assert(scalar.to!long() == 13);
+    assert(NumberAlias.reads == 1);
+    scalar.propertySetter("number").functionValue.invoke([Value.from(19)]);
+    assert(scalar.to!long() == 19);
+    assert(scalarCopy.to!long() == 13);
+    assert(NumberAlias.reads == 3);
+}
+
 private struct CameraProxy
 {
     Camera camera;

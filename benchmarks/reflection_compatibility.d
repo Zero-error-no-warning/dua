@@ -57,6 +57,20 @@ struct Proxy(T)
     int own() { return 5; }
 }
 
+struct NumberAlias
+{
+    long number;
+    ref long raw() { events ~= "alias,"; return number; }
+    alias raw this;
+}
+
+struct ArrayAlias
+{
+    Child[] children;
+    alias children this;
+    int first() { return children[0].id; }
+}
+
 void record(T, bool runScripts = true)(T native)
 {
     events = "";
@@ -114,4 +128,25 @@ void main()
         // compare native conversion, copying and member tables independently.
         record!(Proxy!(Wide!width), false)(Proxy!(Wide!width)(value));
     }}
+    events = "";
+    auto number = Value.reflect(NumberAlias(5));
+    auto numberCopy = number.valueCopy();
+    writeln("number|", number.toHostString(), "|", numberCopy.toHostString(), "|", events);
+    writeln(number.to!long(), "|", numberCopy.to!long(), "|", events);
+    auto engine = new ScriptEngine;
+    engine.bindAuto("number", NumberAlias(7));
+    engine.bindAuto("array", ArrayAlias([Child(31), Child(43)]));
+    foreach (source; [
+        `auto a = number; auto b = a; b.number = 9; return [a.number, b.number];`,
+        `auto a = array; auto b = a; b.children = []; return [a.first(), b.children];`,
+        `return [number, array];`,
+        `return typeinfo(number);`,
+        `return typeinfo(array);`
+    ])
+    {
+        events = "";
+        auto outcome = engine.runSafe(source);
+        writeln(outcome.ok, "|", outcome.errorKind, "|", outcome.value.toHostString(),
+            "|", outcome.errorMessage, "|", outcome.stepsExecuted, "|copies|", events);
+    }
 }
