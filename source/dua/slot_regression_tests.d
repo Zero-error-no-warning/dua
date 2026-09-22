@@ -117,3 +117,32 @@ unittest
         return first == 42 && failed;
     }).truthy());
 }
+
+unittest
+{
+    import core.memory : GC;
+    import std.conv : to;
+
+    // Escaped frames of different sizes must survive collections, including
+    // the transition between inline storage and the large-frame fallback.
+    foreach (width; 0 .. 13)
+    {
+        auto engine = new ScriptEngine();
+        auto source = "any make(int initial) { ";
+        auto sum = "initial";
+        foreach (i; 0 .. width)
+        {
+            auto name = "value" ~ to!string(i);
+            source ~= "auto " ~ name ~ " = initial + " ~ to!string(i) ~ "; ";
+            sum ~= " + " ~ name;
+        }
+        source ~= "return () { initial += 1; return " ~ sum ~ "; }; } return make(40);";
+        auto closure = engine.run(source);
+        GC.collect();
+        engine.bind("saved", closure);
+        auto captured = 40 * width + width * (width - 1) / 2;
+        assert(engine.call("saved").toInt() == 41 + captured);
+        GC.collect();
+        assert(engine.call("saved").toInt() == 42 + captured);
+    }
+}

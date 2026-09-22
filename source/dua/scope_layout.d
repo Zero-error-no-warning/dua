@@ -6,9 +6,18 @@ package(dua) final class ScopeLayout
 {
     private size_t[string] indices;
     private size_t count;
+    private string[] smallNames;
 
     this(string[] names)
     {
+        // Most scopes contain only a handful of names. Avoid constructing a
+        // hash table for them; hot variable reads already use cached indices.
+        if (names.length <= 4)
+        {
+            smallNames = names.dup;
+            count = names.length;
+            return;
+        }
         foreach (name; names)
             if ((name in indices) is null) indices[name] = count++;
     }
@@ -17,6 +26,8 @@ package(dua) final class ScopeLayout
 
     size_t find(string name) const
     {
+        foreach (slot, candidate; smallNames)
+            if (candidate == name) return slot;
         if (auto slot = name in indices) return *slot;
         return size_t.max;
     }

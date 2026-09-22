@@ -97,6 +97,11 @@ final class Environment
         Binding[] slots;
         Binding[string] bindings;
     }
+    private struct SmallStorage(size_t count)
+    {
+        Storage header;
+        Binding[count] values;
+    }
     // Keep empty block environments as small as the original map-only frame.
     private Storage* storage;
 
@@ -119,9 +124,26 @@ final class Environment
         // Never resize this array: public find() pointers must remain stable.
         if (layout !is null && layout.length)
         {
-            storage = new Storage;
+            // Small call/block frames need one allocation for metadata and
+            // values together. Larger frames retain exact-size array storage.
+            allocate: switch (layout.length)
+            {
+                static foreach (count; 1 .. 9)
+                {
+                    case count:
+                    {
+                        auto block = new SmallStorage!count;
+                        storage = &block.header;
+                        storage.slots = block.values[];
+                        break allocate;
+                    }
+                }
+                default:
+                    storage = new Storage;
+                    storage.slots.length = layout.length;
+                    break;
+            }
             storage.layout = layout;
-            storage.slots.length = layout.length;
         }
     }
 
@@ -227,28 +249,33 @@ final class Environment
 
     private Binding* findBinding(string name, ref VariableSlots cache)
     {
-        auto environment = this;
-        if (cache.name is name)
+        // One-shot expressions need no path allocation. Resolve slots once the
+        // same reference is used again; changing a public AST name resets it.
+        if (cache.name !is name)
         {
-            foreach (step; cache.steps)
-            {
-                // Public ASTs and Environment.parent may be reused or changed.
-                if (environment is null)
-                    return resolveSlots(name, cache);
-                auto data = environment.storage;
-                if ((data is null ? null : data.layout) !is step.layout)
-                    return resolveSlots(name, cache);
-                if (data !is null)
-                {
-                    if (step.slot != size_t.max && data.slots[step.slot].defined)
-                        return &data.slots[step.slot];
-                    if (data.bindings !is null)
-                        if (auto binding = name in data.bindings) return binding;
-                }
-                environment = environment.parent;
-            }
-            if (environment is null) return null;
+            cache.name = name;
+            cache.steps = null;
+            return findBinding(name);
         }
+        auto environment = this;
+        foreach (step; cache.steps)
+        {
+            // Public ASTs and Environment.parent may be reused or changed.
+            if (environment is null)
+                return resolveSlots(name, cache);
+            auto data = environment.storage;
+            if ((data is null ? null : data.layout) !is step.layout)
+                return resolveSlots(name, cache);
+            if (data !is null)
+            {
+                if (step.slot != size_t.max && data.slots[step.slot].defined)
+                    return &data.slots[step.slot];
+                if (data.bindings !is null)
+                    if (auto binding = name in data.bindings) return binding;
+            }
+            environment = environment.parent;
+        }
+        if (environment is null) return null;
         return resolveSlots(name, cache);
     }
 

@@ -35,6 +35,13 @@ package(dua) ScopeLayout planScope(Statement[] body, string[] initialNames = nul
         }
     }
     foreach (statement; body) collect(statement);
+    if (!names.length)
+    {
+        // No values live here, so every empty scope can share this sentinel.
+        static ScopeLayout empty;
+        if (empty is null) empty = new ScopeLayout(null);
+        return empty;
+    }
     return new ScopeLayout(names);
 }
 

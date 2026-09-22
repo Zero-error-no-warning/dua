@@ -673,8 +673,13 @@ final class ScriptCallable : CallableValue
     private ScopeLayout scopeLayout;
 
     this(string name, ScriptEngine engine, Environment closure, string[] parameters, bool variadic,
-        Statement[] body, string[] parameterTypes = null, string returnType = "",
-        ScopeLayout scopeLayout = null)
+        Statement[] body, string[] parameterTypes = null, string returnType = "")
+    {
+        this(name, engine, closure, parameters, variadic, body, parameterTypes, returnType, null);
+    }
+
+    package(dua) this(string name, ScriptEngine engine, Environment closure, string[] parameters,
+        bool variadic, Statement[] body, string[] parameterTypes, string returnType, ScopeLayout scopeLayout)
     {
         super(name);
         this.engine = engine;
