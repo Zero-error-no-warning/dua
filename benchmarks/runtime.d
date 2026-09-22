@@ -75,6 +75,31 @@ void main(string[] arguments)
             }
             return sum;
         }
+        int localLoop(int n) {
+            auto i = 0;
+            auto sum = 0;
+            while (i < n) { sum += i; i += 1; }
+            return sum;
+        }
+        int closureCalls(int n) {
+            auto sum = 0;
+            auto add = (int value) { sum += value; };
+            for (auto i = 0; i < n; i += 1) { add(i); }
+            return sum;
+        }
+        int fib(int n) {
+            if (n < 2) { return n; }
+            return fib(n - 1) + fib(n - 2);
+        }
+        int recursiveCalls(int n) { return fib(n); }
+        int scopeDeclarations(int n) {
+            auto sum = 0;
+            for (auto i = 0; i < n; i += 1) {
+                auto a = i; auto b = a + 1; auto c = b + 1; auto d = c + 1;
+                sum += a + b + c + d;
+            }
+            return sum;
+        }
         int increment(int n) { return n + 1; }
         int ufcsCalls(int n) {
             auto value = 0;
@@ -149,6 +174,10 @@ void main(string[] arguments)
         measure(engine, "stringKeys", count, count * (count - 1) / 2);
     }
     measure(engine, "scopedLoop", 10_000, 49_995_000);
+    measure(engine, "localLoop", 20_000, 199_990_000);
+    measure(engine, "closureCalls", 5_000, 12_497_500);
+    measure(engine, "recursiveCalls", 18, 2_584);
+    measure(engine, "scopeDeclarations", 5_000, 50_020_000);
     measure(engine, "ufcsCalls", 5_000, 5_000);
     measure(engine, "hostOverloads", 5_000, 5_000);
     measure(engine, "manyArguments", 2_000, 72_000);
