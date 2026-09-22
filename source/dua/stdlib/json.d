@@ -28,8 +28,9 @@ private JSONValue toJsonValue(const Value value)
             return JSONValue(value.stringValue);
         case ValueKind.array:
             JSONValue[] items;
-            foreach (item; value.arrayValue)
-                items ~= toJsonValue(item);
+            items.length = value.arrayValue.length;
+            foreach (index, item; value.arrayValue)
+                items[index] = toJsonValue(item);
             return JSONValue(items);
         case ValueKind.table:
         case ValueKind.struct_:

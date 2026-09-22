@@ -368,9 +368,7 @@ private struct Parser
                 }
                 else
                 {
-                    auto init = locatedStatement(Statement.Kind.expression, peek());
-                    init.expression = parseExpression();
-                    statement.init = init;
+                    statement.init = parseForIncrementStatement();
                 }
             }
             consume(TokenKind.semicolon, "Expected ';' after for initializer");
@@ -456,12 +454,15 @@ private struct Parser
         {
             targets.put(parseExpression());
         }
-        if (match(TokenKind.equal))
+        if (match(TokenKind.equal, TokenKind.compoundAssign))
         {
             auto statement = locatedStatement(Statement.Kind.assign, previous());
+            setAssignmentOperator(statement, previous(), targets.data);
             statement.targets = targets.data;
             statement.target = statement.targets[0];
             statement.expressions = parseExpressionList();
+            enforce(!statement.assignmentOperator.length || statement.expressions.length == 1,
+                "Compound assignment requires a single right-hand expression");
             statement.expression = statement.expressions[0];
             consume(TokenKind.semicolon, "Expected ';' after assignment");
             return statement;
@@ -548,9 +549,10 @@ private struct Parser
     Statement parseForIncrementStatement()
     {
         auto target = parseExpression();
-        if (match(TokenKind.equal))
+        if (match(TokenKind.equal, TokenKind.compoundAssign))
         {
             auto statement = locatedStatement(Statement.Kind.assign, previous());
+            setAssignmentOperator(statement, previous(), [target]);
             statement.target = target;
             statement.targets = [target];
             statement.expression = parseExpression();
@@ -1270,12 +1272,13 @@ private struct Parser
     Statement[] parseImplicitSubroutineBody()
     {
         auto target = parseExpression();
-        if (!match(TokenKind.equal))
+        if (!match(TokenKind.equal, TokenKind.compoundAssign))
         {
             return makeImplicitSubroutineBody(target);
         }
 
         auto assignment = locatedStatement(Statement.Kind.assign, previous());
+        setAssignmentOperator(assignment, previous(), [target]);
         assignment.target = target;
         assignment.targets = [target];
         assignment.expression = parseExpression();
@@ -1283,6 +1286,18 @@ private struct Parser
 
         auto returnStatement = locatedStatement(Statement.Kind.return_, previous());
         return [assignment, returnStatement];
+    }
+
+    void setAssignmentOperator(Statement statement, Token token, Expression[] targets)
+    {
+        if (token.kind != TokenKind.compoundAssign) return;
+        enforce(targets.length == 1,
+            format("Compound assignment requires a single target at %s:%s", token.line, token.column));
+        auto target = targets[0];
+        enforce(target.kind == Expression.Kind.variable || target.kind == Expression.Kind.get
+            || (target.kind == Expression.Kind.index && !(cast(IndexExpression) target).isSlice),
+            format("Invalid compound assignment target at %s:%s", target.line, target.column));
+        statement.assignmentOperator = token.lexeme[0 .. $ - 1];
     }
 
     bool scanType(ref size_t cursor) const

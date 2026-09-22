@@ -136,16 +136,37 @@ final class OverloadedReflectedCallable : CallableValue
                 ambiguous = true;
             }
         }
-        string[] allowed;
-        foreach (overload; overloads)
-            allowed ~= overload.arityDescription();
         enforce(match !is null,
             format("Function '%s' has no overload matching %s arguments (allowed: %s)",
-                debugName, args.length, allowed.join(", ")));
+                debugName, args.length, allowedArities()));
         enforce(!ambiguous,
             format("Function '%s' has multiple matching overloads for %s arguments", debugName, args.length));
         return match.invoke(args);
     }
+
+    // enforce evaluates its message lazily; successful calls need no strings.
+    private string allowedArities() const
+    {
+        string[] allowed;
+        foreach (overload; overloads) allowed ~= overload.arityDescription();
+        return allowed.join(", ");
+    }
+}
+
+unittest
+{
+    auto one = new ReflectedCallable("select", 1, args => args[0]);
+    auto two = new ReflectedCallable("select", 2, args => args[1]);
+    auto callable = new OverloadedReflectedCallable("select", [one, two]);
+    assert(callable.invoke([Value.from(10)]).toInt() == 10);
+    assert(callable.invoke([Value.from(10), Value.from(20)]).toInt() == 20);
+    try { callable.invoke([]); assert(0); }
+    catch (Exception error)
+        assert(error.msg == "Function 'select' has no overload matching 0 arguments (allowed: 1, 2)");
+    auto ambiguous = new OverloadedReflectedCallable("select", [one, one]);
+    try { ambiguous.invoke([Value.from(10)]); assert(0); }
+    catch (Exception error)
+        assert(error.msg == "Function 'select' has multiple matching overloads for 1 arguments");
 }
 
 private final class ReflectedStructStorage(T)
@@ -218,11 +239,115 @@ struct AssociativeEntry
     Value value;
 }
 
+// Only scalar keys have an equality relation that can be indexed without
+// invoking host code. Keep their kind in the key: 1, 1.0 and true are distinct.
+private struct ScalarAssociativeKey
+{
+    ValueKind kind;
+    long bits;
+    string text;
+
+    size_t toHash() const nothrow @safe
+    {
+        return kind == ValueKind.string_ ? hashOf(text, hashOf(kind))
+            : hashOf(bits, hashOf(kind));
+    }
+
+    static bool fromValue(const ref Value value, out ScalarAssociativeKey key)
+    {
+        key.kind = value.kind;
+        switch (value.kind)
+        {
+            case ValueKind.null_:
+                return true;
+            case ValueKind.integer:
+                key.bits = value.integerValue;
+                return true;
+            case ValueKind.boolean:
+                key.bits = value.booleanValue;
+                return true;
+            case ValueKind.string_:
+                key.text = value.stringValue;
+                return true;
+            case ValueKind.floating:
+                // Equality treats both signed zeros alike. NaN and infinity
+                // cannot be stored, and retain the linear lookup behavior.
+                if (!isFinite(value.floatingValue)) return false;
+                union FloatingBits { double number; long bits; }
+                FloatingBits representation;
+                representation.number = value.floatingValue == 0 ? 0.0 : value.floatingValue;
+                key.bits = representation.bits;
+                return true;
+            default:
+                return false;
+        }
+    }
+}
+
 private final class AssociativeStorage
 {
     string keyType;
     string valueType;
     AssociativeEntry[] entries;
+
+    // Entries remain in insertion order for iteration, snapshots and printing.
+    // Small maps avoid allocating a second data structure. Aggregate keys keep
+    // their existing structural/custom equality and comparison order.
+    private enum indexThreshold = 8;
+    private bool indexed;
+    private size_t[ScalarAssociativeKey] scalarPositions;
+
+    size_t find(Value key) const
+    {
+        ScalarAssociativeKey scalar;
+        if (indexed && ScalarAssociativeKey.fromValue(key, scalar))
+        {
+            auto position = scalar in scalarPositions;
+            return position is null ? size_t.max : *position;
+        }
+        foreach (index, entry; entries)
+            if (associativeKeysEqual(cast(Value) entry.key, key)) return index;
+        return size_t.max;
+    }
+
+    void set(Value key, Value value)
+    {
+        auto index = find(key);
+        if (index != size_t.max)
+        {
+            entries[index].value = value.valueCopy();
+            return;
+        }
+        entries ~= AssociativeEntry(key.keyCopy(), value.valueCopy());
+        ScalarAssociativeKey scalar;
+        if (indexed)
+        {
+            if (ScalarAssociativeKey.fromValue(entries[$ - 1].key, scalar))
+                scalarPositions[scalar] = entries.length - 1;
+        }
+        else if (entries.length >= indexThreshold)
+        {
+            foreach (position, entry; entries)
+                if (ScalarAssociativeKey.fromValue(entry.key, scalar))
+                    scalarPositions[scalar] = position;
+            indexed = true;
+        }
+    }
+
+    bool remove(Value key)
+    {
+        auto index = find(key);
+        if (index == size_t.max) return false;
+        entries = entries[0 .. index] ~ entries[index + 1 .. $];
+        if (indexed)
+        {
+            ScalarAssociativeKey scalar;
+            if (ScalarAssociativeKey.fromValue(key, scalar)) scalarPositions.remove(scalar);
+            foreach (ref position; scalarPositions)
+                if (position > index) --position;
+        }
+        return true;
+    }
 }
 
 struct Value
@@ -255,27 +380,17 @@ struct Value
 
     package(dua) size_t associativeIndex(Value key) const
     {
-        foreach (index, entry; associativeStorage.entries)
-            if (associativeKeysEqual(cast(Value) entry.key, key)) return index;
-        return size_t.max;
+        return associativeStorage.find(key);
     }
 
     package(dua) void associativeSet(Value key, Value value)
     {
-        auto index = associativeIndex(key);
-        if (index == size_t.max)
-            associativeStorage.entries ~= AssociativeEntry(key.keyCopy(), value.valueCopy());
-        else
-            associativeStorage.entries[index].value = value.valueCopy();
+        associativeStorage.set(key, value);
     }
 
     package(dua) bool associativeRemove(Value key)
     {
-        auto index = associativeIndex(key);
-        if (index == size_t.max) return false;
-        associativeStorage.entries = associativeStorage.entries[0 .. index]
-            ~ associativeStorage.entries[index + 1 .. $];
-        return true;
+        return associativeStorage.remove(key);
     }
 
     /// Keys own their value contents; exposing a key never exposes stored data.
@@ -364,7 +479,18 @@ struct Value
     {
         Value result;
         result.kind = ValueKind.array;
-        foreach (value; values) result.arrayValue ~= value.valueCopy();
+        result.arrayValue = copyValues(values);
+        return result;
+    }
+
+    // The caller relinquishes an unexposed scratch array. Copying elements at
+    // the same language boundary preserves reflected-copy effects and order.
+    package(dua) static Value fromOwnedArray(Value[] values)
+    {
+        foreach (ref value; values) value = value.valueCopy();
+        Value result;
+        result.kind = ValueKind.array;
+        result.arrayValue = values;
         return result;
     }
 
@@ -389,18 +515,102 @@ struct Value
     Value valueCopy() const
     {
         if (kind != ValueKind.struct_) return cast(Value) this;
+        return copyStructValue();
+    }
+
+    // Keep valueCopy's scalar/reference fast path small enough to inline in
+    // container loops; struct copying has its own, much less frequent path.
+    private Value copyStructValue() const
+    {
         if (tableStorage !is null && tableStorage.copier !is null)
             return tableStorage.copier();
+        // The old two-pass construction copies nested structs twice per level.
+        // Pure script data can avoid repeated copies once field ordering is
+        // stable. Reflected descendants keep their original callback sequence.
+        if (!needsOriginalStructCopy())
+        {
+            bool stable;
+            return copyPlainStruct(stable);
+        }
         Value[string] copied;
         foreach (key, value; tableValue) copied[key] = value.valueCopy();
         auto result = Value.fromStruct(copied);
+        copyStructMetadataTo(result);
+        return result;
+    }
+
+    private bool needsOriginalStructCopy() const
+    {
+        if (kind != ValueKind.struct_) return false;
+        if (tableStorage !is null && tableStorage.copier !is null) return true;
+        // Checking/rebuilding the order of a wide hash table can cost more
+        // than it saves. Keep the original path for those trees.
+        if (tableValue.length > 8) return true;
+        foreach (value; tableValue)
+            if (value.needsOriginalStructCopy()) return true;
+        return false;
+    }
+
+    private static bool sameFieldOrder(const(Value[string]) left, const(Value[string]) right)
+    {
+        if (left.length <= 1) return true; // Both maps have exactly the same keys.
+        auto names = left.byKey;
+        foreach (name; right.byKey)
+        {
+            if (name != names.front) return false;
+            names.popFront();
+        }
+        return true;
+    }
+
+    // Only used after checking the whole copy tree for callbacks. The output
+    // flag says whether another copy can change this result's field order.
+    private Value copyPlainStruct(out bool stable) const
+    {
+        Value[string] first;
+        bool childrenStable = true;
+        foreach (name, value; tableValue)
+        {
+            if (value.kind == ValueKind.struct_)
+            {
+                bool childStable;
+                first[name] = value.copyPlainStruct(childStable);
+                childrenStable = childrenStable && childStable;
+            }
+            else first[name] = cast(Value) value;
+        }
+        Value result;
+        result.kind = ValueKind.struct_;
+        result.tableStorage = new TableStorage();
+        if (childrenStable && sameFieldOrder(tableValue, first))
+        {
+            result.tableStorage.entries = first;
+            stable = true;
+        }
+        else
+        {
+            // Hash-table reinsertion can change display/iteration order. Keep
+            // the second pass, including recursive copies of unstable children.
+            foreach (name, value; first)
+            {
+                bool childStable;
+                result.tableStorage.entries[name] = !childrenStable && value.kind == ValueKind.struct_
+                    ? value.copyPlainStruct(childStable) : value;
+            }
+            stable = childrenStable && sameFieldOrder(first, result.tableStorage.entries);
+        }
+        copyStructMetadataTo(result);
+        return result;
+    }
+
+    private void copyStructMetadataTo(ref Value result) const
+    {
         result.setTypeChain(cast(Value[]) typeChain);
         result.setAliasThisMetadata(cast(Value[]) aliasThisTargets,
             cast(Value[]) aliasThisChain);
         if (tableStorage !is null)
             result.setPropertyMetadata(cast(Value[string]) tableStorage.propertyGetters,
                 cast(Value[string]) tableStorage.propertySetters);
-        return result;
     }
 
     package(dua) const(Value[]) typeChain() const
@@ -498,11 +708,7 @@ struct Value
         enforce(member.kind == ValueKind.function_,
             format("Module export '%s' is not callable", functionName));
 
-        Value[] copiedArgs;
-        foreach (arg; args)
-        {
-            copiedArgs ~= cast(Value) arg;
-        }
+        auto copiedArgs = (cast(Value[]) args).dup;
         return member.functionValue.invoke(copiedArgs);
     }
 
@@ -528,11 +734,12 @@ struct Value
         if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
     {
         Value[] converted;
-        foreach (ref value; values)
+        converted.length = values.length;
+        foreach (index, ref value; values)
         {
-            converted ~= convertToValue(value);
+            converted[index] = convertToValue(value);
         }
-        return Value.from(converted);
+        return Value.fromOwnedArray(converted);
     }
 
     static Value from(T)(T entries)
@@ -1488,8 +1695,9 @@ private Value convertToTypedValue(T)(auto ref T value)
     else static if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
     {
         Value[] elements;
-        foreach (element; value) elements ~= convertToTypedValue(element);
-        return Value.from(elements);
+        elements.length = value.length;
+        foreach (index, element; value) elements[index] = convertToTypedValue(element);
+        return Value.fromOwnedArray(elements);
     }
     else
     {
@@ -1968,6 +2176,91 @@ private T convertAssociativeKey(T)(const Value value)
     else static if (isFloatingPoint!T)
         enforce(value.isNumber, "Expected numeric associative array key");
     return convertFromValue!T(value);
+}
+
+package(dua) Value[] copyValues(scope const(Value)[] values)
+{
+    Value[] result;
+    result.length = values.length;
+    foreach (index, value; values) result[index] = value.valueCopy();
+    return result;
+}
+
+unittest
+{
+    Value[] original;
+    int[] order;
+    auto first = Value.fromStruct(null);
+    auto second = Value.fromStruct(null);
+    first.tableStorage.copier = () {
+        order ~= 1;
+        original[1] = Value.from(99);
+        return Value.fromStruct(["value": Value.from(10)]);
+    };
+    second.tableStorage.copier = () {
+        order ~= 2;
+        return Value.fromStruct(["value": Value.from(20)]);
+    };
+    original = [first, second];
+    auto copied = Value.from(original);
+    assert(order == [1] && copied.arrayValue[1].toInt() == 99);
+    original = [first, second];
+    order = null;
+    // Private scratch storage must preserve the snapshot taken before copying.
+    auto owned = Value.fromOwnedArray(original.dup);
+    assert(order == [1, 2] && original[1].toInt() == 99);
+    assert(owned.arrayValue[0].tableValue["value"].toInt() == 10);
+    assert(owned.arrayValue[1].tableValue["value"].toInt() == 20);
+}
+
+unittest
+{
+    auto leaf = Value.fromStruct(null);
+    size_t copies;
+    leaf.tableStorage.copier = () { ++copies; return leaf; };
+    auto middle = Value.fromStruct(["child": leaf]);
+    auto root = Value.fromStruct(["child": middle]);
+    copies = 0;
+    auto copied = root.valueCopy();
+    assert(copies == 4); // Two passes at each of the two script-struct levels.
+    assert(copied.kind == ValueKind.struct_);
+    assert(copied.tableStorage !is root.tableStorage);
+    assert(copied.tableValue["child"].tableStorage !is middle.tableStorage);
+    copies = 0;
+    leaf.tableStorage.copier = () {
+        if (++copies == 2) throw new Exception("copy failed");
+        return leaf;
+    };
+    try { root.valueCopy(); assert(0); }
+    catch (Exception error) assert(error.msg == "copy failed" && copies == 2);
+}
+
+unittest
+{
+    // Keep the observable hash iteration/display order of the two-pass copier.
+    Value originalCopy(Value value)
+    {
+        if (value.kind != ValueKind.struct_) return value;
+        Value[string] first;
+        foreach (name, field; value.tableValue) first[name] = originalCopy(field);
+        auto result = Value.fromStruct(null);
+        foreach (name, field; first) result.tableValue[name] = originalCopy(field);
+        return result;
+    }
+    foreach (fieldCount; [2, 4, 8, 40])
+    foreach (seed; 1 .. 41)
+    {
+        auto value = Value.fromStruct(null);
+        foreach (i; 0 .. fieldCount)
+            value.tableValue["field" ~ convTo!string((i * seed) % 53)] = Value.from(i);
+        foreach (_; 0 .. 3)
+        {
+            auto parent = Value.fromStruct(null);
+            parent.tableValue["child"] = value;
+            value = parent;
+        }
+        assert(value.valueCopy().toHostString() == originalCopy(value).toHostString());
+    }
 }
 
 private bool associativeKeysEqual(Value left, Value right)

@@ -4,6 +4,8 @@ import dua.ast;
 public import dua.binding;
 import dua.coroutine;
 import dua.evaluator;
+import dua.scope_layout;
+import dua.scope_planner;
 public import dua.execution;
 import dua.lexer : lex;
 import dua.module_system : ModuleImplementation;
@@ -469,6 +471,153 @@ unittest
 unittest
 {
     auto engine = new ScriptEngine();
+    auto result = engine.run(q{
+        auto number = 20;
+        number += 2 * 3;
+        number -= 6;
+        number *= 3;
+        number /= 8;
+        auto quotient = number;
+        number %= 4;
+        number <<= 3;
+        number >>= 1;
+        number &= 10;
+        number |= 1;
+        number ^= 3;
+        auto text = "answer";
+        text ~= 42;
+        auto items = [1];
+        auto original = items;
+        items ~= [2, 3];
+        return quotient == 7.5 && number == 10 && text == "answer42"
+            && length(items) == 3 && items[2] == 3 && length(original) == 1;
+    });
+    assert(result.booleanValue);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    assert(engine.run(q{
+        auto total = 0;
+        for (auto i = 0; i < 4; i += 1) {
+            if (i == 2) continue;
+            total += i;
+        }
+        auto j = 0;
+        for (j += 1; j < 3; j += 1) total += j;
+        auto add = (int amount) :> total += amount;
+        add(5);
+        return total;
+    }).toInt() == 12);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    assert(engine.run(q{
+        auto calls = 0;
+        auto indices = 0;
+        auto rhsCalls = 0;
+        auto items = [10, 20];
+        auto saved = items;
+        auto receiver = () { calls += 1; return items; };
+        auto index = () { indices += 1; return 1; };
+        auto rhs = () { rhsCalls += 1; items = [99]; return 3; };
+        receiver()[index()] += rhs();
+        saved[$ - 1] *= 2;
+        auto box = { value = 5 };
+        auto getBox = () { calls += 1; return box; };
+        getBox().value += 7;
+        getBox()["value"] -= 2;
+        int[string] scores = ["alice": 8];
+        scores["alice"] *= 3;
+        struct Point { int x; }
+        auto point = Point(4);
+        point.x += 6;
+        auto lengths = 0;
+        auto reads = 0;
+        auto writes = 0;
+        auto stored = 6;
+        auto proxy = {};
+        setmetatable(proxy, {
+            __len = (any self) { lengths += 1; return 1; },
+            __index = (any self, any key) { reads += 1; return stored; },
+            __newindex = (any self, any key, any value) { writes += 1; stored = value; }
+        });
+        proxy[$ - 1] += 4;
+        return calls == 3 && indices == 1 && rhsCalls == 1
+            && saved[1] == 46 && items[0] == 99 && box.value == 10
+            && scores["alice"] == 24 && point.x == 10
+            && lengths == 1 && reads == 1 && writes == 1 && stored == 10;
+    }).booleanValue);
+}
+
+unittest
+{
+    final class CompoundProperty
+    {
+        int stored = 7;
+        int reads;
+        int writes;
+        int value() { ++reads; return stored; }
+        void value(int next) { ++writes; stored = next; }
+    }
+    auto property = new CompoundProperty();
+    auto engine = new ScriptEngine();
+    engine.bindAuto("property", property);
+    engine.run("property.value *= 3;");
+    assert(property.stored == 21 && property.reads == 1 && property.writes == 1);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.bindAuto("reflected", OverloadedBinaryFixture(10));
+    assert(engine.run(q{
+        reflected.value += 5;
+        reflected += 2;
+        auto box = { value = 10, "opBinary+" = (any self, int rhs) => self.value + rhs };
+        box += 3;
+        return reflected == 17 && box == 13;
+    }).booleanValue);
+
+    foreach (source; ["1 += 2;", "auto a = [1]; a[0..1] += [2];",
+        "auto a, b = 1, 2; a, b += 3;", "auto a = 1; a += 2, 3;",
+        "auto a = 1; return a += 2;", "missing += 1;",
+        "auto a = [1]; a[2] += 1;", "int[string] a = [:]; a[\"missing\"] += 1;"])
+        assert(!engine.runSafe(source).ok, source);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    RunOptions options;
+    options.typeCheck = true;
+    assert(engine.run(q{
+        int count = 1;
+        count += 2;
+        double fraction = 9.0;
+        fraction /= 2;
+        string text = "n=";
+        text ~= count;
+        int[] items = [1];
+        items ~= [2];
+        int[string] scores = ["alice": 3];
+        scores["alice"] += count;
+        for (auto i = 0; i < 2; i += 1) count += i;
+        return count == 4 && fraction == 4.5 && text == "n=3"
+            && items[1] == 2 && scores["alice"] == 6;
+    }, options).booleanValue);
+    assert(engine.check("int n = 1; n ~= 2;").length == 1);
+    assert(engine.check("int n = 1; n /= 2;").length == 1);
+    assert(engine.check("int[] a = [1]; a[0] ~= 2;").length == 1);
+    assert(engine.check("for (auto i = 0; i < 2; i ~= 1) {}").length == 1);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
     RunOptions options;
     options.sourceName = "worker.dua";
     auto loaded = engine.loadSafe(q{
@@ -486,6 +635,31 @@ unittest
     assert(resumed.arrayValue[1].toHostString().canFind("@ worker.dua:"));
 }
 
+unittest
+{
+    auto engine = new ScriptEngine();
+    engine.load(`int offset(int value) { return value + 1; }`);
+    assert(engine.run(q{
+        auto value = 2;
+        auto first = value.offset();
+        auto offset = (int v) => v + 10;
+        auto second = value.offset();
+        offset = (int v) => v + 20;
+        auto third = value.offset();
+        auto fourth = 0;
+        { auto offset = 100; fourth = value.offset(); }
+        auto fifth = value.offset();
+        auto receiver = { offset = (int v) => v + 30 };
+        return [first, second, third, fourth, fifth, receiver.offset(2)];
+    }).to!(long[])() == [3, 12, 22, 3, 22, 32]);
+    auto moduleHandle = engine.newModule("ufcs.scope");
+    moduleHandle.load(`int offset(int value) { return value + 100; }`);
+    assert(moduleHandle.run(`auto value = 2; return value.offset();`).toInt() == 102);
+    assert(moduleHandle.run(`auto offset = false; auto value = 2; return value.offset();`).toInt() == 3);
+    assert(!engine.runSafe(`auto receiver = { offset = 0 }; return receiver.offset();`).ok);
+    assert(!engine.runSafe(`auto value = 2; return value.missing();`).ok);
+}
+
 final class ScriptCallable : CallableValue
 {
     private ScriptEngine engine;
@@ -496,9 +670,16 @@ final class ScriptCallable : CallableValue
     private string[] parameterTypes;
     private string returnType;
     private string sourceName;
+    private ScopeLayout scopeLayout;
 
     this(string name, ScriptEngine engine, Environment closure, string[] parameters, bool variadic,
         Statement[] body, string[] parameterTypes = null, string returnType = "")
+    {
+        this(name, engine, closure, parameters, variadic, body, parameterTypes, returnType, null);
+    }
+
+    package(dua) this(string name, ScriptEngine engine, Environment closure, string[] parameters,
+        bool variadic, Statement[] body, string[] parameterTypes, string returnType, ScopeLayout scopeLayout)
     {
         super(name);
         this.engine = engine;
@@ -509,6 +690,7 @@ final class ScriptCallable : CallableValue
         this.parameterTypes = parameterTypes.dup;
         this.returnType = returnType;
         this.sourceName = engine.evaluatorContext.sourceName;
+        this.scopeLayout = scopeLayout is null ? planScope(this.body, ["this"] ~ this.parameters) : scopeLayout;
     }
 
     override Value invoke(Value[] args)
@@ -536,7 +718,7 @@ final class ScriptCallable : CallableValue
                 format("Function '%s' expected %s arguments but got %s", debugName, parameters.length, args.length));
         }
 
-        auto environment = new Environment(closure);
+        auto environment = new Environment(closure, scopeLayout);
         if (engine.hasThisContext())
         {
             environment.define("this", engine.currentThisContext());
@@ -593,6 +775,9 @@ final class ScriptCallable : CallableValue
 final class ScriptEngine
 {
     private Environment globals;
+    // Cache only immutable registry-name spellings, never mutable definitions
+    // or negative lookups. Host bindings and script metadata remain observable.
+    private string[string] typeRegistryNames;
     mixin ModuleImplementation;
     mixin CoroutineImplementation;
     private EvaluatorContext evaluatorContext;
@@ -622,7 +807,7 @@ final class ScriptEngine
         context.mapValue = (args) => mapValue(args);
         context.filterValue = (args) => filterValue(args);
         context.tableKeyToScriptValue = (key) => tableKeyToScriptValue(key);
-        context.traceback = () => evaluatorContext.callStack.join("\n");
+        context.traceback = () => evaluatorContext.callStack.view.join("\n");
         context.getGlobal = (name) => globals.get(name);
         return context;
     }
@@ -689,11 +874,7 @@ final class ScriptEngine
             }
             if (matchedConstructor !is null)
             {
-                Value[] copiedArgs;
-                foreach (arg; userArgs)
-                {
-                    copiedArgs ~= cast(Value) arg;
-                }
+                auto copiedArgs = (cast(Value[]) userArgs).dup;
                 return matchedConstructor.invoke(copiedArgs);
             }
 
@@ -1001,11 +1182,7 @@ final class ScriptEngine
     private Value callInModule(ModuleHandle handle, string functionName, scope const(Value)[] args)
     {
         auto callable = handle.get(functionName);
-        Value[] copiedArgs;
-        foreach (arg; args)
-        {
-            copiedArgs ~= cast(Value) arg;
-        }
+        auto copiedArgs = (cast(Value[]) args).dup;
         return invokeFunctionValue(callable, copiedArgs);
     }
 
@@ -1014,7 +1191,7 @@ final class ScriptEngine
         auto previousSource = evaluatorContext.sourceName;
         evaluatorContext.sourceName = options.sourceName;
         scope (exit) evaluatorContext.sourceName = previousSource;
-        evaluatorContext.callStack.length = 0;
+        evaluatorContext.callStack.clear();
         evaluatorContext.lastErrorStack.length = 0;
         evaluatorContext.currentRunOptions = options;
         evaluatorContext.executedSteps = 0;
@@ -1030,6 +1207,7 @@ final class ScriptEngine
                         typeDiagnostics[0].line, typeDiagnostics[0].column, typeDiagnostics[0].message));
             }
             auto program = parse(lex(source));
+            if (!environment.hasStorage()) environment.reserveSlots(planScope(program.statements));
             auto result = executeStatements(program.statements, environment);
             outcome.ok = true;
             outcome.value = result.lastValue;
@@ -1041,7 +1219,7 @@ final class ScriptEngine
         {
             outcome.ok = false;
             outcome.errorMessage = withSourceContext(error, options.sourceName).msg;
-            outcome.stackTrace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack.dup : evaluatorContext.callStack.dup;
+            outcome.stackTrace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack.dup : evaluatorContext.callStack.snapshot();
             outcome.errorKind = cast(StepLimitException) error !is null
                 ? RunErrorKind.stepLimit
                 : cast(CallDepthLimitException) error !is null
@@ -1072,7 +1250,7 @@ final class ScriptEngine
             Value[] typeChain = [Value.from(statement.name)];
             foreach (baseName; statement.names)
             {
-                auto base = globals.find("__dua_type_" ~ baseName);
+                auto base = findTypeDefinition(baseName);
                 enforce(base !is null && base.kind == ValueKind.table
                     && base.tableValue["isTable"].truthy(),
                     format("Base type '%s' must be a previously declared table type", baseName));
@@ -1152,10 +1330,33 @@ final class ScriptEngine
         globals.define(typeName, constructor);
     }
 
+    private Value* findTypeDefinition(string name)
+    {
+        // Common spellings need neither concatenation nor a cache lookup.
+        // Still consult globals: even these registry entries can be rebound.
+        switch (name)
+        {
+            static foreach (builtin; ["", "auto", "any", "void", "null", "bool",
+                "byte", "ubyte", "short", "ushort", "int", "uint", "long", "ulong",
+                "float", "double", "real", "string", "array", "table", "associativeArray"])
+            {
+                case builtin: return globals.find("__dua_type_" ~ builtin);
+            }
+            default: break;
+        }
+        auto registryName = name in typeRegistryNames;
+        if (registryName is null)
+        {
+            typeRegistryNames[name] = "__dua_type_" ~ name;
+            registryName = name in typeRegistryNames;
+        }
+        return globals.find(*registryName);
+    }
+
     private string resolveContainerType(string name, size_t depth = 0)
     {
         enforce(depth < 64, "Cyclic or excessively nested container type");
-        if (auto definition = globals.find("__dua_type_" ~ name))
+        if (auto definition = findTypeDefinition(name))
             if (!definition.tableValue["isTable"].truthy())
             {
                 auto alternatives = definition.tableValue["alternatives"].arrayValue;
@@ -1164,8 +1365,12 @@ final class ScriptEngine
             }
         string element, key;
         if (splitContainerType(name, element, key))
-            return resolveContainerType(element, depth + 1) ~ "["
-                ~ (key.length ? resolveContainerType(key, depth + 1) : "") ~ "]";
+        {
+            auto resolvedElement = resolveContainerType(element, depth + 1);
+            auto resolvedKey = key.length ? resolveContainerType(key, depth + 1) : "";
+            if (resolvedElement != element || resolvedKey != key)
+                return resolvedElement ~ "[" ~ resolvedKey ~ "]";
+        }
         return name;
     }
 
@@ -1178,13 +1383,14 @@ final class ScriptEngine
         {
             enforce(value.kind == ValueKind.array, "Expected array for " ~ typeName);
             Value[] elements;
-            foreach (element; value.arrayValue)
+            elements.length = value.arrayValue.length;
+            foreach (index, element; value.arrayValue)
             {
                 auto prepared = prepareContainerValue(element, elementType);
                 enforce(valueMatchesType(prepared, elementType), "Array element expected " ~ elementType);
-                elements ~= prepared;
+                elements[index] = prepared;
             }
-            return Value.from(elements);
+            return Value.fromOwnedArray(elements);
         }
         // [] may initialize an empty typed AA; {} remains a distinct table.
         if (value.kind == ValueKind.array && value.arrayValue.length == 0)
@@ -1250,7 +1456,7 @@ final class ScriptEngine
             default: break;
         }
 
-        auto definition = globals.find("__dua_type_" ~ typeName);
+        auto definition = findTypeDefinition(typeName);
         if (definition is null)
         {
             if (value.isFieldAggregate)
@@ -1281,7 +1487,7 @@ final class ScriptEngine
 
     private bool valueIsType(Value value, string typeName)
     {
-        auto definition = globals.find("__dua_type_" ~ typeName);
+        auto definition = findTypeDefinition(typeName);
         if (definition is null) return valueMatchesType(value, typeName);
         if (!definition.tableValue["isTable"].truthy())
         {

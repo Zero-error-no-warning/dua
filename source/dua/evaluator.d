@@ -14,8 +14,8 @@ import dua.ast;
 import dua.execution;
 import dua.value;
 import dua.type_syntax;
-import std.algorithm : map;
-import std.array : array;
+import dua.scope_layout;
+import dua.scope_planner;
 import std.conv : to;
 import std.exception : enforce;
 import std.format : format;
@@ -32,15 +32,52 @@ package final class ScriptThrownException : SourceException
     }
 }
 
+// Stack storage is private to evaluation. Keep capacity across pops, and clear
+// inactive slots so receivers and closures are not retained by the GC.
+package(dua) struct EvaluationStack(T)
+{
+    private T[] storage;
+    private size_t count;
+
+    size_t length() const { return count; }
+
+    void push(T value)
+    {
+        if (count == storage.length) storage.length = count == 0 ? 8 : count * 2;
+        storage[count++] = value;
+    }
+
+    void pop()
+    {
+        assert(count > 0);
+        storage[--count] = T.init;
+    }
+
+    void clear()
+    {
+        storage[0 .. count] = T.init;
+        count = 0;
+    }
+
+    const(T) top() const
+    {
+        assert(count > 0);
+        return storage[count - 1];
+    }
+
+    const(T)[] view() const { return storage[0 .. count]; }
+    T[] snapshot() { return storage[0 .. count].dup; }
+}
+
 /// Mutable state that belongs exclusively to evaluation of a run.
 /// Keeping it together prevents evaluator internals from becoming ScriptEngine API.
 struct EvaluatorContext
 {
     package string sourceName;
-    package string[] callStack;
+    package EvaluationStack!string callStack;
     package string[] lastErrorStack;
-    package long[] indexLengthStack;
-    package Value[] thisContextStack;
+    package EvaluationStack!long indexLengthStack;
+    package EvaluationStack!Value thisContextStack;
     package RunOptions currentRunOptions;
     package size_t executedSteps;
 }
@@ -48,62 +85,313 @@ struct EvaluatorContext
 final class Environment
 {
     Environment parent;
-    private Value[string] values;
-    private Value delegate(Value)[string] validators;
+    private struct Binding
+    {
+        Value value;
+        Value delegate(Value) validator;
+        bool defined;
+    }
+    private struct Storage
+    {
+        ScopeLayout layout;
+        Binding[] slots;
+        Binding[string] bindings;
+    }
+    private struct SmallStorage(size_t count)
+    {
+        Storage header;
+        Binding[count] values;
+    }
+    // Keep empty block environments as small as the original map-only frame.
+    private Storage* storage;
 
     this(Environment parent = null)
     {
         this.parent = parent;
     }
 
+    package(dua) this(Environment parent, ScopeLayout layout)
+    {
+        this.parent = parent;
+        reserveSlots(layout);
+    }
+
+    package(dua) bool hasStorage() const { return storage !is null; }
+
+    package(dua) void reserveSlots(ScopeLayout layout)
+    {
+        assert(storage is null);
+        // Never resize this array: public find() pointers must remain stable.
+        if (layout !is null && layout.length)
+        {
+            // Small call/block frames need one allocation for metadata and
+            // values together. Larger frames retain exact-size array storage.
+            allocate: switch (layout.length)
+            {
+                static foreach (count; 1 .. 9)
+                {
+                    case count:
+                    {
+                        auto block = new SmallStorage!count;
+                        storage = &block.header;
+                        storage.slots = block.values[];
+                        break allocate;
+                    }
+                }
+                default:
+                    storage = new Storage;
+                    storage.slots.length = layout.length;
+                    break;
+            }
+            storage.layout = layout;
+        }
+    }
+
     void define(string name, Value value, Value delegate(Value) validator = null)
     {
-        enforce((name in values) is null,
+        if (storage is null) storage = new Storage;
+        if (storage.layout !is null)
+        {
+            auto slot = storage.layout.find(name);
+            if (slot != size_t.max)
+            {
+                enforce(!storage.slots[slot].defined,
+                    format("Variable '%s' is already defined in this scope", name));
+                storage.slots[slot] = Binding(value.valueCopy(), validator, true);
+                return;
+            }
+        }
+        enforce((name in storage.bindings) is null,
             format("Variable '%s' is already defined in this scope", name));
-        values[name] = value.valueCopy();
-        if (validator !is null) validators[name] = validator;
+        storage.bindings[name] = Binding(value.valueCopy(), validator, true);
     }
 
     bool contains(string name) const
     {
-        return (name in values) !is null || (parent !is null && parent.contains(name));
+        import std.typecons : Rebindable;
+        for (auto environment = Rebindable!(const Environment)(this);
+            environment !is null; environment = environment.parent)
+        {
+            auto data = environment.storage;
+            if (data is null) continue;
+            if (data.layout !is null)
+            {
+                auto slot = data.layout.find(name);
+                if (slot != size_t.max && data.slots[slot].defined) return true;
+            }
+            if ((name in data.bindings) !is null) return true;
+        }
+        return false;
     }
 
     Value get(string name)
     {
-        if (auto value = name in values)
-        {
-            return *value;
-        }
-        if (parent !is null)
-        {
-            return parent.get(name);
-        }
+        if (auto value = find(name)) return *value;
         enforce(false, format("Undefined variable '%s'", name));
         assert(0);
     }
 
     Value* find(string name)
     {
-        if (auto value = name in values) return value;
-        return parent is null ? null : parent.find(name);
+        if (auto binding = findBinding(name)) return &binding.value;
+        return null;
+    }
+
+    private Binding* findBinding(string name)
+    {
+        for (auto environment = this; environment !is null; environment = environment.parent)
+        {
+            auto data = environment.storage;
+            if (data is null) continue;
+            if (data.layout !is null)
+            {
+                auto slot = data.layout.find(name);
+                if (slot != size_t.max && data.slots[slot].defined)
+                    return &data.slots[slot];
+            }
+            if (auto binding = name in data.bindings) return binding;
+        }
+        return null;
     }
 
     void assign(string name, Value value)
     {
-        if (auto slot = name in values)
+        if (auto binding = findBinding(name))
         {
-            if (auto validator = name in validators) value = (*validator)(value);
-            *slot = value.valueCopy();
-            return;
-        }
-        if (parent !is null)
-        {
-            parent.assign(name, value);
+            assignBinding(binding, value);
             return;
         }
         enforce(false, format("Cannot assign undefined variable '%s'", name));
     }
+
+    private static void assignBinding(Binding* binding, Value value)
+    {
+        if (binding.validator !is null) value = binding.validator(value);
+        binding.value = value.valueCopy();
+    }
+
+    package(dua) Value get(string name, ref VariableSlots cache)
+    {
+        if (auto binding = findBinding(name, cache)) return binding.value;
+        enforce(false, format("Undefined variable '%s'", name));
+        assert(0);
+    }
+
+    package(dua) void assign(string name, Value value, ref VariableSlots cache)
+    {
+        if (auto binding = findBinding(name, cache))
+        {
+            assignBinding(binding, value);
+            return;
+        }
+        enforce(false, format("Cannot assign undefined variable '%s'", name));
+    }
+
+    private Binding* findBinding(string name, ref VariableSlots cache)
+    {
+        // One-shot expressions need no path allocation. Resolve slots once the
+        // same reference is used again; changing a public AST name resets it.
+        if (cache.name !is name)
+        {
+            cache.name = name;
+            cache.steps = null;
+            return findBinding(name);
+        }
+        auto environment = this;
+        foreach (step; cache.steps)
+        {
+            // Public ASTs and Environment.parent may be reused or changed.
+            if (environment is null)
+                return resolveSlots(name, cache);
+            auto data = environment.storage;
+            if ((data is null ? null : data.layout) !is step.layout)
+                return resolveSlots(name, cache);
+            if (data !is null)
+            {
+                if (step.slot != size_t.max && data.slots[step.slot].defined)
+                    return &data.slots[step.slot];
+                if (data.bindings !is null)
+                    if (auto binding = name in data.bindings) return binding;
+            }
+            environment = environment.parent;
+        }
+        if (environment is null) return null;
+        return resolveSlots(name, cache);
+    }
+
+    private Binding* resolveSlots(string name, ref VariableSlots cache)
+    {
+        VariableSlots resolved;
+        resolved.name = name;
+        for (auto environment = this; environment !is null;
+            environment = environment.parent)
+        {
+            auto data = environment.storage;
+            auto layout = data is null ? null : data.layout;
+            auto slot = layout is null ? size_t.max : layout.find(name);
+            resolved.steps ~= VariableSlots.Step(layout, slot);
+            if (data !is null)
+            {
+                if (slot != size_t.max && data.slots[slot].defined)
+                {
+                    cache = resolved;
+                    return &data.slots[slot];
+                }
+                if (auto binding = name in data.bindings)
+                {
+                    cache = resolved;
+                    return binding;
+                }
+            }
+        }
+        cache = resolved;
+        return null;
+    }
+}
+
+unittest
+{
+    import std.exception : assertThrown;
+
+    auto root = new Environment();
+    int validations;
+    root.define("checked", Value.from(1), (Value next) {
+        ++validations;
+        enforce(next.kind == ValueKind.integer, "Expected integer");
+        return Value.from(next.toInt() * 2);
+    });
+    root.define("empty", Value.nullValue());
+    auto nested = root;
+    foreach (_; 0 .. 512) nested = new Environment(nested);
+    assert(nested.contains("empty") && !nested.contains("missing"));
+    assert(nested.find("checked") is root.find("checked"));
+    nested.assign("checked", Value.from(3));
+    assert(root.get("checked").toInt() == 6 && validations == 1);
+    assertThrown!Exception(nested.assign("checked", Value.from("invalid")));
+    assert(root.get("checked").toInt() == 6 && validations == 2);
+    nested.define("checked", Value.from(10));
+    nested.assign("checked", Value.from(11));
+    assert(nested.get("checked").toInt() == 11 && root.get("checked").toInt() == 6);
+    assert(validations == 2);
+    assertThrown!Exception(nested.define("checked", Value.from(12)));
+    assertThrown!Exception(nested.get("missing"));
+    assertThrown!Exception(nested.assign("missing", Value.from(1)));
+}
+
+unittest
+{
+    import std.exception : assertThrown;
+
+    auto layout = new ScopeLayout(["value", "checked", "empty"]);
+    auto outer = new Environment();
+    outer.define("value", Value.from(1));
+    auto first = new Environment(outer, layout);
+    VariableSlots cache;
+    assert(first.get("value", cache).toInt() == 1);
+    assert(!first.contains("checked"));
+    first.define("value", Value.from(2));
+    assert(first.get("value", cache).toInt() == 2);
+    auto pointer = first.find("value");
+    // Dynamic additions must neither move slots nor bypass closer bindings.
+    foreach (i; 0 .. 128) first.define("extra" ~ to!string(i), Value.from(i));
+    first.assign("value", Value.from(3), cache);
+    assert(pointer is first.find("value") && pointer.toInt() == 3);
+    auto second = new Environment(outer, layout);
+    assert(second.get("value", cache).toInt() == 1);
+    second.define("value", Value.from(4));
+    assert(second.get("value", cache).toInt() == 4);
+    auto otherLayout = new ScopeLayout(["empty", "value"]);
+    auto third = new Environment(outer, otherLayout);
+    third.define("empty", Value.from(99));
+    third.define("value", Value.from(5));
+    assert(third.get("value", cache).toInt() == 5);
+    auto child = new Environment(first, new ScopeLayout(null));
+    assert(child.get("value", cache).toInt() == 3);
+    child.parent = second;
+    assert(child.get("value", cache).toInt() == 4);
+    child.define("value", Value.from(6));
+    assert(child.get("value", cache).toInt() == 6);
+    child.parent = null;
+    assert(child.get("value", cache).toInt() == 6);
+    VariableSlots missing;
+    assertThrown!Exception(child.get("later", missing));
+    assertThrown!Exception(child.get("later", missing));
+    child.define("later", Value.from(7));
+    assert(child.get("later", missing).toInt() == 7);
+    first.define("empty", Value.nullValue());
+    assert(first.contains("empty") && first.find("empty") !is null);
+    int validations;
+    first.define("checked", Value.from(8), (Value next) {
+        ++validations;
+        enforce(next.kind == ValueKind.integer, "Expected integer");
+        return Value.from(next.toInt() * 2);
+    });
+    VariableSlots checked;
+    first.assign("checked", Value.from(9), checked);
+    assert(first.get("checked").toInt() == 18 && validations == 1);
+    assertThrown!Exception(first.assign("checked", Value.from("bad"), checked));
+    assert(first.get("checked").toInt() == 18 && validations == 2);
+    assertThrown!Exception(first.define("value", Value.from(0)));
 }
 
 struct ExecutionResult
@@ -114,6 +402,28 @@ struct ExecutionResult
     bool continued;
 }
 
+
+// Exact byte codes avoid a string-switch search on every arithmetic operation.
+// The length tag keeps all one- and two-byte spellings distinct.
+package(dua) uint operatorCode(string spelling) pure nothrow @safe @nogc
+{
+    if (spelling.length == 1) return spelling[0];
+    if (spelling.length == 2) return 0x10000 | (spelling[0] << 8) | spelling[1];
+    return uint.max;
+}
+
+package(dua) string binaryOperatorSlot(string spelling, bool right)
+{
+    switch (operatorCode(spelling))
+    {
+        static foreach (op; ["~", "+", "-", "*", "/", "%", "&", "|", "^",
+            "<<", ">>", "==", "!=", "<", "<=", ">", ">="])
+        {
+            case operatorCode(op): return right ? "opBinaryRight" ~ op : "opBinary" ~ op;
+        }
+        default: return (right ? "opBinaryRight" : "opBinary") ~ spelling;
+    }
+}
 
 /// Statement execution, expression evaluation, assignment, calls, and operators.
 mixin template EvaluatorImplementation()
@@ -182,7 +492,7 @@ mixin template EvaluatorImplementation()
                 case Statement.Kind.try_:
                     try
                     {
-                        result = executeStatements(statement.body, new Environment(environment));
+                        result = executeStatements(statement.body, new Environment(environment, layoutFor(statement)));
                     }
                     catch (Exception error)
                     {
@@ -198,19 +508,29 @@ mixin template EvaluatorImplementation()
                             kind = "ScriptError";
                         }
                         Value[] frames;
-                        auto trace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack : evaluatorContext.callStack;
+                        auto trace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack : evaluatorContext.callStack.view;
                         foreach (frame; trace) frames ~= Value.from(frame);
                         Value[string] errorInfo;
                         errorInfo["kind"] = Value.from(kind);
                         errorInfo["message"] = Value.from(error.msg);
                         errorInfo["value"] = original;
                         errorInfo["stack"] = Value.from(frames);
-                        auto catchEnvironment = new Environment(environment);
+                        auto catchEnvironment = new Environment(environment, catchLayoutFor(statement));
                         catchEnvironment.define(statement.name, Value.from(errorInfo));
                         result = executeStatements(statement.elseBranch.body, catchEnvironment);
                     }
                     break;
                 case Statement.Kind.assign:
+                    if (statement.assignmentOperator.length)
+                    {
+                        Value left;
+                        auto target = resolveCompoundTarget(statement.target, environment, left);
+                        auto right = evaluate(statement.expression, environment);
+                        auto value = evaluateBinary(statement.assignmentOperator, left, right);
+                        assignTarget(target, value, environment);
+                        result.lastValue = value;
+                        break;
+                    }
                     auto values = evaluateExpressionList(statement.expressions, environment,
                         statement.targets.length > 1);
                     foreach (index, target; statement.targets)
@@ -234,19 +554,15 @@ mixin template EvaluatorImplementation()
                     }
                     else
                     {
-                        Value[] values;
-                        foreach (expression; statement.expressions)
-                        {
-                            values ~= evaluate(expression, environment);
-                        }
-                        result.lastValue = Value.from(values);
+                        result.lastValue = Value.fromOwnedArray(
+                            evaluateExpressionList(statement.expressions, environment));
                     }
                     result.returned = true;
                     break;
                 case Statement.Kind.functionDecl:
                     auto callable = Value.fromFunction(new ScriptCallable(statement.name, this, environment,
                         statement.parameters, statement.variadic, statement.body,
-                        statement.parameterTypes, statement.returnType));
+                        statement.parameterTypes, statement.returnType, layoutFor(statement)));
                     environment.define(statement.name, callable);
                     result.lastValue = callable;
                     if (statement.isExported)
@@ -263,7 +579,7 @@ mixin template EvaluatorImplementation()
                     exportSymbol(statement.name, environment.get(statement.name));
                     break;
                 case Statement.Kind.block:
-                    return executeStatements(statement.body, new Environment(environment));
+                    return executeStatements(statement.body, new Environment(environment, layoutFor(statement)));
                 case Statement.Kind.if_:
                     if (evaluate(statement.condition, environment).truthy())
                     {
@@ -295,7 +611,7 @@ mixin template EvaluatorImplementation()
                     }
                     break;
                 case Statement.Kind.for_:
-                    auto loopEnvironment = new Environment(environment);
+                    auto loopEnvironment = new Environment(environment, layoutFor(statement));
                     if (statement.init !is null)
                     {
                         auto initResult = executeStatement(statement.init, loopEnvironment);
@@ -339,7 +655,7 @@ mixin template EvaluatorImplementation()
                     {
                         foreach (index, item; iterable.arrayValue)
                         {
-                            auto itemEnvironment = new Environment(environment);
+                            auto itemEnvironment = new Environment(environment, layoutFor(statement));
                             if (statement.iteratorSecondName.length == 0)
                             {
                                 itemEnvironment.define(statement.iteratorName, item);
@@ -370,7 +686,7 @@ mixin template EvaluatorImplementation()
                     {
                         foreach (entry; (cast(AssociativeEntry[]) iterable.associativeEntries).dup)
                         {
-                            auto itemEnvironment = new Environment(environment);
+                            auto itemEnvironment = new Environment(environment, layoutFor(statement));
                             if (statement.iteratorSecondName.length == 0)
                                 itemEnvironment.define(statement.iteratorName, cast(Value) entry.value);
                             else
@@ -388,7 +704,7 @@ mixin template EvaluatorImplementation()
                     {
                         foreach (key, value; iterable.tableValue)
                         {
-                            auto itemEnvironment = new Environment(environment);
+                            auto itemEnvironment = new Environment(environment, layoutFor(statement));
                             if (statement.iteratorSecondName.length == 0)
                             {
                                 itemEnvironment.define(statement.iteratorName, value);
@@ -439,7 +755,7 @@ mixin template EvaluatorImplementation()
                             continue;
                         }
 
-                        result = executeStatements(switchCase.body, new Environment(environment));
+                        result = executeStatements(switchCase.body, new Environment(environment, layoutFor(switchCase)));
                         if (result.returned)
                         {
                             return result;
@@ -500,11 +816,52 @@ mixin template EvaluatorImplementation()
         }
 
         Value[] values;
-        foreach (expression; expressions)
+        values.length = expressions.length;
+        foreach (index, expression; expressions)
         {
-            values ~= evaluate(expression, environment);
+            values[index] = evaluate(expression, environment);
         }
         return values;
+    }
+
+    // Freeze the receiver and index so reading and writing use the same location,
+    // including when the RHS changes a variable used by the original target.
+    private Expression resolveCompoundTarget(Expression target, Environment environment, out Value current)
+    {
+        Expression resolved;
+        switch (target.kind)
+        {
+            case Expression.Kind.variable:
+                current = evaluate(target, environment);
+                return target;
+            case Expression.Kind.get:
+                auto property = cast(GetExpression) target;
+                auto container = evaluate(property.target, environment);
+                resolved = new GetExpression(new LiteralExpression(container), property.memberName);
+                resolved.line = target.line;
+                resolved.column = target.column;
+                current = evaluate(resolved, environment);
+                break;
+            case Expression.Kind.index:
+                auto indexed = cast(IndexExpression) target;
+                enforce(!indexed.isSlice, "Slice cannot be an assignment target");
+                auto container = evaluate(indexed.target, environment);
+                auto pushedLength = canMeasureLength(container);
+                if (pushedLength) evaluatorContext.indexLengthStack.push(measuredLength(container));
+                scope (exit)
+                {
+                    if (pushedLength) evaluatorContext.indexLengthStack.pop();
+                }
+                auto index = evaluate(indexed.index, environment);
+                resolved = new IndexExpression(new LiteralExpression(container), new LiteralExpression(index));
+                current = readIndex(container, index);
+                break;
+            default:
+                enforce(false, "Invalid compound assignment target");
+        }
+        resolved.line = target.line;
+        resolved.column = target.column;
+        return resolved;
     }
 
     private void assignTarget(Expression target, Value value, Environment environment)
@@ -514,13 +871,15 @@ mixin template EvaluatorImplementation()
             switch (target.kind)
             {
                 case Expression.Kind.variable:
-                    environment.assign((cast(VariableExpression) target).name, value);
+                    auto variable = cast(VariableExpression) target;
+                    environment.assign(variable.name, value, variable.slots);
                     return;
                 case Expression.Kind.get:
-                    auto container = evaluate((cast(GetExpression) target).target, environment);
+                    auto get = cast(GetExpression) target;
+                    auto container = evaluate(get.target, environment);
                     enforce(container.isFieldAggregate,
                         "Property assignment currently supports tables/reflected structs/classes");
-                    if (auto property = (cast(GetExpression) target).memberName in container.tableValue)
+                    if (auto property = get.memberName in container.tableValue)
                     {
                         if (property.kind == ValueKind.function_
                             && property.functionValue.acceptsArity(1))
@@ -529,20 +888,21 @@ mixin template EvaluatorImplementation()
                             return;
                         }
                     }
-                    if (auto setter = container.propertySetter((cast(GetExpression) target).memberName))
+                    if (auto setter = container.propertySetter(get.memberName))
                     {
                         invokeFunctionValue(*setter, [value]);
                         return;
                     }
-                    if (!applyTableNewIndex(container, (cast(GetExpression) target).memberName, value))
+                    if (!applyTableNewIndex(container, get.memberName, value))
                     {
-                        container.tableValue[(cast(GetExpression) target).memberName] = value.valueCopy();
+                        container.tableValue[get.memberName] = value.valueCopy();
                     }
                     return;
                 case Expression.Kind.index:
-                    auto container = evaluate((cast(IndexExpression) target).target, environment);
-                    enforce(!(cast(IndexExpression) target).isSlice, "Slice cannot be an assignment target");
-                    auto index = evaluate((cast(IndexExpression) target).index, environment);
+                    auto indexed = cast(IndexExpression) target;
+                    auto container = evaluate(indexed.target, environment);
+                    enforce(!indexed.isSlice, "Slice cannot be an assignment target");
+                    auto index = evaluate(indexed.index, environment);
                     if (container.kind == ValueKind.associativeArray)
                     {
                         index = checkedAssociativeKey(container, index);
@@ -592,82 +952,89 @@ mixin template EvaluatorImplementation()
                 case Expression.Kind.literal:
                     return (cast(LiteralExpression) expression).value;
                 case Expression.Kind.variable:
-                    return environment.get((cast(VariableExpression) expression).name);
+                    auto variable = cast(VariableExpression) expression;
+                    return environment.get(variable.name, variable.slots);
                 case Expression.Kind.cast_:
                     auto conversion = cast(CastExpression) expression;
                     return castValue(evaluate(conversion.operand, environment), conversion.targetType);
                 case Expression.Kind.unary:
-                    switch ((cast(UnaryExpression) expression).operatorSymbol)
+                    auto unary = cast(UnaryExpression) expression;
+                    switch (unary.operatorSymbol)
                     {
                         case "$":
                             enforce(evaluatorContext.indexLengthStack.length > 0, "$ is only available inside index expressions");
-                            return Value.from(evaluatorContext.indexLengthStack[$ - 1]);
+                            return Value.from(evaluatorContext.indexLengthStack.top());
                         case "-":
-                            auto right = evaluate((cast(UnaryExpression) expression).operand, environment);
-                            if (auto overloaded = tryCallUnaryOverload((cast(UnaryExpression) expression).operatorSymbol, right))
+                            auto right = evaluate(unary.operand, environment);
+                            Value overloaded;
+                            if (tryCallUnaryOverload(unary.operatorSymbol, right, overloaded))
                             {
-                                return *overloaded;
+                                return overloaded;
                             }
                             return right.kind == ValueKind.integer
                                 ? Value.from(-right.integerValue)
                                 : Value.from(-right.toFloat());
                         case "!":
-                            auto right = evaluate((cast(UnaryExpression) expression).operand, environment);
-                            if (auto overloaded = tryCallUnaryOverload((cast(UnaryExpression) expression).operatorSymbol, right))
+                            auto right = evaluate(unary.operand, environment);
+                            Value overloaded;
+                            if (tryCallUnaryOverload(unary.operatorSymbol, right, overloaded))
                             {
-                                return *overloaded;
+                                return overloaded;
                             }
                             return Value.from(!right.truthy());
                         default:
-                            enforce(false, format("Unsupported unary operator '%s'", (cast(UnaryExpression) expression).operatorSymbol));
+                            enforce(false, format("Unsupported unary operator '%s'", unary.operatorSymbol));
                             assert(0);
                     }
                 case Expression.Kind.binary:
-                    if ((cast(BinaryExpression) expression).operatorSymbol == "is")
+                    auto binary = cast(BinaryExpression) expression;
+                    if (binary.operatorSymbol == "is")
                     {
                         return Value.from(valueIsType(
-                            evaluate((cast(BinaryExpression) expression).left, environment), (cast(VariableExpression) (cast(BinaryExpression) expression).right).name));
+                            evaluate(binary.left, environment), (cast(VariableExpression) binary.right).name));
                     }
-                    if ((cast(BinaryExpression) expression).operatorSymbol == "&&")
+                    if (binary.operatorSymbol == "&&")
                     {
-                        auto left = evaluate((cast(BinaryExpression) expression).left, environment);
+                        auto left = evaluate(binary.left, environment);
                         if (!left.truthy())
                         {
                             return Value.from(false);
                         }
 
-                        auto right = evaluate((cast(BinaryExpression) expression).right, environment);
+                        auto right = evaluate(binary.right, environment);
                         return Value.from(right.truthy());
                     }
 
-                    if ((cast(BinaryExpression) expression).operatorSymbol == "||")
+                    if (binary.operatorSymbol == "||")
                     {
-                        auto left = evaluate((cast(BinaryExpression) expression).left, environment);
+                        auto left = evaluate(binary.left, environment);
                         if (left.truthy())
                         {
                             return Value.from(true);
                         }
 
-                        auto right = evaluate((cast(BinaryExpression) expression).right, environment);
+                        auto right = evaluate(binary.right, environment);
                         return Value.from(right.truthy());
                     }
 
-                    return evaluateBinary((cast(BinaryExpression) expression).operatorSymbol,
-                        evaluate((cast(BinaryExpression) expression).left, environment),
-                        evaluate((cast(BinaryExpression) expression).right, environment));
+                    return evaluateBinary(binary.operatorSymbol,
+                        evaluate(binary.left, environment), evaluate(binary.right, environment));
                 case Expression.Kind.ternary:
-                    return evaluate((cast(TernaryExpression) expression).condition, environment).truthy()
-                        ? evaluate((cast(TernaryExpression) expression).whenTrue, environment)
-                        : evaluate((cast(TernaryExpression) expression).whenFalse, environment);
+                    auto ternary = cast(TernaryExpression) expression;
+                    return evaluate(ternary.condition, environment).truthy()
+                        ? evaluate(ternary.whenTrue, environment)
+                        : evaluate(ternary.whenFalse, environment);
                 case Expression.Kind.call:
-                    auto args = (cast(CallExpression) expression).arguments.map!(arg => evaluate(arg, environment)).array;
-                    return evaluateCall((cast(CallExpression) expression).callee, args, environment);
+                    auto call = cast(CallExpression) expression;
+                    auto args = evaluateExpressionList(call.arguments, environment);
+                    return evaluateCall(call.callee, args, environment);
                 case Expression.Kind.array:
+                    auto array = cast(ArrayExpression) expression;
                     Value[] items;
-                    foreach (index, argument; (cast(ArrayExpression) expression).elements)
+                    foreach (index, argument; array.elements)
                     {
                         auto value = evaluate(argument, environment);
-                        if (index < (cast(ArrayExpression) expression).elementSpreads.length && (cast(ArrayExpression) expression).elementSpreads[index])
+                        if (index < array.elementSpreads.length && array.elementSpreads[index])
                         {
                             enforce(value.kind == ValueKind.array,
                                 "Array spread requires an array value");
@@ -678,7 +1045,7 @@ mixin template EvaluatorImplementation()
                             items ~= value;
                         }
                     }
-                    return Value.from(items);
+                    return Value.fromOwnedArray(items);
                 case Expression.Kind.associativeArray:
                     auto literal = cast(AssociativeArrayExpression) expression;
                     auto result = Value.associativeArray();
@@ -721,26 +1088,28 @@ mixin template EvaluatorImplementation()
                     }
                     return Value.from(entries);
                 case Expression.Kind.function_:
+                    auto functionExpression = cast(FunctionExpression) expression;
                     return Value.fromFunction(new ScriptCallable("anonymous", this, environment,
-                        (cast(FunctionExpression) expression).parameters, (cast(FunctionExpression) expression).variadic, (cast(FunctionExpression) expression).body,
-                        (cast(FunctionExpression) expression).parameterTypes, (cast(FunctionExpression) expression).returnType));
+                        functionExpression.parameters, functionExpression.variadic, functionExpression.body,
+                        functionExpression.parameterTypes, functionExpression.returnType, layoutFor(functionExpression)));
                 case Expression.Kind.get:
-                    auto container = evaluate((cast(GetExpression) expression).target, environment);
+                    auto get = cast(GetExpression) expression;
+                    auto container = evaluate(get.target, environment);
                     if (container.kind == ValueKind.associativeArray)
-                        return associativeProperty(container, (cast(GetExpression) expression).memberName);
+                        return associativeProperty(container, get.memberName);
                     enforce(container.isFieldAggregate,
                         "Property access currently supports tables/reflected structs/classes");
-                    if (auto getter = container.propertyGetter((cast(GetExpression) expression).memberName))
+                    if (auto getter = container.propertyGetter(get.memberName))
                     {
                         auto refreshed = invokeFunctionValueWithThis(*getter, [], container);
-                        auto property = (cast(GetExpression) expression).memberName in container.tableValue;
+                        auto property = get.memberName in container.tableValue;
                         if (property is null || property.kind != ValueKind.function_)
                         {
-                            container.tableValue[(cast(GetExpression) expression).memberName] = refreshed;
+                            container.tableValue[get.memberName] = refreshed;
                         }
                         return refreshed;
                     }
-                    if (auto value = (cast(GetExpression) expression).memberName in container.tableValue)
+                    if (auto value = get.memberName in container.tableValue)
                     {
                         if (value.kind == ValueKind.function_
                             && value.functionValue.acceptsArity(0))
@@ -750,32 +1119,33 @@ mixin template EvaluatorImplementation()
                         return *value;
                     }
                     Value resolved;
-                    if (resolveTableIndex(container, (cast(GetExpression) expression).memberName, resolved))
+                    if (resolveTableIndex(container, get.memberName, resolved))
                     {
                         return resolved;
                     }
-                    enforce(false, format("Unknown property '%s'", (cast(GetExpression) expression).memberName));
+                    enforce(false, format("Unknown property '%s'", get.memberName));
                     assert(0);
                 case Expression.Kind.index:
-                    auto container = evaluate((cast(IndexExpression) expression).target, environment);
+                    auto indexed = cast(IndexExpression) expression;
+                    auto container = evaluate(indexed.target, environment);
                     bool pushedLengthContext;
                     if (canMeasureLength(container))
                     {
-                        evaluatorContext.indexLengthStack ~= measuredLength(container);
+                        evaluatorContext.indexLengthStack.push(measuredLength(container));
                         pushedLengthContext = true;
                     }
                     scope (exit)
                     {
                         if (pushedLengthContext)
                         {
-                            evaluatorContext.indexLengthStack.length = evaluatorContext.indexLengthStack.length - 1;
+                            evaluatorContext.indexLengthStack.pop();
                         }
                     }
-                    if ((cast(IndexExpression) expression).isSlice)
+                    if (indexed.isSlice)
                     {
                         enforce(container.kind == ValueKind.array, "Slicing currently supports arrays only");
-                        auto start = evaluate((cast(IndexExpression) expression).sliceStart, environment).toInt();
-                        auto finish = evaluate((cast(IndexExpression) expression).sliceEnd, environment).toInt();
+                        auto start = evaluate(indexed.sliceStart, environment).toInt();
+                        auto finish = evaluate(indexed.sliceEnd, environment).toInt();
                         enforce(start >= 0 && finish >= start, "Invalid slice range");
                         auto lowerBound = cast(size_t) start;
                         auto upperBound = cast(size_t) finish;
@@ -785,34 +1155,10 @@ mixin template EvaluatorImplementation()
                         {
                             sliced = container.arrayValue[lowerBound .. upperBound].dup;
                         }
-                        return Value.from(sliced);
+                        return Value.fromOwnedArray(sliced);
                     }
-                    auto index = evaluate((cast(IndexExpression) expression).index, environment);
-                    if (container.kind == ValueKind.associativeArray)
-                    {
-                        index = checkedAssociativeKey(container, index);
-                        auto position = container.associativeIndex(index);
-                        enforce(position != size_t.max, "Associative array key not found");
-                        return container.associativeEntries[position].value.valueCopy();
-                    }
-                    if (container.kind == ValueKind.array)
-                    {
-                        auto position = cast(size_t) index.toInt();
-                        enforce(position < container.arrayValue.length, "Array index out of range");
-                        return container.arrayValue[position];
-                    }
-                    if (container.isFieldAggregate)
-                    {
-                        auto key = index.toHostString();
-                        Value resolved;
-                        if (resolveTableIndex(container, key, resolved))
-                        {
-                            return resolved;
-                        }
-                        return Value.nullValue();
-                    }
-                    enforce(false, "Indexing currently supports arrays and tables");
-                    assert(0);
+                    auto index = evaluate(indexed.index, environment);
+                    return readIndex(container, index);
             }
         }
         catch (Exception error)
@@ -820,6 +1166,32 @@ mixin template EvaluatorImplementation()
             auto location = expressionLocation(expression);
             throw withSourceContext(error, evaluatorContext.sourceName, location, "expression");
         }
+    }
+
+    private Value readIndex(Value container, Value index)
+    {
+        if (container.kind == ValueKind.associativeArray)
+        {
+            index = checkedAssociativeKey(container, index);
+            auto position = container.associativeIndex(index);
+            enforce(position != size_t.max, "Associative array key not found");
+            return container.associativeEntries[position].value.valueCopy();
+        }
+        if (container.kind == ValueKind.array)
+        {
+            auto position = cast(size_t) index.toInt();
+            enforce(position < container.arrayValue.length, "Array index out of range");
+            return container.arrayValue[position];
+        }
+        if (container.isFieldAggregate)
+        {
+            auto key = index.toHostString();
+            Value resolved;
+            if (resolveTableIndex(container, key, resolved)) return resolved;
+            return Value.nullValue();
+        }
+        enforce(false, "Indexing currently supports arrays and tables");
+        assert(0);
     }
 
     private string statementLocation(Statement statement) const
@@ -839,7 +1211,7 @@ mixin template EvaluatorImplementation()
             return prepareContainerValue(value, targetType);
         // A pure alias uses the same conversion as its target. Union casts
         // only check membership, since choosing a conversion would be ambiguous.
-        if (auto definition = globals.find("__dua_type_" ~ targetType))
+        if (auto definition = findTypeDefinition(targetType))
         {
             if (!definition.tableValue["isTable"].truthy())
             {
@@ -911,72 +1283,77 @@ mixin template EvaluatorImplementation()
 
     private Value evaluateBinary(string operatorSymbol, Value left, Value right)
     {
-        if (auto overloaded = tryCallBinaryOverload(operatorSymbol, left, right))
+        if (left.isFieldAggregate || right.isFieldAggregate)
         {
-            return *overloaded;
+            Value overloaded;
+            if (tryCallBinaryOverload(operatorSymbol, left, right, overloaded)) return overloaded;
         }
 
-        switch (operatorSymbol)
+        switch (operatorCode(operatorSymbol))
         {
-            case "~":
+            case operatorCode("~"):
                 if (left.kind == ValueKind.array && right.kind == ValueKind.array)
                 {
-                    auto combined = left.arrayValue.dup;
-                    combined ~= right.arrayValue;
-                    return Value.from(combined);
+                    Value[] combined;
+                    combined.length = left.arrayValue.length + right.arrayValue.length;
+                    combined[0 .. left.arrayValue.length] = left.arrayValue;
+                    combined[left.arrayValue.length .. $] = right.arrayValue;
+                    return Value.fromOwnedArray(combined);
                 }
                 return Value.from(stringify(left) ~ stringify(right));
-            case "+":
+            case operatorCode("+"):
                 if (left.kind == ValueKind.integer && right.kind == ValueKind.integer)
                 {
                     return Value.from(left.integerValue + right.integerValue);
                 }
                 return Value.from(left.toFloat() + right.toFloat());
-            case "-":
+            case operatorCode("-"):
                 if (left.kind == ValueKind.integer && right.kind == ValueKind.integer)
                 {
                     return Value.from(left.integerValue - right.integerValue);
                 }
                 return Value.from(left.toFloat() - right.toFloat());
-            case "*":
+            case operatorCode("*"):
                 if (left.kind == ValueKind.integer && right.kind == ValueKind.integer)
                 {
                     return Value.from(left.integerValue * right.integerValue);
                 }
                 return Value.from(left.toFloat() * right.toFloat());
-            case "/":
+            case operatorCode("/"):
                 return Value.from(left.toFloat() / right.toFloat());
-            case "%":
+            case operatorCode("%"):
                 return Value.from(left.toInt() % right.toInt());
-            case "&":
+            case operatorCode("&"):
                 return Value.from(left.toInt() & right.toInt());
-            case "|":
+            case operatorCode("|"):
                 return Value.from(left.toInt() | right.toInt());
-            case "^":
+            case operatorCode("^"):
                 return Value.from(left.toInt() ^ right.toInt());
-            case "<<":
+            case operatorCode("<<"):
                 return Value.from(left.toInt() << right.toInt());
-            case ">>":
+            case operatorCode(">>"):
                 return Value.from(left.toInt() >> right.toInt());
-            case "==":
-                if (auto overloadedEq = tryCallEqualityOverload(left, right))
+            case operatorCode("=="):
+                Value overloadedEq;
+                if (tryCallEqualityOverload(left, right, overloadedEq))
                 {
                     return Value.from(overloadedEq.truthy());
                 }
                 return Value.from(valuesEqual(left, right));
-            case "!=":
-                if (auto overloadedEq = tryCallEqualityOverload(left, right))
+            case operatorCode("!="):
+                Value overloadedEq;
+                if (tryCallEqualityOverload(left, right, overloadedEq))
                 {
                     return Value.from(!overloadedEq.truthy());
                 }
                 return Value.from(!valuesEqual(left, right));
-            case "<":
+            case operatorCode("<"):
                 return Value.from(left.toFloat() < right.toFloat());
-            case "<=":
+            case operatorCode("<="):
                 return Value.from(left.toFloat() <= right.toFloat());
-            case ">":
+            case operatorCode(">"):
                 return Value.from(left.toFloat() > right.toFloat());
-            case ">=":
+            case operatorCode(">="):
                 return Value.from(left.toFloat() >= right.toFloat());
             default:
                 enforce(false, format("Unsupported binary operator '%s'", operatorSymbol));
@@ -988,8 +1365,9 @@ mixin template EvaluatorImplementation()
     {
         if (calleeExpression.kind == Expression.Kind.get)
         {
-            auto receiver = evaluate((cast(GetExpression) calleeExpression).target, environment);
-            return callMethodOrUfcs(receiver, (cast(GetExpression) calleeExpression).memberName, args, environment);
+            auto get = cast(GetExpression) calleeExpression;
+            auto receiver = evaluate(get.target, environment);
+            return callMethodOrUfcs(receiver, get.memberName, args, environment);
         }
 
         auto callee = evaluate(calleeExpression, environment);
@@ -1052,10 +1430,10 @@ mixin template EvaluatorImplementation()
 
     private Value invokeFunctionValueWithThis(Value callable, Value[] args, Value thisValue)
     {
-        evaluatorContext.thisContextStack ~= thisValue;
+        evaluatorContext.thisContextStack.push(thisValue);
         scope (exit)
         {
-            evaluatorContext.thisContextStack.length = evaluatorContext.thisContextStack.length - 1;
+            evaluatorContext.thisContextStack.pop();
         }
         return invokeFunctionValue(callable, args);
     }
@@ -1068,61 +1446,64 @@ mixin template EvaluatorImplementation()
     private Value currentThisContext() const
     {
         assert(evaluatorContext.thisContextStack.length > 0);
-        return cast(Value) evaluatorContext.thisContextStack[$ - 1];
+        return cast(Value) evaluatorContext.thisContextStack.top();
     }
 
-    private Value* tryCallBinaryOverload(string operatorSymbol, Value left, Value right)
+    private bool tryCallBinaryOverload(string operatorSymbol, Value left, Value right, out Value result)
     {
         if (left.isFieldAggregate)
         {
-            auto slot = "opBinary" ~ operatorSymbol;
+            auto slot = binaryOperatorSlot(operatorSymbol, false);
             Value functionValue;
             if (lookupMetamethod(left, slot, functionValue))
             {
-                return callTableBinaryOverload(functionValue, left, right);
+                result = callTableBinaryOverload(functionValue, left, right);
+                return true;
             }
         }
         if (right.isFieldAggregate)
         {
-            auto slot = "opBinaryRight" ~ operatorSymbol;
+            auto slot = binaryOperatorSlot(operatorSymbol, true);
             Value functionValue;
             if (lookupMetamethod(right, slot, functionValue))
             {
-                return callTableBinaryOverload(functionValue, right, left);
+                result = callTableBinaryOverload(functionValue, right, left);
+                return true;
             }
         }
-        return null;
+        return false;
     }
 
-    private Value* tryCallUnaryOverload(string operatorSymbol, Value operand)
+    private bool tryCallUnaryOverload(string operatorSymbol, Value operand, out Value result)
     {
         if (!operand.isFieldAggregate)
         {
-            return null;
+            return false;
         }
 
-        auto slot = "opUnary" ~ operatorSymbol;
+        auto slot = operatorSymbol == "-" ? "opUnary-"
+            : operatorSymbol == "!" ? "opUnary!" : "opUnary" ~ operatorSymbol;
         Value functionValue;
         if (!lookupMetamethod(operand, slot, functionValue))
         {
-            return null;
+            return false;
         }
 
         enforce(functionValue.kind == ValueKind.function_,
             "Table unary operator overload must be a function value");
-        auto result = new Value();
-        *result = invokeFunctionValue(functionValue, [operand]);
-        return result;
+        result = invokeFunctionValue(functionValue, [operand]);
+        return true;
     }
 
-    private Value* tryCallEqualityOverload(Value left, Value right)
+    private bool tryCallEqualityOverload(Value left, Value right, out Value result)
     {
         if (left.isFieldAggregate)
         {
             Value functionValue;
             if (lookupMetamethod(left, "__eq", functionValue))
             {
-                return callTableBinaryOverload(functionValue, left, right);
+                result = callTableBinaryOverload(functionValue, left, right);
+                return true;
             }
         }
         if (right.isFieldAggregate)
@@ -1130,20 +1511,19 @@ mixin template EvaluatorImplementation()
             Value functionValue;
             if (lookupMetamethod(right, "__eq", functionValue))
             {
-                return callTableBinaryOverload(functionValue, right, left);
+                result = callTableBinaryOverload(functionValue, right, left);
+                return true;
             }
         }
-        return null;
+        return false;
     }
 
-    private Value* callTableBinaryOverload(Value functionValue, Value selfValue, Value otherValue)
+    private Value callTableBinaryOverload(Value functionValue, Value selfValue, Value otherValue)
     {
         enforce(functionValue.kind == ValueKind.function_,
             "Table operator overload must be a function value");
         Value[] args = [selfValue, otherValue];
-        auto result = new Value();
-        *result = invokeFunctionValue(functionValue, args);
-        return result;
+        return invokeFunctionValue(functionValue, args);
     }
 
     private Value invokeFunctionValue(Value callable, Value[] args)
@@ -1153,23 +1533,21 @@ mixin template EvaluatorImplementation()
         if (maximumDepth != 0 && evaluatorContext.callStack.length >= maximumDepth)
             throw new CallDepthLimitException(maximumDepth);
         auto name = callable.functionValue.debugName;
-        evaluatorContext.callStack ~= name;
+        evaluatorContext.callStack.push(name);
         scope (exit)
         {
             if (evaluatorContext.callStack.length > 0)
             {
-                evaluatorContext.callStack.length = evaluatorContext.callStack.length - 1;
+                evaluatorContext.callStack.pop();
             }
         }
         try
         {
-            Value[] copiedArgs;
-            foreach (arg; args) copiedArgs ~= arg.valueCopy();
-            return callable.functionValue.invoke(copiedArgs).valueCopy();
+            return callable.functionValue.invoke(copyValues(args)).valueCopy();
         }
         catch (Exception error)
         {
-            evaluatorContext.lastErrorStack = evaluatorContext.callStack.dup;
+            evaluatorContext.lastErrorStack = evaluatorContext.callStack.snapshot();
             throw error;
         }
     }
@@ -1264,6 +1642,31 @@ mixin template EvaluatorImplementation()
         auto end = args.length == 1 ? args[0].integerValue : args[1].integerValue;
         auto step = args.length == 3 ? args[2].integerValue : 1L;
         enforce(step != 0, "iota step must not be zero");
+        ulong count;
+        if (step > 0 ? start < end : start > end)
+        {
+            // Unsigned differences handle ranges spanning both signed limits;
+            // unsigned negation also handles a step equal to long.min.
+            auto distance = step > 0 ? cast(ulong) end - cast(ulong) start
+                : cast(ulong) start - cast(ulong) end;
+            auto stride = step > 0 ? cast(ulong) step : 0UL - cast(ulong) step;
+            count = distance / stride + (distance % stride != 0);
+        }
+        if (count <= size_t.max / Value.sizeof)
+        {
+            Value result;
+            result.kind = ValueKind.array;
+            result.arrayValue.length = cast(size_t) count;
+            auto current = start;
+            foreach (index, ref value; result.arrayValue)
+            {
+                value = Value.from(current);
+                if (index + 1 < result.arrayValue.length) current += step;
+            }
+            return result;
+        }
+        // Preserve incremental behavior when the computed size cannot be
+        // represented as one allocation on this platform.
         Value[] values;
         for (auto value = start; step > 0 ? value < end : value > end;)
         {
@@ -1275,7 +1678,7 @@ mixin template EvaluatorImplementation()
             }
             value += step;
         }
-        return Value.from(values);
+        return Value.fromOwnedArray(values);
     }
 
     private Value[] extractTypeChain(Value value)
@@ -1355,11 +1758,12 @@ mixin template EvaluatorImplementation()
         if (collection.kind == ValueKind.array)
         {
             Value[] mapped;
+            mapped.length = collection.arrayValue.length;
             foreach (index, item; collection.arrayValue)
             {
-                mapped ~= invokeCollectionCallback(mapper, item, Value.from(cast(long) index));
+                mapped[index] = invokeCollectionCallback(mapper, item, Value.from(cast(long) index));
             }
-            return Value.from(mapped);
+            return Value.fromOwnedArray(mapped);
         }
 
         if (collection.kind == ValueKind.table)
@@ -1394,7 +1798,7 @@ mixin template EvaluatorImplementation()
                     filtered ~= item;
                 }
             }
-            return Value.from(filtered);
+            return Value.fromOwnedArray(filtered);
         }
 
         if (collection.kind == ValueKind.table)
@@ -1445,26 +1849,11 @@ mixin template EvaluatorImplementation()
 
     private Value* resolveUfcs(string functionName, Environment environment)
     {
-        if (environment.contains(functionName))
-        {
-            auto functionValue = environment.get(functionName);
-            if (functionValue.kind == ValueKind.function_)
-            {
-                auto resolved = new Value();
-                *resolved = functionValue;
-                return resolved;
-            }
-        }
-        if (globals.contains(functionName))
-        {
-            auto functionValue = globals.get(functionName);
-            if (functionValue.kind == ValueKind.function_)
-            {
-                auto resolved = new Value();
-                *resolved = functionValue;
-                return resolved;
-            }
-        }
+        if (auto functionValue = environment.find(functionName))
+            if (functionValue.kind == ValueKind.function_) return functionValue;
+        // A non-callable local still falls back to the global function.
+        if (auto functionValue = globals.find(functionName))
+            if (functionValue.kind == ValueKind.function_) return functionValue;
         return null;
     }
 

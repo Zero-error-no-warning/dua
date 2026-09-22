@@ -1,6 +1,7 @@
 module dua.ast;
 
 import dua.value : Value;
+import dua.scope_layout : ScopeLayout, VariableSlots;
 
 final class Program
 {
@@ -31,6 +32,7 @@ final class TableEntry
 
 final class SwitchCase
 {
+    package(dua) ScopeLayout scopeLayout;
     bool isDefault;
     Expression pattern;
     Statement[] body;
@@ -54,6 +56,7 @@ abstract class AstNode
 
 final class Statement : AstNode
 {
+    package(dua) ScopeLayout scopeLayout;
     enum Kind
     {
         variableDecl,
@@ -89,6 +92,7 @@ final class Statement : AstNode
     Expression[] expressions;
     Expression target;
     Expression[] targets;
+    string assignmentOperator; // Empty for plain assignment; otherwise the binary operator.
     string[] parameters;
     string[] parameterTypes;
     bool variadic;
@@ -143,6 +147,7 @@ final class LiteralExpression : Expression
 
 final class VariableExpression : Expression
 {
+    package(dua) VariableSlots slots;
     string name;
     this(string name) { super(Kind.variable); this.name = name; }
 }
@@ -244,6 +249,7 @@ final class TableExpression : Expression
 
 final class FunctionExpression : Expression
 {
+    package(dua) ScopeLayout scopeLayout;
     string[] parameters;
     string[] parameterTypes;
     bool variadic;
