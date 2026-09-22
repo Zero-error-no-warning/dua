@@ -879,7 +879,7 @@ mixin template EvaluatorImplementation()
                     auto container = evaluate(get.target, environment);
                     enforce(container.isFieldAggregate,
                         "Property assignment currently supports tables/reflected structs/classes");
-                    if (auto property = get.memberName in container.tableValue)
+                    if (auto property = container.findMember(get.memberName))
                     {
                         if (property.kind == ValueKind.function_
                             && property.functionValue.acceptsArity(1))
@@ -1102,14 +1102,14 @@ mixin template EvaluatorImplementation()
                     if (auto getter = container.propertyGetter(get.memberName))
                     {
                         auto refreshed = invokeFunctionValueWithThis(*getter, [], container);
-                        auto property = get.memberName in container.tableValue;
+                        auto property = container.findMember(get.memberName);
                         if (property is null || property.kind != ValueKind.function_)
                         {
-                            container.tableValue[get.memberName] = refreshed;
+                            container.refreshMember(get.memberName, refreshed);
                         }
                         return refreshed;
                     }
-                    if (auto value = get.memberName in container.tableValue)
+                    if (auto value = container.findMember(get.memberName))
                     {
                         if (value.kind == ValueKind.function_
                             && value.functionValue.acceptsArity(0))
@@ -1409,7 +1409,7 @@ mixin template EvaluatorImplementation()
         }
         if (receiver.isFieldAggregate)
         {
-            if (auto method = functionName in receiver.tableValue)
+            if (auto method = receiver.findMember(functionName))
             {
                 enforce(method.kind == ValueKind.function_,
                     format("Property '%s' exists but is not callable", functionName));
@@ -1859,7 +1859,7 @@ mixin template EvaluatorImplementation()
 
     private bool resolveTableIndex(Value container, string key, out Value resolved)
     {
-        if (auto direct = key in container.tableValue)
+        if (auto direct = container.findMember(key))
         {
             resolved = *direct;
             return true;
@@ -1904,7 +1904,7 @@ mixin template EvaluatorImplementation()
 
     private bool applyTableNewIndex(Value container, string key, Value value)
     {
-        if (auto directMeta = "__newindex" in container.tableValue)
+        if (auto directMeta = container.findMember("__newindex"))
         {
             if (directMeta.kind == ValueKind.function_)
             {
@@ -1949,13 +1949,13 @@ mixin template EvaluatorImplementation()
 
     private bool lookupMetamethod(Value container, string key, out Value method)
     {
-        if (auto direct = key in container.tableValue)
+        if (auto direct = container.findMember(key))
         {
             method = *direct;
             return true;
         }
 
-        if (auto meta = "__meta" in container.tableValue)
+        if (auto meta = container.findMember("__meta"))
         {
             if (meta.kind == ValueKind.table)
             {

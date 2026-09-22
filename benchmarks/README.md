@@ -1,5 +1,8 @@
 # Runtime benchmarks
 
+See [Reflected struct allocation reduction](REFLECTION.md) for the D-struct
+reflection workloads, allocation results and compatibility checks.
+
 Run from the repository root with DMD (PowerShell):
 
 ```powershell

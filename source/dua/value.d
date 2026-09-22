@@ -193,6 +193,43 @@ private final class ReflectedClassStorage
     }
 }
 
+// Receiver-independent metadata is built once per reflected D type/thread.
+// Installed arrays are read-only internally; metadata setters take snapshots
+// and replace the instance's array instead of mutating these shared buffers.
+private struct ReflectedTypeMetadata(T)
+{
+    static Value[] typeChain;
+    static Value[] aliasChain;
+
+    static Value[] chain()
+    {
+        if (typeChain is null)
+        {
+            typeChain = [Value.from(T.stringof)];
+            static if (is(T == class))
+                static foreach (Base; BaseClassesTuple!T)
+                    typeChain ~= Value.from(Base.stringof);
+        }
+        return typeChain;
+    }
+}
+
+private template hasAggregateAliasThis(T)
+{
+    static if (!__traits(getAliasThis, T).length || isInstanceOf!(Tuple, T))
+        enum hasAggregateAliasThis = false;
+    else
+    {
+        enum member = __traits(getAliasThis, T)[0];
+        alias Member = typeof(mixin("(*cast(T*) null)." ~ member));
+        static if (isCallable!Member)
+            alias Target = Unqual!(ReturnType!Member);
+        else
+            alias Target = Unqual!Member;
+        enum hasAggregateAliasThis = isAggregateType!Target;
+    }
+}
+
 enum ValueKind
 {
     null_,
@@ -213,6 +250,7 @@ enum ValueKind
 private final class TableStorage
 {
     Value[string] entries;
+    ReflectedMembers reflected;
     // Coroutine identity belongs to the table allocation, not its script-visible
     // key space.  The flag keeps the first valid id distinct from ordinary tables.
     size_t coroutineId;
@@ -231,6 +269,191 @@ private final class TableStorage
     Value[string] propertyGetters;
     Value[string] propertySetters;
     bool delegate(Value) keyEquals;
+}
+
+private struct ReflectedMemberBinding
+{
+    Value member;
+    Value getter;
+    Value setter;
+}
+
+private struct ReflectedMemberPlan
+{
+    size_t field = size_t.max;
+    ReflectedMemberBinding function(Object) bind;
+}
+
+// A type's member names, binders and hash insertion order contain no receiver.
+private final class ReflectedLayout
+{
+    ReflectedMemberPlan[string] members;
+    string[] copyOrder;
+    size_t fieldCount;
+}
+
+private final class ReflectedMembers
+{
+    ReflectedLayout layout;
+    Object owner;
+    Value[] fields;
+    Value[string] boundMembers;
+    bool[string] bound;
+    bool materialized;
+    bool detachedProperties;
+
+    void bind(string name, TableStorage storage)
+    {
+        if (name in bound) return;
+        auto plan = name in layout.members;
+        if (plan is null) return;
+        auto result = plan.bind(owner);
+        if (plan.field == size_t.max) boundMembers[name] = result.member;
+        if (!detachedProperties)
+        {
+            if (result.getter.kind == ValueKind.function_) storage.propertyGetters[name] = result.getter;
+            if (result.setter.kind == ValueKind.function_) storage.propertySetters[name] = result.setter;
+        }
+        bound[name] = true;
+    }
+
+    Value* find(string name, TableStorage storage)
+    {
+        if (materialized) return name in storage.entries;
+        auto plan = name in layout.members;
+        if (plan is null) return null;
+        if (plan.field != size_t.max) return &fields[plan.field];
+        bind(name, storage);
+        return name in boundMembers;
+    }
+
+    void materialize(TableStorage storage)
+    {
+        if (materialized) return;
+        // Public tableValue access still presents the original complete map,
+        // including its iteration order. The fields were already value-copied.
+        foreach (name; layout.copyOrder) storage.entries[name] = *find(name, storage);
+        materialized = true;
+    }
+}
+
+private ReflectedMemberBinding bindReflectedMethod(T, string name)(Object receiver)
+{
+    auto owner = cast(ReflectedStructStorage!T) receiver;
+    ReflectedCallable[] overloads;
+    static foreach (overload; __traits(getOverloads, T, name))
+    {{
+        static if (__traits(compiles, makeBoundReflectedCallable!overload(
+            T.stringof ~ "." ~ name, owner.value)))
+            overloads ~= makeBoundReflectedCallable!overload(T.stringof ~ "." ~ name, owner.value, owner);
+    }}
+    ReflectedMemberBinding result;
+    if (overloads.length == 1) result.member = Value.fromFunction(overloads[0]);
+    else result.member = Value.fromFunction(new OverloadedReflectedCallable(T.stringof ~ "." ~ name, overloads));
+    foreach (overload; overloads)
+    {
+        if (overload.acceptsArity(0)) result.getter = Value.fromFunction(overload);
+        if (overload.acceptsArity(1)) result.setter = Value.fromFunction(overload);
+    }
+    return result;
+}
+
+private ReflectedMemberBinding bindReflectedField(T, string name)(Object receiver)
+{
+    auto owner = cast(ReflectedStructStorage!T) receiver;
+    ReflectedMemberBinding result;
+    result.getter = Value.fromFunction(new ReflectedCallable(T.stringof ~ "." ~ name ~ ".getter", 0,
+        (Value[] args) {
+            // Refer to the receiver directly: compile-time member lookup
+            // alone does not reliably make DMD capture the escaping closure.
+            auto actualOwner = owner;
+            return convertToValue(mixin("actualOwner.value." ~ name));
+        }, owner));
+    static if (__traits(compiles, mixin("owner.value." ~ name) = mixin("owner.value." ~ name)))
+    {
+        result.setter = Value.fromFunction(new ReflectedCallable(T.stringof ~ "." ~ name ~ ".setter", 1,
+            (Value[] args) {
+                auto actualOwner = owner;
+                alias Field = typeof(mixin("actualOwner.value." ~ name));
+                mixin("actualOwner.value." ~ name) = convertFromValue!Field(args[0]);
+                return Value.nullValue();
+            }, owner));
+    }
+    return result;
+}
+
+private ReflectedMemberBinding bindReflectedBinary(T, string method, string op)(Object receiver)
+{
+    auto owner = cast(ReflectedStructStorage!T) receiver;
+    return ReflectedMemberBinding(Value.fromFunction(makeBoundBinaryOperator!(T, method, op)(
+        T.stringof ~ "." ~ method ~ op, owner.value, owner)));
+}
+
+private ReflectedMemberBinding bindReflectedUnary(T, string op)(Object receiver)
+{
+    auto owner = cast(ReflectedStructStorage!T) receiver;
+    return ReflectedMemberBinding(Value.fromFunction(makeBoundUnaryOperator!(T, op)(
+        T.stringof ~ ".opUnary" ~ op, owner.value, owner)));
+}
+
+private ReflectedMemberBinding bindReflectedEquality(T)(Object receiver)
+{
+    auto owner = cast(ReflectedStructStorage!T) receiver;
+    return ReflectedMemberBinding(Value.fromFunction(makeBoundEqualityOperator(
+        T.stringof ~ ".opEquals", owner.value, owner)));
+}
+
+private ReflectedLayout reflectedLayout(T)()
+{
+    static ReflectedLayout cached;
+    if (cached !is null) return cached;
+    auto result = new ReflectedLayout;
+    static foreach (name; __traits(allMembers, T))
+    {{
+        static if (name != "this" && name != "__ctor" && name != "Monitor" && name != "factory"
+            && __traits(compiles, __traits(getOverloads, T, name)))
+        {
+            enum count = () {
+                size_t total;
+                static foreach (overload; __traits(getOverloads, T, name))
+                    static if (__traits(compiles, makeBoundReflectedCallable!overload(
+                        T.stringof ~ "." ~ name, *cast(T*) null))) ++total;
+                return total;
+            }();
+            static if (count > 0)
+                result.members[name] = ReflectedMemberPlan(size_t.max, &bindReflectedMethod!(T, name));
+        }
+    }}
+    static foreach (op; ["+", "-", "*", "/", "%", "~", "&", "|", "^", "<<", ">>"])
+    {{
+        static foreach (method; ["opBinary", "opBinaryRight"])
+        {{
+            static if (staticIndexOf!(method, __traits(allMembers, T)) >= 0
+                && __traits(compiles, makeBoundBinaryOperator!(T, method, op)(
+                    T.stringof ~ "." ~ method ~ op, *cast(T*) null)))
+                result.members[method ~ op] = ReflectedMemberPlan(size_t.max,
+                    &bindReflectedBinary!(T, method, op));
+        }}
+    }}
+    static foreach (op; ["-", "!"])
+    {{
+        static if (__traits(compiles, makeBoundUnaryOperator!(T, op)(
+            T.stringof ~ ".opUnary" ~ op, *cast(T*) null)))
+            result.members["opUnary" ~ op] = ReflectedMemberPlan(size_t.max,
+                &bindReflectedUnary!(T, op));
+    }}
+    static if (staticIndexOf!("opEquals", __traits(allMembers, T)) >= 0
+        && __traits(compiles, makeBoundEqualityOperator(T.stringof ~ ".opEquals", *cast(T*) null)))
+        result.members["__eq"] = ReflectedMemberPlan(size_t.max, &bindReflectedEquality!T);
+    static foreach (name; FieldNameTuple!T)
+    {{
+        // Ordinary access preserves field visibility; getMember bypasses it.
+        static if (__traits(compiles, convertToValue(mixin("(*cast(T*) null)." ~ name))))
+            result.members[name] = ReflectedMemberPlan(result.fieldCount++, &bindReflectedField!(T, name));
+    }}
+    foreach (name; result.members.byKey) result.copyOrder ~= name;
+    cached = result;
+    return cached;
 }
 
 struct AssociativeEntry
@@ -425,12 +648,33 @@ struct Value
     {
         if (tableStorage is null)
             tableStorage = new TableStorage();
+        if (tableStorage.reflected !is null) tableStorage.reflected.materialize(tableStorage);
         return tableStorage.entries;
     }
 
     const(Value[string]) tableValue() const
     {
+        // Logical constness: binding a descriptor only memoizes callable
+        // wrappers. Native field snapshots and receivers stay unchanged.
+        if (tableStorage !is null && tableStorage.reflected !is null)
+        {
+            auto storage = cast(TableStorage) tableStorage;
+            storage.reflected.materialize(storage);
+        }
         return tableStorage is null ? null : tableStorage.entries;
+    }
+
+    package(dua) Value* findMember(string name)
+    {
+        if (tableStorage is null) return null;
+        if (tableStorage.reflected !is null) return tableStorage.reflected.find(name, tableStorage);
+        return name in tableStorage.entries;
+    }
+
+    package(dua) void refreshMember(string name, Value value)
+    {
+        if (auto member = findMember(name)) *member = value;
+        else tableValue[name] = value;
     }
 
     static Value nullValue()
@@ -605,12 +849,16 @@ struct Value
 
     private void copyStructMetadataTo(ref Value result) const
     {
-        result.setTypeChain(cast(Value[]) typeChain);
-        result.setAliasThisMetadata(cast(Value[]) aliasThisTargets,
-            cast(Value[]) aliasThisChain);
         if (tableStorage !is null)
+        {
+            // The outer arrays are private snapshots and never edited in place.
+            // Share them across value copies; per-value setters replace them.
+            result.tableStorage.typeChain = cast(Value[]) tableStorage.typeChain;
+            result.tableStorage.aliasThisTargets = cast(Value[]) tableStorage.aliasThisTargets;
+            result.tableStorage.aliasThisChain = cast(Value[]) tableStorage.aliasThisChain;
             result.setPropertyMetadata(cast(Value[string]) tableStorage.propertyGetters,
                 cast(Value[string]) tableStorage.propertySetters);
+        }
     }
 
     package(dua) const(Value[]) typeChain() const
@@ -637,17 +885,24 @@ struct Value
 
     package(dua) Value* propertyGetter(string name)
     {
+        if (tableStorage !is null && tableStorage.reflected !is null
+            && !tableStorage.reflected.detachedProperties)
+            tableStorage.reflected.bind(name, tableStorage);
         return tableStorage is null ? null : name in tableStorage.propertyGetters;
     }
 
     package(dua) Value* propertySetter(string name)
     {
+        if (tableStorage !is null && tableStorage.reflected !is null
+            && !tableStorage.reflected.detachedProperties)
+            tableStorage.reflected.bind(name, tableStorage);
         return tableStorage is null ? null : name in tableStorage.propertySetters;
     }
 
     package(dua) void setPropertyMetadata(Value[string] getters, Value[string] setters)
     {
         if (tableStorage is null) tableStorage = new TableStorage();
+        if (tableStorage.reflected !is null) tableStorage.reflected.detachedProperties = true;
         tableStorage.propertyGetters = getters.dup;
         tableStorage.propertySetters = setters.dup;
     }
@@ -770,6 +1025,16 @@ struct Value
 
     static Value reflect(T)(auto ref T value)
         if (isAggregateType!T)
+    {
+        static if (is(T == struct) && !hasAggregateAliasThis!T)
+            return reflectWithLayout(value);
+        else
+            return reflectEager(value);
+    }
+
+    // Forwarding to an aggregate can evaluate user getters while discovering
+    // equality methods. Classes also keep their existing reflection path.
+    private static Value reflectEager(T)(auto ref T value)
     {
         static if (is(T == class))
             if (value is null) return Value.nullValue();
@@ -932,17 +1197,8 @@ struct Value
                 }
             }
         }}
-        static if (is(T == class) || is(T == struct))
-        {
-            Value[] typeChain;
-            typeChain ~= Value.from(T.stringof);
-            static if (is(T == class))
-                static foreach (Base; BaseClassesTuple!T){{
-                    typeChain ~= Value.from(Base.stringof);
-            }}
-        }
         Value[] aliasTargets;
-        Value[] aliasChain;
+        auto aliasChain = ReflectedTypeMetadata!T.aliasChain;
         // Reflect alias-this targets last: the helper only fills missing slots,
         // so declarations on the outer aggregate always win.  It retains the
         // outer receiver and evaluates every alias-this hop when called.
@@ -956,11 +1212,18 @@ struct Value
                     aliasTargets, aliasChain, reflectedTarget);
         }
         auto result = Value.from(converted);
-        result.setPropertyMetadata(propertyGetters, propertySetters);
+        // These freshly built maps have never escaped. Transfer them instead
+        // of duplicating all getter/setter entries for every reflected copy.
+        result.tableStorage.propertyGetters = propertyGetters;
+        result.tableStorage.propertySetters = propertySetters;
         static if (is(T == class) || is(T == struct))
-            result.setTypeChain(typeChain);
+            result.tableStorage.typeChain = ReflectedTypeMetadata!T.chain();
         static if (__traits(getAliasThis, T).length && !isInstanceOf!(Tuple, T))
-            result.setAliasThisMetadata(aliasTargets, aliasChain);
+        {
+            ReflectedTypeMetadata!T.aliasChain = aliasChain;
+            result.tableStorage.aliasThisChain = aliasChain;
+            result.tableStorage.aliasThisTargets = aliasTargets;
+        }
         static if (is(T == struct))
         {
             result.kind = ValueKind.struct_;
@@ -978,6 +1241,55 @@ struct Value
             result.tableStorage.nativeClass = new ReflectedClassStorage(
                 reflectedTarget, is(T : Object), is(T : immutable(Object)));
         }
+        return result;
+    }
+
+    private static Value reflectWithLayout(T)(auto ref T value)
+    {
+        auto owner = new ReflectedStructStorage!T(value);
+        auto data = new ReflectedMembers;
+        data.layout = reflectedLayout!T();
+        data.owner = owner;
+        data.fields.length = data.layout.fieldCount;
+        size_t index;
+        static foreach (name; FieldNameTuple!T)
+        {{
+            static if (__traits(compiles, convertToValue(mixin("value." ~ name))))
+                data.fields[index++] = convertToValue(mixin("owner.value." ~ name));
+        }}
+        Value[] aliasTargets;
+        auto aliasChain = ReflectedTypeMetadata!T.aliasChain;
+        static if (__traits(getAliasThis, T).length && !isInstanceOf!(Tuple, T))
+        {
+            // Scalar/array aliases add conversion targets, but no forwarded
+            // aggregate members. Keep their live receiver-bound conversions.
+            Value[string] aliasMembers;
+            addAliasThisReflection!(T, T, "root", AliasSeq!T)(aliasMembers,
+                aliasTargets, aliasChain, owner.value, owner);
+            assert(aliasMembers.length == 0);
+        }
+        // Preserve conversion/copy callbacks and their original hash order.
+        // Only the creation of side-effect-free bound callables is deferred.
+        foreach (name; data.layout.copyOrder)
+        {
+            auto field = data.layout.members[name].field;
+            if (field != size_t.max) data.fields[field] = data.fields[field].valueCopy();
+        }
+        Value result;
+        result.kind = ValueKind.struct_;
+        result.tableStorage = new TableStorage;
+        result.tableStorage.reflected = data;
+        result.tableStorage.typeChain = ReflectedTypeMetadata!T.chain();
+        ReflectedTypeMetadata!T.aliasChain = aliasChain;
+        result.tableStorage.aliasThisChain = aliasChain;
+        result.tableStorage.aliasThisTargets = aliasTargets;
+        result.tableStorage.nativeOwner = owner;
+        result.tableStorage.copier = () => Value.reflect(owner.value);
+        static if (__traits(compiles, owner.value == owner.value))
+            result.tableStorage.keyEquals = (Value other) {
+                auto otherOwner = cast(ReflectedStructStorage!T) other.tableStorage.nativeOwner;
+                return otherOwner !is null && owner.value == otherOwner.value;
+            };
         return result;
     }
 

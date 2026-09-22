@@ -1,0 +1,43 @@
+﻿2026-09-22, Windows x64, DMD 2.113.0, -O -release -inline
+Baseline: 341a641cffae0c7e786c3642423e59027dcd0a83
+For each workload below: baseline first, updated runtime second.
+Seven-sample independent medians; explicit GC outside measured regions.
+
+plainHostCopies(1000): median 3480 us, min 3007 us, GC 5137264 bytes
+  GC collections 6, collection time 963 us; post-collection heap 204976 -> 204976 bytes
+plainHostCopies(1000): median 1692 us, min 1618 us, GC 2321264 bytes
+  GC collections 2, collection time 150 us; post-collection heap 99392 -> 99392 bytes
+methodHostCopies(1000): median 9509 us, min 9205 us, GC 14929264 bytes
+  GC collections 18, collection time 3177 us; post-collection heap 204992 -> 204992 bytes
+methodHostCopies(1000): median 1984 us, min 1894 us, GC 2321264 bytes
+  GC collections 2, collection time 184 us; post-collection heap 99392 -> 99392 bytes
+namedScriptCopies(1000): median 1147 us, min 1057 us, GC 1317824 bytes
+  GC collections 1, collection time 136 us; post-collection heap 204016 -> 204016 bytes
+namedScriptCopies(1000): median 1001 us, min 985 us, GC 1141472 bytes
+  GC collections 1, collection time 80 us; post-collection heap 98416 -> 98416 bytes
+boundHostCopies(1000): median 9995 us, min 8900 us, GC 14975232 bytes
+  GC collections 19, collection time 3091 us; post-collection heap 205040 -> 205040 bytes
+boundHostCopies(1000): median 2059 us, min 1813 us, GC 2325280 bytes
+  GC collections 2, collection time 178 us; post-collection heap 99440 -> 99440 bytes
+reflectedReturns(1000): median 26981 us, min 26581 us, GC 44305264 bytes
+  GC collections 55, collection time 9726 us; post-collection heap 205040 -> 205040 bytes
+reflectedReturns(1000): median 3163 us, min 2787 us, GC 3761264 bytes
+  GC collections 4, collection time 352 us; post-collection heap 99440 -> 99440 bytes
+reflectedOperators(1000): median 44917 us, min 43832 us, GC 73519824 bytes
+  GC collections 96, collection time 16800 us; post-collection heap 205088 -> 205088 bytes
+reflectedOperators(1000): median 3475 us, min 3299 us, GC 4675248 bytes
+  GC collections 5, collection time 465 us; post-collection heap 99504 -> 99504 bytes
+wideHostCopies(1000): median 54546 us, min 52010 us, GC 82817264 bytes
+  GC collections 83, collection time 25967 us; post-collection heap 205008 -> 205008 bytes
+wideHostCopies(1000): median 2062 us, min 1946 us, GC 2321264 bytes
+  GC collections 2, collection time 185 us; post-collection heap 99392 -> 99392 bytes
+aliasedReturns(1000): median 89026 us, min 88161 us, GC 231089264 bytes
+  GC collections 28, collection time 6069 us; post-collection heap 205024 -> 205024 bytes
+aliasedReturns(1000): median 11772 us, min 11667 us, GC 17473264 bytes
+  GC collections 19, collection time 1770 us; post-collection heap 101200 -> 101200 bytes
+
+Updated runtime: 100000-iteration stress samples
+wideHostCopies(100000): median 223217 us, min 220369 us, GC 232001264 bytes
+  GC collections 254, collection time 23509 us; post-collection heap 99408 -> 99408 bytes
+aliasedReturns(100000): median 1355881 us, min 1277359 us, GC 1747201264 bytes
+  GC collections 1960, collection time 198922 us; post-collection heap 101200 -> 101200 bytes
