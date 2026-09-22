@@ -6,6 +6,7 @@ import std.algorithm : sort;
 import std.datetime.stopwatch : StopWatch;
 import std.exception : enforce;
 import std.stdio : writefln;
+import std.conv : to;
 
 struct Point
 {
@@ -29,12 +30,24 @@ struct Vector
 
 Vector hostVector(long x) { return Vector(x, 2); }
 
+// A small payload with many public methods, like a host geometry type. These
+// unused members must not impose per-copy callable/map allocation costs.
+struct WideVector
+{
+    long x;
+    long y;
+    long sum() { return x + y; }
+    static foreach (i; 0 .. 40)
+        mixin("long method" ~ to!string(i) ~ "(long n = 1) { return x + y + n; }");
+}
+
 void main(string[] args)
 {
     auto name = args.length > 1 ? args[1] : "methodHostCopies";
     auto engine = new ScriptEngine();
     engine.bindAuto("point", Point(3, 4));
     engine.bindAuto("vector", Vector(3, 4));
+    engine.bindAuto("wide", WideVector(3, 4));
     engine.bindFunc!hostVector("hostVector");
     engine.bindType!Vector("BoundVector");
     engine.load(q{
@@ -52,6 +65,11 @@ void main(string[] args)
         int namedScriptCopies(int n) {
             auto source = ScriptPoint(3, 4); auto total = 0;
             for (auto i = 0; i < n; i += 1) { auto p = source; total += p.x; }
+            return total;
+        }
+        int wideHostCopies(int n) {
+            auto total = 0;
+            for (auto i = 0; i < n; i += 1) { auto v = wide; total += v.sum(); }
             return total;
         }
         int boundHostCopies(int n) {
@@ -75,7 +93,7 @@ void main(string[] args)
     switch (name)
     {
         case "plainHostCopies", "namedScriptCopies": expected = count * 3; break;
-        case "methodHostCopies", "boundHostCopies": expected = count * 7; break;
+        case "methodHostCopies", "boundHostCopies", "wideHostCopies": expected = count * 7; break;
         case "reflectedReturns": expected = count * (count - 1) / 2; break;
         case "reflectedOperators": expected = (count + 1) * 3; break;
         default: enforce(false, "Unknown workload: " ~ name);
