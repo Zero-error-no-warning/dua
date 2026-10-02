@@ -249,6 +249,7 @@ enum ValueKind
 /// module exports already handed to an importer) therefore observe additions.
 private final class TableStorage
 {
+    Object moduleOwner;
     Value[string] entries;
     ReflectedMembers reflected;
     // Coroutine identity belongs to the table allocation, not its script-visible
@@ -575,6 +576,17 @@ private final class AssociativeStorage
 
 struct Value
 {
+    // Module identity belongs to the reference table, not its import spelling.
+    package(dua) Object moduleOwner() const
+    {
+        return tableStorage is null ? null : cast(Object) tableStorage.moduleOwner;
+    }
+
+    package(dua) void moduleOwner(Object owner)
+    {
+        if (tableStorage is null) tableStorage = new TableStorage;
+        tableStorage.moduleOwner = owner;
+    }
     ValueKind kind = ValueKind.null_;
     long integerValue;
     double floatingValue;

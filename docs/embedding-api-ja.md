@@ -88,7 +88,34 @@ auto settings = engine.loadModuleFile("config/settings.dua");
 
 `exportsValue()` は Dua の `import name as alias` と低レベル連携のための export テーブルです。通常の D 埋め込みコードでは、エンジン管理を迂回しない `ModuleHandle.call` とハンドルの添字を推奨します。後方互換の `Value.call` は一般テーブルの簡易呼び出しとして残っていますが、エンジンの call depth、call stack、実行量管理の対象外です。
 
-`export` 文は実行時に公開テーブルを直接更新します。`load` / `run` の完了前でも、循環 import やDへのコールバックから実行済みの export を参照できます。先に取得した `exportsValue()` も後続の追加を観測します。未実行の export はまだ参照できません。初期化失敗時は失敗したソースモジュールをキャッシュから除去しますが、既に他のモジュールへ渡った値や参照を巻き戻すことはありません。
+`export` 文は実行時に所属実体の公開テーブルを直接更新します。循環 import やDへのコールバックから実行済みの export を参照でき、先に取得した `exportsValue()` も後続の追加を観測します。未実行の export はまだ参照できません。ソースモジュールの初期化失敗時は、そのロードで新たにキャッシュした依存先も除去して公開テーブルを空にし、所属関数の以後の呼び出しを拒否します。共有値や外部への副作用は巻き戻しません。
+
+### モジュールの実体を生成する
+
+`ScriptEngine.instantiateModule(name)` と `ModuleHandle.instantiate()` は、Dua の `new` と同じ内部処理で新しい `ModuleHandle` を返します。通常変数は同じモジュールの全実体で共有し、instance宣言の初期化式を生成ごとに再評価します。生成したハンドルからさらに `instantiate()` しても、元のソース定義から生成します。
+
+```d
+engine.registerModule("actor", q{
+    int totalDamage = 0;
+    instance int hp = 100;
+    export void damage(int amount) { hp -= amount; totalDamage += amount; }
+    export int health() { return hp; }
+    export int total() { return totalDamage; }
+});
+auto defaultActor = engine.loadModule("actor");
+defaultActor.call("damage", [Dua.Value.from(10)]);
+auto player = engine.instantiateModule("actor");
+auto enemy = defaultActor.instantiate();
+player.call("damage", [Dua.Value.from(20)]);
+assert(defaultActor.call("health").toInt() == 90);
+assert(player.call("health").toInt() == 80);
+assert(enemy.call("health").toInt() == 100);
+assert(enemy.call("total").toInt() == 30);
+```
+
+名前による生成は必要なら先に既定の実体をロードします。生成失敗は例外で通知され、部分的なハンドルは返されません。追加実体は `package.loaded` / import / require の既定キャッシュに登録されません。`exportsValue()` を `bind` した値もDuaの `new` に使用できます。
+
+`newModule(name)` は空のホスト用モジュールを登録する別の操作です。生成用ソース定義を持たないため `instantiate()` の対象外です。グローバルハンドルと、戻りtableを公開する旧形式も対象外です。生成用の宣言は `registerModule` のソースまたはロード元ファイルに記述し、明示的な `export` を使用してください。ハンドルへの追加 `load` / `bind` は生成用ソースを変更せず、追加load中のinstance宣言は拒否します。
 
 ### 3.3 D から空のモジュールを作る
 
@@ -119,7 +146,7 @@ auto score = gm.score(32);
 
 `ModuleHandle` は `run` / `runSafe`、`load` / `loadSafe`、`loadFile` / `loadFileSafe`、`call`、添字アクセスも提供します。ロードしたソースの通常の宣言はそのモジュール内だけに保持され、`export` 宣言だけが import 経由で公開されます。同名モジュールは重複作成できません。`clearModuleCache()` は評価済みソースモジュールだけをレジストリから除き、D で作成したモジュールは登録されたままにします。
 
-内部的に `ModuleHandle` が別のインタプリタを持つわけではありません。字句解析、構文解析、評価、実行制限、import、export の処理は所有元の `ScriptEngine` に集約され、`ModuleHandle` は専用の `Environment` と export テーブルを選択する薄いスコープファサードです。また、`bindAuto` と添字代入の型変換実装も両者で共通化されています。そのためエンジンとモジュールで Dua の評価規則が分岐せず、モジュールごとに分離されるのはトップレベルの状態だけです。
+内部的に `ModuleHandle` が別のインタプリタを持つわけではありません。字句解析、構文解析、評価、実行制限、import、export の処理は所有元の `ScriptEngine` に集約され、`ModuleHandle` は専用の `Environment` と export テーブルを選択する薄いスコープファサードです。また、`bindAuto` と添字代入の型変換実装も両者で共通化されています。そのためエンジンとモジュールで Dua の評価規則が分岐せず、通常変数はモジュールの共有環境、instance変数と直下の関数宣言は実体の環境へ保持されます。
 
 ファイルパスが既に分かっている場合は `loadModuleFile(path)` を使います。`runFile` が戻り値だけを返す一時実行、`loadFile` が共有グローバル環境へのロードであるのに対し、`loadModuleFile` はファイルを専用スコープで評価し、その `ModuleHandle` を返します。ファイルパスはキャッシュキーにもなります。Safe API は `loadModuleFileSafe(path)` です。
 

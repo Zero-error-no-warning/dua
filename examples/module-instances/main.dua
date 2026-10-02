@@ -1,0 +1,14 @@
+import actor as Actor;
+Actor.damage(10);
+
+auto player = new Actor;
+auto enemy = new Actor;
+player.damage(20);
+player.advance(5);
+
+auto readPlayer = player.health;
+auto playerClosure = player.healthReader();
+
+return [Actor.health(), player.health(), enemy.health(), Actor.total(),
+    player.position(), enemy.position(), readPlayer(), playerClosure()];
+// [90, 80, 100, 30, 5, 0, 80, 80]

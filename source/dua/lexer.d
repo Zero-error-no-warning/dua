@@ -45,6 +45,8 @@ enum TokenKind
     keywordNull,
     keywordThis,
     keywordImport,
+    keywordInstance,
+    keywordNew,
     keywordExport,
     keywordAs,
     plus,
@@ -428,6 +430,8 @@ private TokenKind keywordFor(string identifier)
         case "null": return TokenKind.keywordNull;
         case "this": return TokenKind.keywordThis;
         case "import": return TokenKind.keywordImport;
+        case "instance": return TokenKind.keywordInstance;
+        case "new": return TokenKind.keywordNew;
         case "export": return TokenKind.keywordExport;
         case "as": return TokenKind.keywordAs;
         default: return TokenKind.identifier;

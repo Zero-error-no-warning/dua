@@ -1,0 +1,4 @@
+instance int distance = 0;
+
+export void advance(int amount) { distance += amount; }
+export int position() { return distance; }

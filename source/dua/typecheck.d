@@ -211,6 +211,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
         case Expression.Kind.table: return "table";
         case Expression.Kind.function_: return "function";
         case Expression.Kind.unary:
+            if ((cast(UnaryExpression) expression).operatorSymbol == "new") return "table";
             return (cast(UnaryExpression) expression).operatorSymbol == "!" ? "bool"
                 : inferExpressionType((cast(UnaryExpression) expression).operand, variables, functions, diagnostics);
         case Expression.Kind.cast_:

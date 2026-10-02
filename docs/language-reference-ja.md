@@ -22,7 +22,7 @@ auto empty = null;
 - 数値は10進整数か小数です。負数はリテラルではなく単項 `-` を適用した式です。
 - 文字列はダブルクォートで1行に記述します。現在、文字列リテラル内のエスケープシーケンスは提供しません。
 - 文は原則 `;` で終わり、ブロックは `{ ... }` で囲みます。
-- キーワードは `auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。
+- キーワードは `auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。`.new` などのメンバー名には引き続きアクセスできます。
 
 ### 1.2 値の種類と真偽
 
@@ -380,11 +380,11 @@ return rules.add(5);
 - `export` はモジュールソース内だけで使えます。宣言に付けるほか、`export existingName;` で既存値を公開できます。
 - import のモジュール名は `game.rules` または `"game.rules"`、別名は `as alias` で指定します。
 - `require("game.rules")` は同じキャッシュ機構からモジュール値を返します。
-- export が1つ以上あれば export テーブルがモジュール値です。export がなく、トップレベルの結果がテーブルならその内容を取り込みます。数値などの任意の戻り値が `require` の結果になるわけではありません。
+- export が1つ以上あれば export テーブルがモジュール値です。instance宣言を持たない旧形式では、export がなくトップレベルの結果がテーブルならその内容を取り込みます。instance宣言を持つモジュールは明示的exportだけを公開し、最後のコンテナ初期値やinstance import先を暗黙公開しません。公開なしのモジュールも生成できます。数値などの任意の戻り値が `require` の結果になるわけではありません。
 
 ### export の公開タイミングと循環 import
 
-`export` は、その文を実行した時点で共有の公開テーブルへ値を追加します。モジュール全体の読み込み完了を待ちません。初期化中のモジュールを再び import した場合は、その時点までに公開した値を持つ同じテーブルが返ります。
+`export` は、その文を実行した時点で所属実体の公開テーブルへ値を追加します。モジュール全体の読み込み完了を待ちません。初期化中のモジュールを再び通常 import した場合は、その時点までに公開した値を持つ既定の実体のテーブルが返ります。
 
 ```dua
 // A.dua
@@ -405,8 +405,86 @@ D側から `engine.loadModule("A")` で読み込むと、A → B → A の循環
 
 - `export Type name = expression;` は初期値の評価と検査が成功してから公開します。関数の export と `export existingName;` も実行時に反映します。
 - 公開は既存の値コピー規則に従います。`before = 3;` のような変数への再代入だけでは、公開済みの数値は更新されません。配列・テーブルの参照は共有されます。
-- 初期化に失敗したモジュールはキャッシュから除去します。ただし、既に公開した値や副作用を巻き戻す処理はありません。読み込みが成功済みの依存モジュールが保持する公開テーブルの参照も残ります。
+- 初期化に失敗したロードでは、そのロード中に新たにキャッシュした依存モジュールも除去し、公開テーブルを空にします。失敗した実体から取り出し済みの関数も以後の呼び出しを拒否します。以前から正常にロードされていたモジュールは維持します。共有値の変更、ホスト呼び出しなどの副作用は巻き戻しません。
 - キャッシュはモジュール名をキーにします。上の例ではD側も `loadModule("A")` を使用します。`loadModuleFile("A.dua")` のパスキーと、`import A` の名前キーは別です。
+
+### モジュールの実体と `new`
+
+モジュールは、エンジン内で共有する通常変数と、実体ごとに保持する `instance` 変数を持ちます。通常の `import`、`require`、D の `loadModule` は同じ既定の実体を取得します。別名はローカルの束縛名だけを変え、モジュールの識別・共有状態・キャッシュキーを変えません。`?.dua` と `?/init.dua` による解決も同じです。
+
+```dua
+// actor.dua
+int totalDamage = 0;
+instance int hp = 100;
+export void damage(int amount) { hp -= amount; totalDamage += amount; }
+export int health() { return hp; }
+export int total() { return totalDamage; }
+```
+
+```dua
+import actor as Actor;
+Actor.damage(10);
+auto player = new Actor;
+auto enemy = new Actor;
+player.damage(20);
+// Actor.health() == 90, player.health() == 80, enemy.health() == 100
+// どの実体の total() も 30
+```
+
+`new binding` のオペランドは、モジュール値を保持する識別子です。import の別名、require の結果、既存実体を代入した変数も使えます。引数やコンストラクタ呼び出しの括弧は付けません。普通のtableやホスト型の値は対象外です。
+
+`new` は既定の実体の現在値をコピーしません。instance初期化式を再評価し、配列・table・連想配列リテラルなどは評価ごとに新しい値を生成します。初期化式が共有値を明示的に取得する場合、深いコピーはしません。通常変数の初期化式、通常import、型宣言、その他のトップレベル実行文は再実行しません。
+
+### `instance import` と `instance` ブロック
+
+```dua
+instance import movement;
+instance import animation as anim;
+```
+
+これは概念的に `import movement as Movement; instance auto movement = new Movement;` と同じです。既定の実体を含め、所有側の実体ごとに新しい依存実体を作ります。依存モジュール自体の既定の実体も通常どおり一度ロードされます。依存先内部の通常importは既定の実体を共有し、instance importだけが新しい実体を作ります。依存グラフ全体の複製ではありません。
+
+```dua
+instance {
+    int hp = 100;
+    Vec2 velocity = Vec2(0, 0);
+    import movement;
+    import animation as anim;
+}
+export int health() { return hp; }
+```
+
+ブロックは各宣言にinstanceを付ける省略記法で、新しい字句スコープを作りません。宣言済みの型を使った変数宣言とimportだけを置けます。関数・型・alias・実行文・入れ子のブロックは置けません。instanceはソースモジュールの直下だけで使用でき、関数内、通常のブロック内、グローバルのrun/load、ModuleHandleへの追加loadでは拒否されます。変数の公開には `export instance int hp = 100;` または `instance export int hp = 100;` を使えます。依存の公開には `instance import movement; export movement;` とします。
+
+### 初期化順序と関数の所属
+
+既定の実体はソース順に実行します。追加の実体は同じ順序でinstance宣言を評価し、直下の関数宣言とexportを実体ごとに構築します。instanceブロックも同じ順序へ展開されます。関数宣言の巻き上げはありません。初期化式で呼ぶ関数は先に宣言してください。
+
+モジュール直下の変数・import・関数名は初期化前から予約されます。宣言の実行前の読み取り・代入はエラーになり、外側の同名変数へフォールバックしません。
+
+```dua
+instance int a = b; // エラー: b は未初期化
+instance int b = 1;
+```
+
+関数宣言にinstanceを付ける必要はありません。各実体の関数は自身の環境を保持し、通常変数へのアクセスを共有保存先へ、instance変数へのアクセスを所属実体へ解決します。取り出した関数、関数が返すクロージャ、他の実体からの呼び出しでも所属は変わりません。通常変数へ格納した関数値は共有され、元の所属を保持します。
+
+```dua
+auto saved = player.health; // モジュールの関数取得は自動実行しない
+auto hp = saved();          // player の hp
+```
+
+通常tableの引数なし関数のプロパティ呼び出しとは異なり、モジュールの公開関数は `.name` で関数値を返します。実行には `()` を付けます。export済み数値は従来どおり値コピーです。`export instance int hp = 100;` の後でhpを変えても、公開済みの `player.hp` は自動更新されません。現在値は関数経由で取得してください。
+
+### 循環、失敗、対象の制限
+
+通常の循環importは既定の実体の公開テーブルを共有します。未実行のexportの読み取りはエラーです。一方、`A → instance import B → instance import A` や初期化中の自己newは生成の循環として検出し、`Module instantiation cycle: A -> B -> A` のように経路を報告します。
+
+追加実体は成功時だけ生成元へ返し、既定の実体のキャッシュを置き換えません。失敗時は途中の公開テーブルを破棄し、所属関数を無効にします。既定の実体やほかの正常な実体は使用を継続できます。共有変数の変更などの副作用は残るため、再試行の初期化式はその時点の共有状態を読みます。実行量・呼び出し深度の制限とソース位置・スタックトレースは通常の実行経路を通ります。
+
+生成対象はロード済みソースの宣言です。Dから作る空の `newModule`、グローバルハンドル、明示的exportの代わりに戻りtableを公開する旧形式はnewの対象外です。旧形式は通常import/requireで引き続き利用できます。インスタンス化するモジュールでは `export` を使って公開してください。ホストの追加load/bindは生成用ソース定義を変更しません。
+
+実行可能な例は [examples/module-instances](../examples/module-instances/README.md)、Dの生成APIは [組み込みAPI](embedding-api-ja.md) を参照してください。
 
 ## 12. 標準関数・ライブラリ一覧
 

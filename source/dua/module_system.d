@@ -12,6 +12,10 @@ import dua.evaluator : Environment;
 import dua.execution;
 import dua.binding : NativeCallable;
 import dua.value;
+import dua.ast;
+import dua.lexer : lex;
+import dua.parser : parse;
+import std.algorithm : canFind;
 import std.algorithm : map;
 import std.array : array;
 import std.exception : enforce;
@@ -29,6 +33,112 @@ mixin template ModuleImplementation()
     private Value[] moduleExportScopes;
     private string[] moduleSearchPaths;
     private Value[] moduleLoaders;
+    private string[] moduleCreationPath;
+    private size_t moduleLoadDepth;
+    private string[] moduleLoadTransaction;
+
+    /// Creates a fresh instance; import/require/loadModule still return the default.
+    ModuleHandle instantiateModule(string name)
+    {
+        checkModuleCreation(name);
+        return instantiateModuleHandle(requireModuleHandle(name));
+    }
+
+    private void checkModuleCreation(string name)
+    {
+        enforce(!moduleCreationPath.canFind(name),
+            "Module instantiation cycle: " ~ (moduleCreationPath ~ name).join(" -> "));
+    }
+
+    private Value instantiateModuleValue(Value value)
+    {
+        auto handle = cast(ModuleHandle) value.moduleOwner;
+        enforce(value.kind == ValueKind.table && handle !is null && handle.engine is this,
+            "new expects a source module instance from this ScriptEngine");
+        return instantiateModuleHandle(handle).exportsValue();
+    }
+
+    private ModuleHandle instantiateModuleHandle(ModuleHandle handle)
+    {
+        auto definition = handle.definition is null ? handle : handle.definition;
+        checkModuleCreation(definition.moduleName);
+        enforce(definition.ready && definition.moduleProgram !is null && !definition.legacyExports,
+            "Module '" ~ definition.moduleName ~ "' is not an initialized source module with declarative exports");
+        auto result = new ModuleHandle(this, definition.moduleName,
+            new Environment(definition.sharedEnvironment), ModuleVisibility.explicitExports);
+        result.definition = definition;
+        result.sharedEnvironment = definition.sharedEnvironment;
+        result.moduleProgram = definition.moduleProgram;
+        initializeModuleInstance(result, false);
+        return result;
+    }
+
+    private void initializeModuleInstance(ModuleHandle handle, bool isDefault)
+    {
+        auto environment = handle.environment;
+        environment.sharedDeclarations = handle.sharedEnvironment;
+        environment.initializingModule = true;
+        scope(exit) environment.initializingModule = false;
+        scope(failure)
+        {
+            environment.failedModule = true;
+            handle.moduleValue.tableValue = null;
+        }
+        bool[string] names;
+        bool hasInstanceDeclarations = handle.moduleProgram.hasInstanceDeclarations;
+        foreach (statement; handle.moduleProgram.statements)
+        {
+            hasInstanceDeclarations |= statement.isInstance;
+            string[] declared;
+            if (statement.kind == Statement.Kind.variableDecl) declared = statement.names;
+            else if (statement.kind == Statement.Kind.functionDecl) declared = [statement.name];
+            else if (statement.kind == Statement.Kind.import_) declared = [statement.aliasName];
+            foreach (name; declared)
+            {
+                enforce((name in names) is null, "Duplicate module declaration '" ~ name ~ "'");
+                names[name] = true;
+                if (statement.isInstance || statement.kind == Statement.Kind.functionDecl)
+                    environment.reserveDeclaration(name);
+                else if (isDefault) handle.sharedEnvironment.reserveDeclaration(name);
+            }
+        }
+        moduleCreationPath ~= handle.moduleName;
+        scope(exit) moduleCreationPath.length -= 1;
+        auto previousSource = evaluatorContext.sourceName;
+        evaluatorContext.sourceName = handle.moduleName;
+        scope(exit) evaluatorContext.sourceName = previousSource;
+        moduleExportScopes ~= handle.moduleValue;
+        scope(exit) moduleExportScopes.length -= 1;
+        try
+        {
+            ExecutionResult result;
+            foreach (statement; handle.moduleProgram.statements)
+            {
+                if (isDefault || statement.isInstance || statement.kind == Statement.Kind.functionDecl
+                    || statement.kind == Statement.Kind.export_)
+                {
+                    result = executeStatement(statement, environment);
+                    if (result.returned) break;
+                }
+                else if (statement.isExported && statement.kind == Statement.Kind.variableDecl)
+                    foreach (name; statement.names) exportSymbol(name, environment.get(name));
+            }
+            // Instance declarations do not implicitly export the final container
+            // initializer or dependency. Such modules use explicit exports only.
+            if (isDefault && !hasInstanceDeclarations && handle.moduleValue.tableValue.length == 0
+                && result.lastValue.kind == ValueKind.table)
+            {
+                handle.moduleValue.tableValue = result.lastValue.tableValue.dup;
+                handle.legacyExports = true;
+            }
+            handle.ready = true;
+            handle.moduleValue.moduleOwner = handle;
+        }
+        catch (Exception error)
+        {
+            throw withSourceContext(error, handle.moduleName);
+        }
+    }
 
     void registerModule(string name, string source)
     {
@@ -237,17 +347,43 @@ mixin template ModuleImplementation()
         }
         enforce(source !is null, format("Module '%s' is not registered", name));
 
-        auto handle = new ModuleHandle(this, name, new Environment(globals),
-            ModuleVisibility.explicitExports);
-        modules[name] = handle; // Make cycles share module identity while loading.
-        scope(failure) modules.remove(name);
-        auto outcome = handle.loadSafe(*source);
-        if (!outcome.ok)
+        bool outermost = moduleLoadDepth++ == 0;
+        if (outermost) moduleLoadTransaction.length = 0;
+        auto checkpoint = moduleLoadTransaction.length;
+        scope(exit)
         {
-            auto error = new SourceException(outcome.errorMessage);
-            error.hasSourceContext = true;
-            throw error;
+            --moduleLoadDepth;
+            if (outermost) moduleLoadTransaction.length = 0;
         }
+        scope(failure)
+        {
+            foreach (loaded; moduleLoadTransaction[checkpoint .. $])
+            {
+                if (auto entry = loaded in modules)
+                {
+                    (*entry).ready = false;
+                    (*entry).environment.failedModule = true;
+                    (*entry).moduleValue.tableValue = null;
+                }
+                modules.remove(loaded);
+            }
+            moduleLoadTransaction.length = checkpoint;
+        }
+        auto sharedScope = new Environment(globals);
+        auto handle = new ModuleHandle(this, name, new Environment(sharedScope),
+            ModuleVisibility.explicitExports);
+        handle.sharedEnvironment = sharedScope;
+        // Preserve identity for ordinary cycles, but do not permit new until ready.
+        handle.moduleValue.moduleOwner = handle;
+        modules[name] = handle; // Make cycles share module identity while loading.
+        moduleLoadTransaction ~= name;
+        scope(failure) modules.remove(name);
+        try
+        {
+            handle.moduleProgram = parse(lex(*source));
+            initializeModuleInstance(handle, true);
+        }
+        catch (Exception error) { throw withSourceContext(error, name); }
         return handle;
     }
 

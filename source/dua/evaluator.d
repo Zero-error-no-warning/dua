@@ -85,6 +85,30 @@ struct EvaluatorContext
 final class Environment
 {
     Environment parent;
+    package(dua) Environment sharedDeclarations;
+    package(dua) bool initializingModule;
+    package(dua) bool failedModule;
+    private bool[string] pendingDeclarations;
+
+    package(dua) void reserveDeclaration(string name)
+    {
+        enforce((name in pendingDeclarations) is null,
+            format("Duplicate module declaration '%s'", name));
+        pendingDeclarations[name] = true;
+    }
+
+    private void checkInitialized(string name)
+    {
+        enforce(!failedModule, "Cannot access a failed module instance");
+        if (auto pending = name in pendingDeclarations)
+            enforce(!*pending, format("Module binding '%s' is not initialized", name));
+    }
+
+    package(dua) void validateModuleLifetime()
+    {
+        for (auto environment = this; environment !is null; environment = environment.parent)
+            enforce(!environment.failedModule, "Cannot call a function belonging to a failed module instance");
+    }
     private struct Binding
     {
         Value value;
@@ -149,6 +173,7 @@ final class Environment
 
     void define(string name, Value value, Value delegate(Value) validator = null)
     {
+        if (auto pending = name in pendingDeclarations) *pending = false;
         if (storage is null) storage = new Storage;
         if (storage.layout !is null)
         {
@@ -201,6 +226,7 @@ final class Environment
     {
         for (auto environment = this; environment !is null; environment = environment.parent)
         {
+            environment.checkInitialized(name);
             auto data = environment.storage;
             if (data is null) continue;
             if (data.layout !is null)
@@ -263,6 +289,7 @@ final class Environment
             // Public ASTs and Environment.parent may be reused or changed.
             if (environment is null)
                 return resolveSlots(name, cache);
+            environment.checkInitialized(name);
             auto data = environment.storage;
             if ((data is null ? null : data.layout) !is step.layout)
                 return resolveSlots(name, cache);
@@ -286,6 +313,7 @@ final class Environment
         for (auto environment = this; environment !is null;
             environment = environment.parent)
         {
+            environment.checkInitialized(name);
             auto data = environment.storage;
             auto layout = data is null ? null : data.layout;
             auto slot = layout is null ? size_t.max : layout.find(name);
@@ -448,6 +476,10 @@ mixin template EvaluatorImplementation()
         try
         {
             ExecutionResult result;
+            enforce(!statement.isInstance || environment.initializingModule,
+                "instance is only allowed in a source module's top-level declarations");
+            auto declarationEnvironment = environment.sharedDeclarations !is null && !statement.isInstance
+                ? environment.sharedDeclarations : environment;
 
             final switch (statement.kind)
             {
@@ -467,9 +499,9 @@ mixin template EvaluatorImplementation()
                         auto declaredType = statement.declaredType;
                         string elementType, keyType;
                         if (splitContainerType(resolveContainerType(declaredType), elementType, keyType))
-                            environment.define(name, value, containerValidator(declaredType));
+                            declarationEnvironment.define(name, value, containerValidator(declaredType));
                         else
-                            environment.define(name, value);
+                            declarationEnvironment.define(name, value);
                         result.lastValue = value;
                         if (statement.isExported)
                         {
@@ -571,8 +603,9 @@ mixin template EvaluatorImplementation()
                     }
                     break;
                 case Statement.Kind.import_:
-                    auto imported = requireModuleHandle(statement.name).exportsValue();
-                    environment.define(statement.aliasName, imported);
+                    auto imported = (statement.isInstance ? instantiateModule(statement.name)
+                        : requireModuleHandle(statement.name)).exportsValue();
+                    declarationEnvironment.define(statement.aliasName, imported);
                     result.lastValue = imported;
                     break;
                 case Statement.Kind.export_:
@@ -961,6 +994,8 @@ mixin template EvaluatorImplementation()
                     auto unary = cast(UnaryExpression) expression;
                     switch (unary.operatorSymbol)
                     {
+                        case "new":
+                            return instantiateModuleValue(evaluate(unary.operand, environment));
                         case "$":
                             enforce(evaluatorContext.indexLengthStack.length > 0, "$ is only available inside index expressions");
                             return Value.from(evaluatorContext.indexLengthStack.top());
@@ -1111,7 +1146,7 @@ mixin template EvaluatorImplementation()
                     }
                     if (auto value = container.findMember(get.memberName))
                     {
-                        if (value.kind == ValueKind.function_
+                        if (container.moduleOwner is null && value.kind == ValueKind.function_
                             && value.functionValue.acceptsArity(0))
                         {
                             return invokeFunctionValueWithThis(*value, [], container);
