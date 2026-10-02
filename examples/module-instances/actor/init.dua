@@ -1,0 +1,13 @@
+int totalDamage = 0;
+
+instance {
+    int hp = 100;
+    import movement;
+}
+
+export void damage(int amount) { hp -= amount; totalDamage += amount; }
+export int health() { return hp; }
+export int total() { return totalDamage; }
+export void advance(int amount) { movement.advance(amount); }
+export int position() { return movement.position(); }
+export any healthReader() { return () => hp; }

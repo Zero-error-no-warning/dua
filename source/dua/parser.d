@@ -127,6 +127,7 @@ private struct Parser
 {
     Token[] tokens;
     size_t position;
+    size_t statementDepth;
 
     Statement locatedStatement(Statement.Kind kind, Token token)
     {
@@ -146,15 +147,51 @@ private struct Parser
     Program parseProgram()
     {
         auto statements = appender!(Statement[])();
+        bool hasInstanceDeclarations;
         while (!check(TokenKind.eof))
         {
-            statements.put(parseStatement());
+            auto statement = parseStatement();
+            hasInstanceDeclarations |= statement.isInstance || statement.isInstanceBlock;
+            if (statement.isInstanceBlock) statements.put(statement.body);
+            else statements.put(statement);
         }
-        return new Program(statements.data);
+        auto program = new Program(statements.data);
+        program.hasInstanceDeclarations = hasInstanceDeclarations;
+        return program;
     }
 
     Statement parseStatement()
     {
+        ++statementDepth;
+        scope(exit) --statementDepth;
+        return parseStatementCore();
+    }
+
+    Statement parseStatementCore()
+    {
+        if (check(TokenKind.keywordInstance)
+            || (check(TokenKind.keywordExport) && peekAt(1).kind == TokenKind.keywordInstance))
+        {
+            bool exported = match(TokenKind.keywordExport);
+            auto start = consume(TokenKind.keywordInstance, "Expected instance");
+            enforce(statementDepth == 1,
+                format("instance is only allowed at module top level at %s:%s", start.line, start.column));
+            if (match(TokenKind.leftBrace))
+            {
+                enforce(!exported, "export instance block is not supported");
+                auto block = locatedStatement(Statement.Kind.block, start);
+                block.isInstanceBlock = true;
+                block.body = parseBlockTail();
+                foreach (child; block.body) markInstance(child);
+                return block;
+            }
+            auto declaration = parseStatementCore();
+            markInstance(declaration);
+            declaration.isExported |= exported;
+            enforce(!declaration.isExported || declaration.kind == Statement.Kind.variableDecl,
+                format("instance import cannot have an export modifier at %s:%s", start.line, start.column));
+            return declaration;
+        }
         // `table` remains an ordinary identifier outside declaration context
         // so the standard `table.map(...)` namespace stays source-compatible.
         if (check(TokenKind.identifier) && peek().lexeme == "table"
@@ -774,6 +811,13 @@ private struct Parser
 
     Expression parseUnary()
     {
+        if (match(TokenKind.keywordNew))
+        {
+            auto token = previous();
+            auto name = consume(TokenKind.identifier, "Expected module binding after new");
+            return locatedExpression(new UnaryExpression("new",
+                locatedExpression(new VariableExpression(name.lexeme), name)), token);
+        }
         if (match(TokenKind.keywordCast))
         {
             auto castToken = previous();
@@ -816,7 +860,9 @@ private struct Parser
             if (match(TokenKind.dot))
             {
                 auto getToken = previous();
-                auto memberName = consume(TokenKind.identifier, "Expected property name after '.'").lexeme;
+                auto memberName = match(TokenKind.keywordNew, TokenKind.keywordInstance)
+                    ? previous().lexeme
+                    : consume(TokenKind.identifier, "Expected property name after '.'").lexeme;
                 expression = locatedExpression(new GetExpression(expression, memberName), getToken);
                 continue;
             }
@@ -1286,6 +1332,14 @@ private struct Parser
 
         auto returnStatement = locatedStatement(Statement.Kind.return_, previous());
         return [assignment, returnStatement];
+    }
+
+    void markInstance(Statement statement)
+    {
+        enforce(!statement.isInstance && (statement.kind == Statement.Kind.variableDecl || statement.kind == Statement.Kind.import_),
+            format("instance supports only variable and import declarations at %s:%s",
+                statement.line, statement.column));
+        statement.isInstance = true;
     }
 
     void setAssignmentOperator(Statement statement, Token token, Expression[] targets)

@@ -239,6 +239,11 @@ final class ModuleHandle
     private Value moduleValue;
     private ModuleVisibility visibility;
     private bool hostCreated;
+    private Program moduleProgram;
+    private Environment sharedEnvironment;
+    private ModuleHandle definition;
+    private bool ready;
+    private bool legacyExports;
 
     private this(ScriptEngine engine, string name, Environment environment,
         ModuleVisibility visibility, bool hostCreated = false)
@@ -258,6 +263,12 @@ final class ModuleHandle
     string name() const
     {
         return moduleName;
+    }
+
+    /// Reevaluate instance declarations using this module's shared storage.
+    ModuleHandle instantiate()
+    {
+        return engine.instantiateModuleHandle(this);
     }
 
     void bind(string name, Value value)
@@ -706,6 +717,7 @@ final class ScriptCallable : CallableValue
 
     private Value invokeBody(Value[] args)
     {
+        closure.validateModuleLifetime();
         auto requiredCount = variadic && parameters.length > 0 ? parameters.length - 1 : parameters.length;
         if (variadic)
         {
@@ -1207,6 +1219,8 @@ final class ScriptEngine
                         typeDiagnostics[0].line, typeDiagnostics[0].column, typeDiagnostics[0].message));
             }
             auto program = parse(lex(source));
+            enforce(!program.hasInstanceDeclarations,
+                "instance declarations require a source module definition, not run/load");
             if (!environment.hasStorage()) environment.reserveSlots(planScope(program.statements));
             auto result = executeStatements(program.statements, environment);
             outcome.ok = true;
@@ -2783,8 +2797,8 @@ unittest
 
 unittest
 {
-    // Failure removes the failing module from the cache, but does not roll
-    // back exports already observed by a successfully loaded dependency.
+    // Failure evicts the entire nested load transaction, including a dependency
+    // that observed a provisional export through an ordinary import cycle.
     auto engine = new ScriptEngine();
     engine.registerModule("failing", q{
         export auto before = 1;
@@ -2800,9 +2814,8 @@ unittest
     assert(!failed.ok);
     assert(failed.errorMessage.canFind("initialization failed"));
     assert(engine.run("return package.loaded(\"failing\") == null;").truthy());
-    auto observer = engine.loadModule("observer");
-    assert(observer["seen"].toInt() == 1);
-    assert(observer.call("read").toInt() == 1);
+    assert(engine.run("return package.loaded(\"observer\") == null;").truthy());
+    assert(!engine.loadModuleSafe("observer").ok);
 }
 
 unittest

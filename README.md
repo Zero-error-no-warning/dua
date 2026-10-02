@@ -11,6 +11,7 @@ Dua は、**D 言語アプリケーションへ組み込み可能な軽量スク
 - `bind` / `bindFunc` / `bindNative` による D 側データと型付き・動的関数の公開
 - `bindAuto` / `engine["name"] = value` による自動変換バインド（aggregate は reflect）
 - `registerModule` + `require(...)` によるモジュール読み込み
+- `instance` 変数・import・ブロックと `new Module` によるモジュールの実体生成（[使用例](examples/module-instances/README.md)）
 - `RunOutcome` によるエラー情報とスタックトレース取得
 - `#` / `//` / `/+ ... +/`（ネスト可）によるコメント
 - 参照型の配列・テーブルと `[...array]` / `{...table}` による浅いコピー

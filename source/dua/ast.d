@@ -6,6 +6,7 @@ import dua.scope_layout : ScopeLayout, VariableSlots;
 final class Program
 {
     Statement[] statements;
+    bool hasInstanceDeclarations;
 
     this(Statement[] statements)
     {
@@ -88,6 +89,8 @@ final class Statement : AstNode
     string aliasName;
     string[] names;
     bool isExported;
+    bool isInstance;
+    bool isInstanceBlock;
     Expression expression;
     Expression[] expressions;
     Expression target;

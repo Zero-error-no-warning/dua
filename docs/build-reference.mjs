@@ -44,7 +44,7 @@ function inline(text) {
 }
 
 function highlight(code) {
-  const tokens = /\/\+[\s\S]*?\+\/|\/\/[^\n]*|#[^\n]*|"[^"\n]*"|\b(?:auto|int|long|double|bool|string|any|void|array|table|struct|class|alias|delegate|return|if|else|while|for|foreach|switch|case|default|break|continue|try|catch|yield|import|export|as|is|cast|this|new|true|false|null)\b|\b\d+(?:\.\d+)?\b/g;
+  const tokens = /\/\+[\s\S]*?\+\/|\/\/[^\n]*|#[^\n]*|"[^"\n]*"|\b(?:auto|int|long|double|bool|string|any|void|array|table|struct|class|alias|delegate|return|if|else|while|for|foreach|switch|case|default|break|continue|try|catch|yield|import|export|as|is|cast|this|new|instance|true|false|null)\b|\b\d+(?:\.\d+)?\b/g;
   let out = '', cursor = 0;
   for (const m of code.matchAll(tokens)) {
     const value = m[0];
