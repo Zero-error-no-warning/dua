@@ -23,6 +23,7 @@ package final class CoroutineState
     bool failed;
     string errorMessage;
     string sourceName;
+    string moduleName;
 }
 
 package Fiber createFiber(void delegate() body)
@@ -104,11 +105,15 @@ package mixin template CoroutineImplementation()
         state.yieldedValues.length = 0;
         state.started = true;
         auto previousSource = evaluatorContext.sourceName;
+        auto previousModule = evaluatorContext.moduleName;
         evaluatorContext.sourceName = state.sourceName;
+        evaluatorContext.moduleName = state.moduleName;
         scope (exit)
         {
             state.sourceName = evaluatorContext.sourceName;
+            state.moduleName = evaluatorContext.moduleName;
             evaluatorContext.sourceName = previousSource;
+            evaluatorContext.moduleName = previousModule;
         }
         state.fiber.call();
 

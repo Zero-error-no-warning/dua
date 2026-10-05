@@ -26,6 +26,7 @@ import std.string : join, replace;
 mixin template ModuleImplementation()
 {
     private string[string] moduleSources;
+    private string[string] moduleSourceNames;
     private ModuleHandle[string] modules;
     // Retain table identity, not a copy of its associative-array handle. In
     // particular, inserting the first export must update an empty table that
@@ -69,6 +70,7 @@ mixin template ModuleImplementation()
         result.definition = definition;
         result.sharedEnvironment = definition.sharedEnvironment;
         result.moduleProgram = definition.moduleProgram;
+        result.sourceName = definition.sourceName;
         initializeModuleInstance(result, false);
         return result;
     }
@@ -105,8 +107,11 @@ mixin template ModuleImplementation()
         moduleCreationPath ~= handle.moduleName;
         scope(exit) moduleCreationPath.length -= 1;
         auto previousSource = evaluatorContext.sourceName;
-        evaluatorContext.sourceName = handle.moduleName;
+        auto previousModule = evaluatorContext.moduleName;
+        evaluatorContext.sourceName = handle.sourceName;
+        evaluatorContext.moduleName = handle.moduleName;
         scope(exit) evaluatorContext.sourceName = previousSource;
+        scope(exit) evaluatorContext.moduleName = previousModule;
         moduleExportScopes ~= handle.moduleValue;
         scope(exit) moduleExportScopes.length -= 1;
         try
@@ -245,6 +250,9 @@ mixin template ModuleImplementation()
     {
         if (options.sourceName.length == 0)
             options.sourceName = hostModule.moduleName;
+        auto previousModule = evaluatorContext.moduleName;
+        evaluatorContext.moduleName = hostModule.moduleName;
+        scope(exit) evaluatorContext.moduleName = previousModule;
         moduleExportScopes ~= hostModule.moduleValue;
         scope (exit) moduleExportScopes.length -= 1;
         auto outcome = runInEnvironmentSafe(source, environment, options);
@@ -338,10 +346,12 @@ mixin template ModuleImplementation()
         auto source = name in moduleSources;
         if (source is null)
         {
-            auto resolved = resolveModuleSource(name);
+            string origin;
+            auto resolved = resolveModuleSource(name, origin);
             if (resolved.length > 0)
             {
                 moduleSources[name] = resolved;
+                moduleSourceNames[name] = origin;
                 source = name in moduleSources;
             }
         }
@@ -373,6 +383,8 @@ mixin template ModuleImplementation()
         auto handle = new ModuleHandle(this, name, new Environment(sharedScope),
             ModuleVisibility.explicitExports);
         handle.sharedEnvironment = sharedScope;
+        auto origin = name in moduleSourceNames;
+        handle.sourceName = origin is null ? name : *origin;
         // Preserve identity for ordinary cycles, but do not permit new until ready.
         handle.moduleValue.moduleOwner = handle;
         modules[name] = handle; // Make cycles share module identity while loading.
@@ -394,8 +406,9 @@ mixin template ModuleImplementation()
         moduleExportScopes[$ - 1].tableValue[name] = value.valueCopy();
     }
 
-    private string resolveModuleSource(string moduleName)
+    private string resolveModuleSource(string moduleName, out string sourceName)
     {
+        sourceName = moduleName;
         foreach (loader; moduleLoaders)
         {
             auto loaded = invokeFunctionValue(loader, [Value.from(moduleName)]);
@@ -407,7 +420,11 @@ mixin template ModuleImplementation()
         foreach (pattern; moduleSearchPaths)
         {
             auto path = pattern.replace("?", normalized);
-            if (exists(path)) return readText(path);
+            if (exists(path))
+            {
+                sourceName = path;
+                return readText(path);
+            }
         }
         return "";
     }
