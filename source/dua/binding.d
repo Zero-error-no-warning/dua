@@ -17,16 +17,24 @@ enum bool isHostCallable(T) = isCallable!T;
 final class NativeCallable : CallableValue
 {
     private NativeFunction nativeCallback;
+    private Value delegate(scope const(Value)[] args, CallSite caller) contextualCallback;
 
-    this(string name, NativeFunction callback)
+    this(string name, NativeFunction callback,
+        Value delegate(scope const(Value)[] args, CallSite caller) contextualCallback = null)
     {
         super(name);
         this.nativeCallback = callback;
+        this.contextualCallback = contextualCallback;
     }
 
     override Value invoke(Value[] args)
     {
-        return nativeCallback(args);
+        return invokeWithContext(args, CallSite.init);
+    }
+
+    override Value invokeWithContext(Value[] args, CallSite caller)
+    {
+        return contextualCallback is null ? nativeCallback(args) : contextualCallback(args, caller);
     }
 }
 

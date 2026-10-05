@@ -240,6 +240,7 @@ final class ModuleHandle
     private ModuleVisibility visibility;
     private bool hostCreated;
     private Program moduleProgram;
+    private string sourceName;
     private Environment sharedEnvironment;
     private ModuleHandle definition;
     private bool ready;
@@ -681,6 +682,7 @@ final class ScriptCallable : CallableValue
     private string[] parameterTypes;
     private string returnType;
     private string sourceName;
+    private string moduleName;
     private ScopeLayout scopeLayout;
 
     this(string name, ScriptEngine engine, Environment closure, string[] parameters, bool variadic,
@@ -701,14 +703,18 @@ final class ScriptCallable : CallableValue
         this.parameterTypes = parameterTypes.dup;
         this.returnType = returnType;
         this.sourceName = engine.evaluatorContext.sourceName;
+        this.moduleName = engine.evaluatorContext.moduleName;
         this.scopeLayout = scopeLayout is null ? planScope(this.body, ["this"] ~ this.parameters) : scopeLayout;
     }
 
     override Value invoke(Value[] args)
     {
         auto previousSource = engine.evaluatorContext.sourceName;
+        auto previousModule = engine.evaluatorContext.moduleName;
         engine.evaluatorContext.sourceName = sourceName;
+        engine.evaluatorContext.moduleName = moduleName;
         scope (exit) engine.evaluatorContext.sourceName = previousSource;
+        scope (exit) engine.evaluatorContext.moduleName = previousModule;
         try
             return invokeBody(args);
         catch (Exception error)
@@ -864,7 +870,8 @@ final class ScriptEngine
             }
         }
 
-        auto constructor = Value.fromFunction(new NativeCallable(name ~ ".new", (scope const(Value)[] args) {
+        auto constructor = Value.fromFunction(new NativeCallable(name ~ ".new", null,
+            (scope const(Value)[] args, CallSite caller) {
             size_t argOffset = 0;
             if (args.length > 0 && args[0].kind == ValueKind.table)
             {
@@ -887,7 +894,7 @@ final class ScriptEngine
             if (matchedConstructor !is null)
             {
                 auto copiedArgs = (cast(Value[]) userArgs).dup;
-                return matchedConstructor.invoke(copiedArgs);
+                return matchedConstructor.invokeWithContext(copiedArgs, caller);
             }
 
             enforce(userArgs.length <= 1,

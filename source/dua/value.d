@@ -11,6 +11,15 @@ import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, KeyType, Orig
 import std.typecons : Tuple;
 import std.math : isFinite;
 import dua.type_syntax;
+import dua.native_defaults;
+
+/// Location of a Dua call expression. line == 0 means no script caller.
+struct CallSite
+{
+    string moduleName;
+    string sourceName;
+    size_t line;
+}
 
 abstract class CallableValue
 {
@@ -22,6 +31,12 @@ abstract class CallableValue
     }
 
     abstract Value invoke(Value[] args);
+
+    /// Existing host callables need only implement invoke(args).
+    Value invokeWithContext(Value[] args, CallSite caller)
+    {
+        return invoke(args);
+    }
 
     size_t expectedArity() const
     {
@@ -48,6 +63,7 @@ abstract class CallableValue
 final class ReflectedCallable : CallableValue
 {
     private Value delegate(Value[] args) invoker;
+    private Value delegate(Value[] args, CallSite caller) contextualInvoker;
     private int delegate(scope const(Value)[] args) argumentMatcher;
     private size_t minimum;
     private size_t maximum;
@@ -58,20 +74,27 @@ final class ReflectedCallable : CallableValue
     this(string debugName, size_t minimum, Value delegate(Value[] args) invoker,
         Object lifetimeOwner = null,
         int delegate(scope const(Value)[] args) argumentMatcher = null,
-        size_t maximum = size_t.max, bool unbounded = false)
+        size_t maximum = size_t.max, bool unbounded = false,
+        Value delegate(Value[] args, CallSite caller) contextualInvoker = null)
     {
         super(debugName);
         this.minimum = minimum;
         this.maximum = unbounded ? size_t.max
             : maximum == size_t.max ? minimum : maximum;
         this.invoker = invoker;
+        this.contextualInvoker = contextualInvoker;
         this.lifetimeOwner = lifetimeOwner;
         this.argumentMatcher = argumentMatcher;
     }
 
     override Value invoke(Value[] args)
     {
-        return invoker(args);
+        return invokeWithContext(args, CallSite.init);
+    }
+
+    override Value invokeWithContext(Value[] args, CallSite caller)
+    {
+        return contextualInvoker is null ? invoker(args) : contextualInvoker(args, caller);
     }
 
     override size_t expectedArity() const
@@ -119,6 +142,11 @@ final class OverloadedReflectedCallable : CallableValue
 
     override Value invoke(Value[] args)
     {
+        return invokeWithContext(args, CallSite.init);
+    }
+
+    override Value invokeWithContext(Value[] args, CallSite caller)
+    {
         ReflectedCallable match;
         int bestScore = -1;
         bool ambiguous;
@@ -141,7 +169,7 @@ final class OverloadedReflectedCallable : CallableValue
                 debugName, args.length, allowedArities()));
         enforce(!ambiguous,
             format("Function '%s' has multiple matching overloads for %s arguments", debugName, args.length));
-        return match.invoke(args);
+        return match.invokeWithContext(args, caller);
     }
 
     // enforce evaluates its message lazily; successful calls need no strings.
@@ -1575,6 +1603,33 @@ private template RequiredDefaultArity(Defaults...)
 private enum reflectedMinimumArity(alias declaration) =
     RequiredDefaultArity!(ParameterDefaults!declaration);
 
+private bool hasLocationDefaults(alias declaration)()
+{
+    static foreach (index; 0 .. Parameters!declaration.length)
+        static if (parameterLocationDefault!(declaration, index) != LocationDefault.none)
+            return true;
+    return false;
+}
+
+private void assignReflectedDefault(alias declaration, size_t index, T)(ref T target, CallSite caller)
+{
+    enum origin = parameterLocationDefault!(declaration, index);
+    static if (origin != LocationDefault.none)
+    {
+        if (caller.line != 0)
+        {
+            static if (origin == LocationDefault.moduleName)
+                target = caller.moduleName;
+            else static if (origin == LocationDefault.sourceName)
+                target = caller.sourceName;
+            else static if (origin == LocationDefault.line)
+                target = cast(T) caller.line;
+            return;
+        }
+    }
+    target = ParameterDefaults!declaration[index];
+}
+
 private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C)(string debugName,
     auto ref C callable,
     Object lifetimeOwner = null)
@@ -1587,7 +1642,7 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
     enum minimum = isTypesafeVariadic ? fixedArity : reflectedMinimumArity!declaration;
     enum maximum = isTypesafeVariadic ? size_t.max : fixedArity;
     auto storedCallable = callable;
-    return new ReflectedCallable(debugName, minimum, (Value[] args) {
+    auto invoker = (Value[] args, CallSite caller) {
         enforce(args.length >= minimum && args.length <= maximum,
             minimum == maximum
                 ? format("Function '%s' expected %s arguments but got %s", debugName, minimum, args.length)
@@ -1601,7 +1656,11 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
             if (index < args.length)
                 converted[index] = convertFromValue!(MutableParams[index])(args[index]);
             else static if (!is(ParameterDefaults!declaration[index] == void))
-                converted[index] = ParameterDefaults!declaration[index];
+            {
+                // Inspect the declaration, since a bound delegate may have lost
+                // its defaults. Metadata is determined during reflection.
+                assignReflectedDefault!(declaration, index)(converted[index], caller);
+            }
         }}
         static if (isTypesafeVariadic)
         {
@@ -1618,7 +1677,8 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
         }
         else
             return convertToValue(storedCallable(converted.expand));
-    }, lifetimeOwner, (scope const(Value)[] args) {
+    };
+    return new ReflectedCallable(debugName, minimum, null, lifetimeOwner, (scope const(Value)[] args) {
         static if (isTypesafeVariadic)
         {
             if (args.length < fixedArity)
@@ -1658,7 +1718,7 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
             score -= cast(int) (fixedArity - args.length);
         }
         return score;
-    }, maximum, isTypesafeVariadic);
+    }, maximum, isTypesafeVariadic, invoker);
 }
 
 package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C callable,
@@ -1745,12 +1805,23 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
         auto receiver = &root;
     else
         auto receiver = root;
-    return new ReflectedCallable(debugName, minimum, (Value[] args) {
+    auto invoker = (Value[] args, CallSite caller) {
         static if (is(Root == struct))
             auto ref actualRoot = *receiver;
         else
             auto actualRoot = receiver;
         enum actualExpression = "actualRoot" ~ expression[4 .. $];
+        static if (hasLocationDefaults!overload())
+        {
+            if (caller.line != 0)
+            {
+                // Resolve alias-this at invocation time; use the same declaration
+                // metadata and argument conversion as ordinary reflected methods.
+                auto bound = makeBoundReflectedCallable!overload(debugName,
+                    mixin(actualExpression), lifetimeOwner);
+                return bound.invokeWithContext(args, caller);
+            }
+        }
         auto converted = Tuple!MutableParams();
         static foreach (index, Param; Params){{
             if (index < args.length)
@@ -1774,7 +1845,9 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
             }}
             assert(0);
         }
-    }, lifetimeOwner, null, Params.length);
+    };
+    return new ReflectedCallable(debugName, minimum, null, lifetimeOwner,
+        null, Params.length, false, invoker);
 }
 
 private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
@@ -1895,7 +1968,7 @@ ReflectedCallable makeStaticReflectedCallable(alias overload)(string debugName)
 ReflectedCallable makeAliasReflectedCallable(alias callable)(string debugName)
 {
     auto storedCallable = callable;
-    return makeReflectedCallable(debugName, storedCallable);
+    return makeReflectedCallableWithDefaults!callable(debugName, storedCallable);
 }
 
 ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugName)
@@ -1903,13 +1976,32 @@ ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugNam
     alias Params = Parameters!constructor;
     alias MutableParams = staticMap!(Unqual, Params);
     enum minimum = reflectedMinimumArity!constructor;
-    return new ReflectedCallable(debugName, minimum, (Value[] args) {
+    auto invoker = (Value[] args, CallSite caller) {
+        enforce(args.length >= minimum && args.length <= Params.length,
+            format("Constructor '%s' expected %s to %s arguments but got %s",
+                debugName, minimum, Params.length, args.length));
         auto converted = Tuple!MutableParams();
         static foreach (index, Param; Params)
         {{
             if (index < args.length)
                 converted[index] = convertFromValue!(Unqual!Param)(args[index]);
         }}
+        static if (hasLocationDefaults!constructor())
+        {
+            if (caller.line != 0)
+            {
+                static foreach (index; 0 .. Params.length)
+                {{
+                    static if (!is(ParameterDefaults!constructor[index] == void))
+                        if (index >= args.length)
+                            assignReflectedDefault!(constructor, index)(converted[index], caller);
+                }}
+                static if (is(T == class))
+                    return Value.reflect(new T(converted.expand));
+                else
+                    return Value.reflect(T(converted.expand));
+            }
+        }
         static if (is(T == class))
         {
             static foreach (count; minimum .. Params.length + 1){{
@@ -1925,7 +2017,9 @@ ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugNam
             }}
         }
         assert(0);
-    }, null, null, Params.length);
+    };
+    return new ReflectedCallable(debugName, minimum, null, null,
+        null, Params.length, false, invoker);
 }
 
 private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string operatorSymbol)(
@@ -2060,7 +2154,7 @@ private Value convertToValue(T)(auto ref T value)
     {
         return Value.from(convTo!string(value));
     }
-    else static if (is(T == bool))
+    else static if (is(Unqual!T == bool))
     {
         return Value.from(value);
     }

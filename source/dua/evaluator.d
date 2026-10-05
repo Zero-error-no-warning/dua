@@ -73,6 +73,7 @@ package(dua) struct EvaluationStack(T)
 /// Keeping it together prevents evaluator internals from becoming ScriptEngine API.
 struct EvaluatorContext
 {
+    package string moduleName;
     package string sourceName;
     package EvaluationStack!string callStack;
     package string[] lastErrorStack;
@@ -1061,8 +1062,9 @@ mixin template EvaluatorImplementation()
                         : evaluate(ternary.whenFalse, environment);
                 case Expression.Kind.call:
                     auto call = cast(CallExpression) expression;
+                    auto caller = callSite(call);
                     auto args = evaluateExpressionList(call.arguments, environment);
-                    return evaluateCall(call.callee, args, environment);
+                    return evaluateCall(call.callee, args, environment, caller);
                 case Expression.Kind.array:
                     auto array = cast(ArrayExpression) expression;
                     Value[] items;
@@ -1136,7 +1138,7 @@ mixin template EvaluatorImplementation()
                         "Property access currently supports tables/reflected structs/classes");
                     if (auto getter = container.propertyGetter(get.memberName))
                     {
-                        auto refreshed = invokeFunctionValueWithThis(*getter, [], container);
+                        auto refreshed = invokeFunctionValueWithThis(*getter, [], container, callSite(get));
                         auto property = container.findMember(get.memberName);
                         if (property is null || property.kind != ValueKind.function_)
                         {
@@ -1149,7 +1151,7 @@ mixin template EvaluatorImplementation()
                         if (container.moduleOwner is null && value.kind == ValueKind.function_
                             && value.functionValue.acceptsArity(0))
                         {
-                            return invokeFunctionValueWithThis(*value, [], container);
+                            return invokeFunctionValueWithThis(*value, [], container, callSite(get));
                         }
                         return *value;
                     }
@@ -1396,13 +1398,19 @@ mixin template EvaluatorImplementation()
         }
     }
 
-    private Value evaluateCall(Expression calleeExpression, Value[] args, Environment environment)
+    private CallSite callSite(Expression expression) const
+    {
+        return CallSite(evaluatorContext.moduleName, evaluatorContext.sourceName, expression.line);
+    }
+
+    private Value evaluateCall(Expression calleeExpression, Value[] args, Environment environment,
+        CallSite caller)
     {
         if (calleeExpression.kind == Expression.Kind.get)
         {
             auto get = cast(GetExpression) calleeExpression;
             auto receiver = evaluate(get.target, environment);
-            return callMethodOrUfcs(receiver, get.memberName, args, environment);
+            return callMethodOrUfcs(receiver, get.memberName, args, environment, caller);
         }
 
         auto callee = evaluate(calleeExpression, environment);
@@ -1413,13 +1421,14 @@ mixin template EvaluatorImplementation()
             {
                 Value[] bridgedArgs = [callee];
                 bridgedArgs ~= args;
-                return invokeFunctionValue(callValue, bridgedArgs);
+                return invokeFunctionValue(callValue, bridgedArgs, caller);
             }
         }
-        return invokeFunctionValue(callee, args);
+        return invokeFunctionValue(callee, args, caller);
     }
 
-    private Value callMethodOrUfcs(Value receiver, string functionName, Value[] args, Environment environment)
+    private Value callMethodOrUfcs(Value receiver, string functionName, Value[] args,
+        Environment environment, CallSite caller)
     {
         if (receiver.kind == ValueKind.associativeArray)
         {
@@ -1448,7 +1457,7 @@ mixin template EvaluatorImplementation()
             {
                 enforce(method.kind == ValueKind.function_,
                     format("Property '%s' exists but is not callable", functionName));
-                return invokeFunctionValueWithThis(*method, args, receiver);
+                return invokeFunctionValueWithThis(*method, args, receiver, caller);
             }
         }
 
@@ -1456,21 +1465,22 @@ mixin template EvaluatorImplementation()
         {
             Value[] ufcsArgs = [receiver];
             ufcsArgs ~= args;
-            return invokeFunctionValue(*ufcsFunction, ufcsArgs);
+            return invokeFunctionValue(*ufcsFunction, ufcsArgs, caller);
         }
 
         enforce(false, format("No method or UFCS function named '%s'", functionName));
         assert(0);
     }
 
-    private Value invokeFunctionValueWithThis(Value callable, Value[] args, Value thisValue)
+    private Value invokeFunctionValueWithThis(Value callable, Value[] args, Value thisValue,
+        CallSite caller = CallSite.init)
     {
         evaluatorContext.thisContextStack.push(thisValue);
         scope (exit)
         {
             evaluatorContext.thisContextStack.pop();
         }
-        return invokeFunctionValue(callable, args);
+        return invokeFunctionValue(callable, args, caller);
     }
 
     private bool hasThisContext() const
@@ -1561,7 +1571,7 @@ mixin template EvaluatorImplementation()
         return invokeFunctionValue(functionValue, args);
     }
 
-    private Value invokeFunctionValue(Value callable, Value[] args)
+    private Value invokeFunctionValue(Value callable, Value[] args, CallSite caller = CallSite.init)
     {
         enforce(callable.kind == ValueKind.function_, "Only functions are callable");
         auto maximumDepth = evaluatorContext.currentRunOptions.limits.maxCallDepth;
@@ -1578,7 +1588,7 @@ mixin template EvaluatorImplementation()
         }
         try
         {
-            return callable.functionValue.invoke(copyValues(args)).valueCopy();
+            return callable.functionValue.invokeWithContext(copyValues(args), caller).valueCopy();
         }
         catch (Exception error)
         {

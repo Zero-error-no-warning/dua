@@ -16,6 +16,7 @@ struct Dua
     alias Value = dua.value.Value;
     alias ValueKind = dua.value.ValueKind;
     alias CallableValue = dua.value.CallableValue;
+    alias CallSite = dua.value.CallSite;
     alias ScriptEngine = dua.runtime.ScriptEngine;
     alias ScriptModule = dua.runtime.ScriptModule;
     alias ModuleHandle = dua.runtime.ModuleHandle;
