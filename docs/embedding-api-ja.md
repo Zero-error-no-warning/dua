@@ -324,6 +324,8 @@ D → Dua では、従来の `Value.from` / `bindAuto` は文字列キーをテ�
 
 ### 4.3 bindNative
 
+D の struct・class を reflection で公開した場合、D の書式処理が利用できる `toString` は文字列化に自動使用されます。Dua の `cast!(string) value`、`i"$(value)"`、ホスト側の `Value.toHostString()` で共通です。引数なしで文字列を返す形式に加え、D の書式処理に対応する sink 形式も使用できます。struct のコピーはコピー先の値、class は元のオブジェクトを参照して整形します。`toString` の結果はキャッシュしません。通常の `cast(string)` は引き続き文字列の型検査のみです。
+
 ```d
 engine.bindNative("sum", (scope const(Dua.Value)[] args) {
     long total;

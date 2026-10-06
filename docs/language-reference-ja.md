@@ -265,6 +265,7 @@ auto count = cast(Count) value;         // 3
 - `cast` の数値変換先は `byte` / `ubyte` / `short` / `ushort` / `int` / `uint` / `long` / `ulong` / `float` / `double` / `real` です。数値・真偽値を受け取り、D のキャストを使います。狭い整数への変換は上位ビットを切り捨て、小数から整数への変換はゼロ方向に切り捨てます。文字列の解析は行いません。
 - `cast!` は数値・真偽値・文字列を D の `std.conv.to` で変換します。範囲外や不正な文字列はエラーです。64ビット整数への変換では NaN・無限大・上限境界も検査します。
 - `cast(string)` は既に文字列の値だけを受け取ります。値の文字列化には `cast!(string)` を使います。
+- D から公開した struct・class に D の書式処理で利用可能な `toString` がある場合、`cast!(string)` と文字列補間はそれを自動で使います。`string toString()` と sink を受け取る形式に対応し、文字列化する時点の値を使います。該当する `toString` がなければ従来のフィールド表示を使います。`toString` が投げた例外は Dua の実行時エラーとして伝わります。
 - `cast(bool)` は Dua の条件式と同じ真偽判定を維持します。`cast(bool) "false"` は真ですが、`cast!(bool) "false"` は文字列を解析して偽になります。
 - `cast(void)` は対象を評価して結果を捨て、Dua の `null` を返します。
 - 純粋な型別名は別名先と同じ変換を行います。Union / Optional、名前付き型、delegate 型は既存の型検査に成功した値を返します。Union の候補間での変換は行いません。

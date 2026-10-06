@@ -285,6 +285,8 @@ private final class TableStorage
     size_t coroutineId;
     bool hasCoroutineId;
     Value delegate() copier;
+    // Keep formatting bound to the same live receiver as reflected methods.
+    string delegate() stringifier;
     // Keeps the concrete reflected receiver alive without exposing its type in
     // Value.  Conversion performs a checked cast to ReflectedStructStorage!T,
     // so reflection metadata such as type chains is never treated as identity.
@@ -1270,6 +1272,9 @@ struct Value
             auto owner = reflectedTarget;
             result.tableStorage.nativeOwner = owner;
             result.tableStorage.copier = () => Value.reflect(owner.value);
+            static if (__traits(hasMember, T, "toString")
+                && __traits(compiles, format("%s", owner.value)))
+                result.tableStorage.stringifier = () => format("%s", owner.value);
             static if (__traits(compiles, owner.value == owner.value))
                 result.tableStorage.keyEquals = (Value other) {
                     auto otherOwner = cast(ReflectedStructStorage!T) other.tableStorage.nativeOwner;
@@ -1280,6 +1285,9 @@ struct Value
         {
             result.tableStorage.nativeClass = new ReflectedClassStorage(
                 reflectedTarget, is(T : Object), is(T : immutable(Object)));
+            static if (__traits(hasMember, T, "toString")
+                && __traits(compiles, format("%s", reflectedTarget)))
+                result.tableStorage.stringifier = () => format("%s", reflectedTarget);
         }
         return result;
     }
@@ -1325,6 +1333,9 @@ struct Value
         result.tableStorage.aliasThisTargets = aliasTargets;
         result.tableStorage.nativeOwner = owner;
         result.tableStorage.copier = () => Value.reflect(owner.value);
+        static if (__traits(hasMember, T, "toString")
+            && __traits(compiles, format("%s", owner.value)))
+            result.tableStorage.stringifier = () => format("%s", owner.value);
         static if (__traits(compiles, owner.value == owner.value))
             result.tableStorage.keyEquals = (Value other) {
                 auto otherOwner = cast(ReflectedStructStorage!T) other.tableStorage.nativeOwner;
@@ -1399,6 +1410,8 @@ struct Value
                 return entries.length ? "[" ~ entries.join(", ") ~ "]" : "[:]";
             case ValueKind.table:
             case ValueKind.struct_:
+                if (tableStorage !is null && tableStorage.stringifier !is null)
+                    return tableStorage.stringifier();
                 string[] parts;
                 foreach (key, value; tableValue)
                 {
