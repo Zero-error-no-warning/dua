@@ -4,6 +4,80 @@ version (unittest):
 
 import dua;
 import core.memory : GC;
+import std.format : format;
+
+private struct PrintableVec
+{
+    int x, y;
+    this(int x, int y) { this.x = x; this.y = y; }
+    string toString() { return format("Vec2(%s,%s)", x, y); }
+}
+
+private struct SinkPrintable
+{
+    int value;
+    void toString(scope void delegate(const(char)[]) sink) const
+    {
+        sink(format("sink:%s", value));
+    }
+}
+
+private struct EagerPrintable
+{
+    PrintableVec vector;
+    alias vector this;
+    string toString() const { return format("eager:%s", vector.x); }
+}
+
+private class PrintableObject
+{
+    int value;
+    override string toString() { return format("object:%s", value); }
+}
+
+private struct ThrowingPrintable
+{
+    string toString() { throw new Exception("format failed"); }
+}
+
+unittest
+{
+    auto engine = new ScriptEngine;
+    engine.bindType!PrintableVec("Vec2");
+    engine.bindAuto("sink", SinkPrintable(5));
+    engine.bindAuto("eager", EagerPrintable(PrintableVec(6, 7)));
+    auto object = new PrintableObject;
+    object.value = 8;
+    engine.bindAuto("object", object);
+    engine.bindAuto("bad", ThrowingPrintable());
+    assert(engine.run(q{
+        auto original = Vec2(0, 0);
+        auto copied = original;
+        copied.x = 3;
+        object.value = 9;
+        return cast!(string) original == "Vec2(0,0)"
+            && cast!(string) copied == "Vec2(3,0)"
+            && i" $(Vec2(1,1)) " == " Vec2(1,1) "
+            && i"$(copied)" == "Vec2(3,0)"
+            && cast!(string) [original] == "[Vec2(0,0)]"
+            && cast!(string) sink == "sink:5"
+            && cast!(string) eager == "eager:6"
+            && i"$(object)" == "object:9";
+    }).truthy());
+    assert(object.value == 9);
+    auto retained = Value.reflect(PrintableVec(10, 11)).valueCopy();
+    GC.collect();
+    assert(retained.toHostString() == "Vec2(10,11)");
+    foreach (source; [`return cast!(string) bad;`, `return i"$(bad)";`])
+    {
+        auto failure = engine.runSafe(source);
+        assert(!failure.ok);
+        import std.algorithm.searching : canFind;
+        assert(failure.errorMessage.canFind("format failed"));
+    }
+    assert(!engine.runSafe("return cast(string) Vec2(0,0);").ok);
+    assert(Value.reflect(Cell(2)).toHostString().length > 0);
+}
 
 private struct Cell
 {
