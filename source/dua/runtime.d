@@ -1543,7 +1543,7 @@ unittest
     auto result = engine.run(q{
         int integer = cast(int) 3.9;
         double floating = cast(double) integer;
-        string text = cast(string) integer;
+        string text = cast!(string) integer;
         bool flag = cast(bool) integer;
         int accept(int x) { return x; }
         int converted() { return cast(int) 2.9; }
@@ -1551,11 +1551,11 @@ unittest
             && accept(cast(int) 4.9) == 4 && converted() == 2
             && cast(int) -3.9 == -3 && cast(int) 3.9 * 2 == 6
             && cast(int) (3.9 * 2) == 7 && -cast(int) 3.9 == -3
-            && cast(int) cast(double) "12.5" == 12
+            && cast(int) cast!(double) "12.5" == 12
             && cast(int) true == 1 && cast(double) false == 0.0
-            && cast(int) "42" == 42 && cast(double) "2.5" == 2.5
+            && cast!(int) "42" == 42 && cast!(double) "2.5" == 2.5
             && !cast(bool) null && !cast(bool) 0 && !cast(bool) ""
-            && cast(bool) "false" && cast(string) null == "null";
+            && cast(bool) "false" && cast!(string) null == "null";
     }, options);
     assert(result.booleanValue);
     assert(engine.check("string wrong = cast(int) 1.5;").length == 1);
@@ -1593,8 +1593,8 @@ unittest
     assert(result.booleanValue);
     foreach (source; ["return cast(int) {};", "return cast(double) null;",
         "return cast(int) \"abc\";", "return cast(double) \"abc\";",
-        "return cast(int) 9223372036854775808.0;",
-        "return cast(int) (0.0 / 0.0);", "return cast(int) (1.0 / 0.0);",
+        "return cast!(int) 9223372036854775808.0;",
+        "return cast!(int) (0.0 / 0.0);", "return cast!(int) (1.0 / 0.0);",
         "return cast(Unknown) 1;", "return cast(array) 1;",
         "return cast(Point) { x = true };",
         "return cast(OptionalInt) 1.5;"])
@@ -1606,6 +1606,80 @@ unittest
     auto caught = engine.run("try { return cast(int) {}; } catch (err) { return true; }");
     assert(caught.booleanValue);
     assert(!engine.runSafe("auto x = 1; cast(int) x = 2;").ok);
+    assert(!engine.runSafe("auto x = 1; cast!(int) x = 2;").ok);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    assert(engine.run(q{
+        alias Small = ubyte;
+        alias Text = string;
+        auto calls = 0;
+        string next() { calls = calls + 1; return "12"; }
+        auto n = cast!(int) next();
+        auto ignored = cast(void) next();
+        auto to = 7;
+        return n == 12 && calls == 2 && ignored == null && to == 7
+            && cast(ubyte) 256 == 0 && cast(byte) 255 == -1
+            && cast(short) 65535 == -1 && cast(ushort) -1 == 65535
+            && cast(uint) -1 == 4294967295
+            && cast(long) -3.9 == -3 && cast(float) 16777217 == 16777216.0
+            && cast(real) 3 == 3.0 && cast(ulong) 3.9 == 3
+            && cast(Small) 256 == 0 && cast!(Small) "255" == 255
+            && cast(Text) "abc" == "abc" && cast!(Text) 42 == "42"
+            && cast!(double) "2.5" == 2.5 && cast!(long) "42" == 42
+            && cast!(float) "2.5" == 2.5 && cast!(bool) "false" == false
+            && cast!(int) "3" * 2 == 6 && -cast!(int) "3" == -3;
+    }).booleanValue);
+    foreach (source; [
+        `return cast(int) "42";`, `return cast(double) "2.5";`,
+        `return cast(string) 42;`, `return cast(string) null;`,
+        `return cast!(ubyte) 256;`, `return cast!(uint) -1;`,
+        `return cast!(int) "abc";`, `return cast!(bool) "invalid";`,
+        `return cast!(byte) "128";`, `return cast!(ulong) "9223372036854775808";`,
+        `return cast!(byte) (0.0 / 0.0);`, `return cast!(uint) (1.0 / 0.0);`,
+        `return cast!(ushort) -1.0;`, `return cast!(short) 32768.0;`,
+        `return cast!(Small) 256;`,
+        `alias Maybe = int | null; return cast!(Maybe) "42";`])
+    {
+        auto outcome = engine.runSafe(source);
+        assert(!outcome.ok, source);
+        assert(outcome.errorMessage.canFind("expression @"), outcome.errorMessage);
+    }
+    foreach (source; ["return cast!int 1;", "return cast!() 1;", "return cast!(int);",
+        "return cast!!(int) 1;"])
+        assert(!engine.runSafe(source).ok, source);
+    assert(engine.check("string wrong = cast!(int) 1.5;").length == 1);
+}
+
+unittest
+{
+    auto engine = new ScriptEngine();
+    RunOptions options;
+    options.typeCheck = true;
+    assert(engine.run(q{
+        auto number = 42;
+        string single = i"$(number)";
+        string empty = i"";
+        string literal = i"hello";
+        string nil = i"$(null)";
+        string flag = i"$(false)";
+        string items = i"$([1, 2])";
+        string adjacent = i"$(1)$(2)";
+        string sequence = i"$(1, 2)";
+        string arrays = i"$([1], [2])";
+        string mixed = i"value=$(number)!";
+        string dollars = i"$$$(number)";
+        auto trace = "";
+        int next(int n) { trace ~= cast!(string) n; return n; }
+        string ordered = i"$(next(1), next(2))$(next(3))";
+        return single == "42" && empty == "" && literal == "hello"
+            && nil == "null" && flag == "false" && items == "[1, 2]"
+            && adjacent == "12" && sequence == "12" && arrays == "[1][2]"
+            && mixed == "value=42!" && dollars == "$42"
+            && ordered == "123" && trace == "123";
+    }, options).booleanValue);
 }
 
 private final class BindTypeEnemy

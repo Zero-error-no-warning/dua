@@ -354,8 +354,8 @@ return box.label().surround("*"); // "*Dua*"
 ### 7. 明示的なキャストと失敗を扱う
 
 ```dua
-auto ok, number = pcall((string text) => cast(int) text, "42");
-auto invalid, message = pcall((string text) => cast(int) text, "forty");
+auto ok, number = pcall((string text) => cast!(int) text, "42");
+auto invalid, message = pcall((string text) => cast!(int) text, "forty");
 return [ok, number, invalid]; // [true, 42, false]
 ```
 
