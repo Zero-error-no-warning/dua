@@ -821,10 +821,11 @@ private struct Parser
         if (match(TokenKind.keywordCast))
         {
             auto castToken = previous();
+            auto checkedConversion = match(TokenKind.bang);
             consume(TokenKind.leftParen, "Expected '(' after cast");
             auto targetType = parseTypeName();
             consume(TokenKind.rightParen, "Expected ')' after cast type");
-            return locatedExpression(new CastExpression(targetType, parseUnary()), castToken);
+            return locatedExpression(new CastExpression(targetType, parseUnary(), checkedConversion), castToken);
         }
         if (match(TokenKind.bang, TokenKind.minus))
         {
@@ -1009,7 +1010,9 @@ private struct Parser
                 auto embeddedExpressions = parseInterpolationExpressionSequence(embedded, prefixToken);
                 foreach (expression; embeddedExpressions)
                 {
-                    parts.put(expression);
+                    // Convert each value before concatenation, including a lone
+                    // interpolation and adjacent array/numeric expressions.
+                    parts.put(locatedExpression(new CastExpression("string", expression, true), prefixToken));
                 }
                 cursor = end + 1;
                 continue;

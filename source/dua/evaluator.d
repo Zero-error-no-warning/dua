@@ -990,7 +990,7 @@ mixin template EvaluatorImplementation()
                     return environment.get(variable.name, variable.slots);
                 case Expression.Kind.cast_:
                     auto conversion = cast(CastExpression) expression;
-                    return castValue(evaluate(conversion.operand, environment), conversion.targetType);
+                    return castValue(evaluate(conversion.operand, environment), conversion.targetType, conversion.checkedConversion);
                 case Expression.Kind.unary:
                     auto unary = cast(UnaryExpression) expression;
                     switch (unary.operatorSymbol)
@@ -1240,7 +1240,54 @@ mixin template EvaluatorImplementation()
         return format("%s:%s", statement.line, statement.column);
     }
 
-    private Value castValue(Value value, string targetType, size_t depth = 0)
+    // Preserve Dua's long/double storage while using D conversion rules.
+    private Value numericCast(T)(Value value, bool checkedConversion)
+    {
+        T result;
+        switch (value.kind)
+        {
+            case ValueKind.integer:
+                result = checkedConversion ? to!T(value.integerValue) : cast(T) value.integerValue;
+                break;
+            case ValueKind.floating:
+                static if (is(T == byte) || is(T == ubyte) || is(T == short)
+                    || is(T == ushort) || is(T == uint))
+                    if (checkedConversion)
+                        enforce(value.floatingValue >= T.min && value.floatingValue <= T.max,
+                            "Cannot convert non-finite or out-of-range double to " ~ T.stringof);
+                static if (is(T == long))
+                    if (checkedConversion)
+                        enforce(value.floatingValue >= -9223372036854775808.0
+                            && value.floatingValue < 9223372036854775808.0,
+                            "Cannot convert non-finite or out-of-range double to int");
+                static if (is(T == ulong))
+                    if (checkedConversion)
+                        enforce(value.floatingValue >= 0
+                            && value.floatingValue < 9223372036854775808.0,
+                            "Result exceeds Dua's signed 64-bit integer storage");
+                result = checkedConversion ? to!T(value.floatingValue) : cast(T) value.floatingValue;
+                break;
+            case ValueKind.boolean:
+                result = checkedConversion ? to!T(value.booleanValue) : cast(T) value.booleanValue;
+                break;
+            case ValueKind.string_:
+                enforce(checkedConversion, "String parsing requires cast!(Type)");
+                result = to!T(value.stringValue);
+                break;
+            default:
+                enforce(false, format("Cannot convert %s to %s", value.kind, T.stringof));
+        }
+        static if (is(T == bool)) return Value.from(result);
+        else static if (is(T == float) || is(T == double)) return Value.from(cast(double) result);
+        else
+        {
+            static if (is(T == ulong))
+                enforce(result <= long.max, "Result exceeds Dua's signed 64-bit integer storage");
+            return Value.from(cast(long) result);
+        }
+    }
+
+    private Value castValue(Value value, string targetType, bool checkedConversion = false, size_t depth = 0)
     {
         enforce(depth < 64, "Cyclic or excessively nested cast type alias");
         string elementType, keyType;
@@ -1254,29 +1301,31 @@ mixin template EvaluatorImplementation()
             {
                 auto alternatives = definition.tableValue["alternatives"].arrayValue;
                 if (alternatives.length == 1)
-                    return castValue(value, alternatives[0].toHostString(), depth + 1);
+                    return castValue(value, alternatives[0].toHostString(), checkedConversion, depth + 1);
             }
         }
         switch (targetType)
         {
-            case "int":
-                if (value.kind == ValueKind.boolean)
-                    return Value.from(value.booleanValue ? 1 : 0);
-                if (value.kind == ValueKind.string_)
-                    return Value.from(value.stringValue.to!long);
-                if (value.kind == ValueKind.floating)
-                    enforce(value.floatingValue >= -9223372036854775808.0
-                        && value.floatingValue < 9223372036854775808.0,
-                        "Cannot cast non-finite or out-of-range double to int");
-                return Value.from(value.toInt());
-            case "double":
-                if (value.kind == ValueKind.boolean)
-                    return Value.from(value.booleanValue ? 1.0 : 0.0);
-                if (value.kind == ValueKind.string_)
-                    return Value.from(value.stringValue.to!double);
-                return Value.from(value.toFloat());
-            case "bool": return Value.from(value.truthy());
-            case "string": return Value.from(value.toHostString());
+            case "byte": return numericCast!byte(value, checkedConversion);
+            case "ubyte": return numericCast!ubyte(value, checkedConversion);
+            case "short": return numericCast!short(value, checkedConversion);
+            case "ushort": return numericCast!ushort(value, checkedConversion);
+            case "uint": return numericCast!uint(value, checkedConversion);
+            case "ulong": return numericCast!ulong(value, checkedConversion);
+            case "int", "long": return numericCast!long(value, checkedConversion);
+            case "float": return numericCast!float(value, checkedConversion);
+            case "double", "real": return numericCast!double(value, checkedConversion);
+            case "bool":
+                if (checkedConversion) return numericCast!bool(value, true);
+                return Value.from(value.truthy());
+            case "string":
+                if (checkedConversion) return Value.from(value.toHostString());
+                if (value.kind == ValueKind.string_) return value;
+                break;
+            case "void":
+                if (!checkedConversion) return Value.init;
+                if (value.kind == ValueKind.null_) return value;
+                break;
             case "array":
                 if (value.kind == ValueKind.array) return value;
                 break;

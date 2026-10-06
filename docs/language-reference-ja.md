@@ -246,26 +246,38 @@ if (hero is Named) {
 
 ### 型キャスト
 
-`cast(Type) expr` で明示的に型を変換します。
+`cast(Type) expr` は D 風のキャスト、`cast!(Type) expr` は `std.conv.to!Type` に相当する値変換です。`to` はキーワードではありません。
 
 ```dua
 auto value = 3.9;
 int whole = cast(int) value;             // 3（小数部をゼロ方向に切り捨て）
 double decimal = cast(double) whole;    // 3.0
-string text = cast(string) whole;       // "3"
-int parsed = cast(int) "42";            // 42
+string text = cast!(string) whole;      // "3"
+int parsed = cast!(int) "42";           // 42
+auto wrapped = cast(ubyte) 256;         // 0（下位8ビット）
+auto checked = cast!(ubyte) "255";      // 255（範囲検査あり）
+// cast!(ubyte) 256 は範囲外エラー
+// cast(int) "42" / cast(string) 42 はエラー
 alias Count = int;
 auto count = cast(Count) value;         // 3
 ```
 
-- `int` / `double`: 数値、真偽値（false は 0、true は 1）、数値文字列を変換します。`int` は符号付き64ビット整数です。整数範囲外、NaN、無限大から `int` への変換はエラーです。
-- `bool`: 条件式と同じ真偽判定です。文字列 `"false"` も空でないため真になります。
-- `string`: 値の文字列表現を返します。
+- `cast` の数値変換先は `byte` / `ubyte` / `short` / `ushort` / `int` / `uint` / `long` / `ulong` / `float` / `double` / `real` です。数値・真偽値を受け取り、D のキャストを使います。狭い整数への変換は上位ビットを切り捨て、小数から整数への変換はゼロ方向に切り捨てます。文字列の解析は行いません。
+- `cast!` は数値・真偽値・文字列を D の `std.conv.to` で変換します。範囲外や不正な文字列はエラーです。64ビット整数への変換では NaN・無限大・上限境界も検査します。
+- `cast(string)` は既に文字列の値だけを受け取ります。値の文字列化には `cast!(string)` を使います。
+- `cast(bool)` は Dua の条件式と同じ真偽判定を維持します。`cast(bool) "false"` は真ですが、`cast!(bool) "false"` は文字列を解析して偽になります。
+- `cast(void)` は対象を評価して結果を捨て、Dua の `null` を返します。
 - 純粋な型別名は別名先と同じ変換を行います。Union / Optional、名前付き型、delegate 型は既存の型検査に成功した値を返します。Union の候補間での変換は行いません。
 - `array` / `table` / `function` は対応する種類の値を受け付けます。`any` は任意の値を受け付けます。参照型の共有とstructのコピー規則は通常の代入と同じです。
 - 変換できない値や不正な数値文字列は、キャスト位置付きの実行時エラーになります。
 
-キャストは単項演算子と同じ優先順位で、対象を一度だけ評価します。`cast(int) value * 2` は変換後に乗算します。式全体を変換する場合は `cast(int) (value * 2)` と書きます。
+Union / Optional、名前付き型、delegate 型、コンテナの検査は両構文で共通です。コンテナ要素を個別に数値変換したり、メモリを再解釈したりはしません。delegate 型は現在、関数値であることだけを検査します。
+
+D との互換範囲: Dua の整数の保存形式は符号付き64ビットのままで、`int` / `long` はともに64ビットです。`ulong` の結果も `long.max` を超えるとエラーです。浮動小数点値は double で保存し、`cast(float)` は一度 float 精度に丸めます。`real` は double と同じ扱いです。通常の `cast` による範囲外の浮動小数点数から整数への変換結果は保証しません。ポインタ、型修飾子の変更、`opCast`、D のクラスダウンキャストは追加していません。
+
+移行: 従来の文字列化 `cast(string) value` は `cast!(string) value` に、文字列解析 `cast(int) text` は `cast!(int) text` に変更してください（他の数値型も同様）。
+
+両構文とも単項演算子と同じ優先順位で、対象を一度だけ評価します。`cast(int) value * 2` は変換後に乗算します。式全体を変換する場合は `cast(int) (value * 2)` と書きます。`cast!(int) (value * 2)` も同様です。
 
 ## 7. 演算子と優先順位
 
@@ -274,7 +286,7 @@ auto count = cast(Count) value;         // 3
 | 優先順位 | 演算子 | 用途 |
 |---|---|---|
 | 1（最強） | `()`、`.`、`[]`、`[..]` | 呼び出し、メンバー、添字、スライス |
-| 2 | `!`、`-`、`cast(Type)` | 論理否定、符号反転、明示変換 |
+| 2 | `!`、`-`、`cast(Type)`、`cast!(Type)` | 論理否定、符号反転、明示変換 |
 | 3 | `*`、`/`、`%` | 乗算、除算、整数剰余 |
 | 4 | `+`、`-`、`~` | 加減、連結 |
 | 5 | `<<`、`>>` | 整数シフト |
@@ -325,6 +337,7 @@ auto dollar = i"$$$(level)"; # $7
 - `$(expr)` は式の文字列表現を挿入します。
 - `$(expr1, expr2)` は式列を左から評価し、それぞれを連結します。
 - `$$` はリテラルの `$` です。
+- 補間文字列は常に string を返します。`i"$(42)"` は `"42"`、`i"$(1, 2)"` は `"12"` です。各式は左から一度だけ評価し、`cast!(string)` と同じ規則で文字列化してから連結します。
 
 ## 9. エラー処理
 

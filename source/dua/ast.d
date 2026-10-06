@@ -172,10 +172,13 @@ final class CastExpression : Expression
     string targetType;
     Expression operand;
 
-    this(string targetType, Expression operand)
+    bool checkedConversion;
+
+    this(string targetType, Expression operand, bool checkedConversion = false)
     {
         super(Kind.cast_);
         this.targetType = targetType;
+        this.checkedConversion = checkedConversion;
         this.operand = operand;
     }
 }
