@@ -148,18 +148,23 @@ final class OverloadedReflectedCallable : CallableValue
     override Value invokeWithContext(Value[] args, CallSite caller)
     {
         ReflectedCallable match;
-        int bestScore = -1;
+        int bestScore = int.min;
         bool ambiguous;
         foreach (overload; overloads)
         {
             auto score = overload.matchArguments(args);
+            if (score < 0) continue;
+            // Apply preferences only after a successful type/arity match. A
+            // valid zero-argument call can have a negative preference score.
+            score -= overload.maximumArity() == size_t.max ? 1
+                : cast(int) (overload.maximumArity() - args.length);
             if (score > bestScore)
             {
                 match = overload;
                 bestScore = score;
                 ambiguous = false;
             }
-            else if (score >= 0 && score == bestScore)
+            else if (score == bestScore)
             {
                 ambiguous = true;
             }
@@ -250,7 +255,7 @@ private template hasAggregateAliasThis(T)
     {
         enum member = __traits(getAliasThis, T)[0];
         alias Member = typeof(mixin("(*cast(T*) null)." ~ member));
-        static if (isCallable!Member)
+        static if (isCallable!Member && !isAggregateType!Member)
             alias Target = Unqual!(ReturnType!Member);
         else
             alias Target = Unqual!Member;
@@ -1506,7 +1511,7 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
         enum aliasName = __traits(getAliasThis, Current)[0];
         enum rawExpression = expression ~ "." ~ aliasName;
         alias AliasMember = typeof(mixin(rawExpression));
-        static if (isCallable!AliasMember)
+        static if (isCallable!AliasMember && !isAggregateType!AliasMember)
         {
             enum nextExpression = rawExpression ~ "()";
             alias Next = Unqual!(ReturnType!AliasMember);
@@ -1722,13 +1727,6 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
                     return -1;
                 score += parameterScore;
             }
-            // Prefer a fixed-arity overload when both otherwise match.
-            score -= 1;
-        }
-        else
-        {
-            // Prefer an overload for which fewer default arguments are omitted.
-            score -= cast(int) (fixedArity - args.length);
         }
         return score;
     }, maximum, isTypesafeVariadic, invoker);
@@ -1783,7 +1781,6 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
                 if (parameterScore < 0) return -1;
                 score += parameterScore;
             }
-            --score;
         }
         return score;
     }, size_t.max, variadic);
@@ -1801,7 +1798,10 @@ private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string d
     else
     {
         alias Function = typeof(overload);
-        alias Delegate = ReturnType!Function delegate(Parameters!Function);
+        static if (variadicFunctionStyle!Function == Variadic.typesafe)
+            alias Delegate = ReturnType!Function delegate(Parameters!Function...);
+        else
+            alias Delegate = ReturnType!Function delegate(Parameters!Function);
         Delegate callable = &__traits(getMember, value, __traits(identifier, overload));
         return makeReflectedCallableWithDefaults!overload(debugName, callable, lifetimeOwner);
     }
@@ -1860,7 +1860,19 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
         }
     };
     return new ReflectedCallable(debugName, minimum, null, lifetimeOwner,
-        null, Params.length, false, invoker);
+        (scope const(Value)[] args) {
+            int score;
+            static foreach (index, Param; Params)
+            {{
+                if (index < args.length)
+                {
+                    auto parameterScore = conversionScore!(Unqual!Param)(args[index]);
+                    if (parameterScore < 0) return -1;
+                    score += parameterScore;
+                }
+            }}
+            return score;
+        }, Params.length, false, invoker);
 }
 
 private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,

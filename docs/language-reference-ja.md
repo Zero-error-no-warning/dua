@@ -326,6 +326,8 @@ text ~= total;
 
 メタテーブルは `setmetatable(table, meta)` で設定し、`getmetatable(table)` で取得します。`rawget` / `rawset` はメタ処理を経由しません。
 
+D から reflect した class / struct に具体的な引数型の `opIndex` / `opCall` がある場合、`obj[index]` / `obj(args...)` で呼び出せます。`obj[row, column]` や `obj[]` も `opIndex` に引数をそのまま渡します。通常の配列・連想配列・テーブルの添字は1つです。`bindType` で公開した型の static 演算子は `Name[index]` / `Name(args...)` で利用でき、static `opCall` がある型のコンストラクタは `Name.new(...)` で呼びます。詳しくは[埋め込み API](embedding-api-ja.md)を参照してください。
+
 ## 8. 文字列補間
 
 ```D

@@ -980,6 +980,7 @@ final class ScriptEngine
                     {
                         static if ((__traits(getVisibility, overload) == "public"
                             || __traits(getVisibility, overload) == "export")
+                            && __traits(isStaticFunction, overload)
                             && __traits(compiles,
                             makeStaticReflectedCallable!overload(name ~ "." ~ memberName)))
                         {

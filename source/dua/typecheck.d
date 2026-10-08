@@ -268,6 +268,12 @@ private string inferExpressionType(Expression expression, ref string[string] var
             string element, key;
             if (splitContainerType(container, element, key) && !indexExpression.isSlice)
             {
+                if (indexExpression.indices.length != 1)
+                {
+                    diagnostics ~= CheckDiagnostic(expression.line, expression.column,
+                        "Array/associative array indexing requires a single index");
+                    return "any";
+                }
                 auto actual = inferExpressionType(indexExpression.index, variables, functions, diagnostics);
                 auto expected = key.length ? key : "int";
                 if (!staticTypesCompatible(actual, expected))

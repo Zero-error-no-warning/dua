@@ -870,10 +870,21 @@ private struct Parser
             if (match(TokenKind.leftBracket))
             {
                 auto indexToken = previous();
+                Expression index;
+                if (match(TokenKind.rightBracket))
+                {
+                    expression = locatedExpression(new IndexExpression(expression, cast(Expression[]) []), indexToken);
+                    continue;
+                }
                 auto first = parseExpression();
-                Expression index = match(TokenKind.dotDot)
-                    ? new IndexExpression(expression, first, parseExpression())
-                    : new IndexExpression(expression, first);
+                if (match(TokenKind.dotDot))
+                    index = new IndexExpression(expression, first, parseExpression());
+                else
+                {
+                    Expression[] indices = [first];
+                    while (match(TokenKind.comma)) indices ~= parseExpression();
+                    index = new IndexExpression(expression, indices);
+                }
                 consume(TokenKind.rightBracket, "Expected ']' after index expression");
                 expression = locatedExpression(index, indexToken);
                 continue;
