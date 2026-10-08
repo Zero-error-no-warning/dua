@@ -414,6 +414,8 @@ assert(counter.value == 7); // class は元インスタンスへ反映
 - 公開可能なフィールド、メソッド、演算子がテーブルへ反映されます。
 - 同名の0引数メソッドと1引数メソッドは property getter/setter としても扱われます。通常の `obj.method(...)` 呼び出しも可能です。
 - class の継承チェーンは `typeinfo(value).chain` で取得できます。
+- 引数型が確定している D の `opIndex` / `opCall` は、Dua の `obj[index]` / `obj(args...)` から呼び出せます。`obj[row, column]` や引数なしの `obj[]` にも対応します。オーバーロード、既定引数、型安全な可変長引数は通常の reflected メソッドと同じ規則で扱います。引数型の推論が必要な未インスタンス化テンプレートは公開しません。
+- `opIndex` の戻り値は通常の値変換を経由します。D の `ref` 戻り値への書き込み、`opIndexAssign`、`opSlice`、`opDollar` の自動呼び出しは対象外です。
 
 Reflection は D の型安全な境界変換に対応できるメンバーだけを公開します。公開面が意図どおりかテストしてください。
 
@@ -450,6 +452,7 @@ auto value = engine.run(q{
 
 - D コンストラクタは引数個数で候補を選択します。同じ arity の候補が複数あると曖昧エラーです。
 - 対応するコンストラクタがなければ、struct はゼロ初期化または初期化テーブル、既定構築可能な class は既定構築後に初期化テーブルを適用します。
+- 固定型の static `opIndex` / `opCall` も公開し、`Name[index]` / `Name(args...)` から呼べます。static `opCall` がある場合は `Name(...)` でそれを優先し、コンストラクタは `Name.new(...)` で呼びます。インスタンスを reflect した場合も static 演算子を利用できます。
 - `public` / `export` の static メンバーを型テーブルへ反映します。`private` / `protected` / `package` のメンバーは変換可否の検査前に除外します。同名の関数が複数ある場合も公開オーバーロードだけが対象です。非公開のネイティブリソースをスクリプト用に変換する処理は生成しません。
 - 構造体・クラス内の名前付き `enum` は `Name.EnumName.member`、manifest enum 定数は `Name.member` で参照できます。整数型と文字列型の enum 値に対応します。
 - `typeinfo(Name)` と `typeinfo(instance)` で型チェーンを確認できます。

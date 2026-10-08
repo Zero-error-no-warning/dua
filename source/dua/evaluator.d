@@ -879,6 +879,7 @@ mixin template EvaluatorImplementation()
             case Expression.Kind.index:
                 auto indexed = cast(IndexExpression) target;
                 enforce(!indexed.isSlice, "Slice cannot be an assignment target");
+                enforce(indexed.indices.length == 1, "Index assignment requires a single index");
                 auto container = evaluate(indexed.target, environment);
                 auto pushedLength = canMeasureLength(container);
                 if (pushedLength) evaluatorContext.indexLengthStack.push(measuredLength(container));
@@ -888,7 +889,7 @@ mixin template EvaluatorImplementation()
                 }
                 auto index = evaluate(indexed.index, environment);
                 resolved = new IndexExpression(new LiteralExpression(container), new LiteralExpression(index));
-                current = readIndex(container, index);
+                current = readIndex(container, [index], callSite(target));
                 break;
             default:
                 enforce(false, "Invalid compound assignment target");
@@ -936,6 +937,7 @@ mixin template EvaluatorImplementation()
                     auto indexed = cast(IndexExpression) target;
                     auto container = evaluate(indexed.target, environment);
                     enforce(!indexed.isSlice, "Slice cannot be an assignment target");
+                    enforce(indexed.indices.length == 1, "Index assignment requires a single index");
                     auto index = evaluate(indexed.index, environment);
                     if (container.kind == ValueKind.associativeArray)
                     {
@@ -1194,8 +1196,8 @@ mixin template EvaluatorImplementation()
                         }
                         return Value.fromOwnedArray(sliced);
                     }
-                    auto index = evaluate(indexed.index, environment);
-                    return readIndex(container, index);
+                    auto indices = evaluateExpressionList(indexed.indices, environment);
+                    return readIndex(container, indices, callSite(indexed));
             }
         }
         catch (Exception error)
@@ -1205,8 +1207,16 @@ mixin template EvaluatorImplementation()
         }
     }
 
-    private Value readIndex(Value container, Value index)
+    private Value readIndex(Value container, Value[] indices, CallSite caller = CallSite.init)
     {
+        if (container.isFieldAggregate)
+        {
+            if (auto method = container.findMember("opIndex"))
+                if (method.kind == ValueKind.function_)
+                    return invokeFunctionValueWithThis(*method, indices, container, caller);
+        }
+        enforce(indices.length == 1, "Indexing requires a single index unless opIndex is defined");
+        auto index = indices[0];
         if (container.kind == ValueKind.associativeArray)
         {
             index = checkedAssociativeKey(container, index);
@@ -1462,8 +1472,18 @@ mixin template EvaluatorImplementation()
             return callMethodOrUfcs(receiver, get.memberName, args, environment, caller);
         }
 
-        auto callee = evaluate(calleeExpression, environment);
-        if (callee.kind == ValueKind.table)
+        return invokeCallableValue(evaluate(calleeExpression, environment), args, caller);
+    }
+
+    private Value invokeCallableValue(Value callee, Value[] args, CallSite caller)
+    {
+        if (callee.isFieldAggregate)
+        {
+            if (auto method = callee.findMember("opCall"))
+                if (method.kind == ValueKind.function_)
+                    return invokeFunctionValueWithThis(*method, args, callee, caller);
+        }
+        if (callee.isFieldAggregate)
         {
             Value callValue;
             if (lookupMetamethod(callee, "__call", callValue))
@@ -1504,6 +1524,8 @@ mixin template EvaluatorImplementation()
         {
             if (auto method = receiver.findMember(functionName))
             {
+                if (method.isFieldAggregate)
+                    return invokeCallableValue(*method, args, caller);
                 enforce(method.kind == ValueKind.function_,
                     format("Property '%s' exists but is not callable", functionName));
                 return invokeFunctionValueWithThis(*method, args, receiver, caller);

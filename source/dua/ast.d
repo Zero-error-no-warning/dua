@@ -287,7 +287,10 @@ final class GetExpression : Expression
 final class IndexExpression : Expression
 {
     Expression target;
-    Expression index;
+    Expression[] indices;
+
+    // Compatibility access for the original single-index AST.
+    @property Expression index() { return indices.length == 1 ? indices[0] : null; }
     Expression sliceStart;
     Expression sliceEnd;
     bool isSlice;
@@ -296,7 +299,14 @@ final class IndexExpression : Expression
     {
         super(Kind.index);
         this.target = target;
-        this.index = index;
+        this.indices = [index];
+    }
+
+    this(Expression target, Expression[] indices)
+    {
+        super(Kind.index);
+        this.target = target;
+        this.indices = indices;
     }
 
     this(Expression target, Expression sliceStart, Expression sliceEnd)
