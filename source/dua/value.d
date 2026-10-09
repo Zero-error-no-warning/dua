@@ -38,6 +38,11 @@ abstract class CallableValue
         return invoke(args);
     }
 
+    Value invokeOn(const(Object) receiver, Value[] args, CallSite caller)
+    {
+        return invokeWithContext(args, caller);
+    }
+
     size_t expectedArity() const
     {
         return size_t.max;
@@ -65,6 +70,7 @@ final class ReflectedCallable : CallableValue
     private Value delegate(Value[] args) invoker;
     private Value delegate(Value[] args, CallSite caller) contextualInvoker;
     private int delegate(scope const(Value)[] args) argumentMatcher;
+    private Value delegate(const(Object), Value[], CallSite) receiverInvoker;
     private size_t minimum;
     private size_t maximum;
     // Keeps a heap-backed struct receiver alive for the lifetime of its bound
@@ -75,7 +81,8 @@ final class ReflectedCallable : CallableValue
         Object lifetimeOwner = null,
         int delegate(scope const(Value)[] args) argumentMatcher = null,
         size_t maximum = size_t.max, bool unbounded = false,
-        Value delegate(Value[] args, CallSite caller) contextualInvoker = null)
+        Value delegate(Value[] args, CallSite caller) contextualInvoker = null,
+        Value delegate(const(Object), Value[], CallSite) receiverInvoker = null)
     {
         super(debugName);
         this.minimum = minimum;
@@ -83,6 +90,7 @@ final class ReflectedCallable : CallableValue
             : maximum == size_t.max ? minimum : maximum;
         this.invoker = invoker;
         this.contextualInvoker = contextualInvoker;
+        this.receiverInvoker = receiverInvoker;
         this.lifetimeOwner = lifetimeOwner;
         this.argumentMatcher = argumentMatcher;
     }
@@ -95,6 +103,12 @@ final class ReflectedCallable : CallableValue
     override Value invokeWithContext(Value[] args, CallSite caller)
     {
         return contextualInvoker is null ? invoker(args) : contextualInvoker(args, caller);
+    }
+
+    override Value invokeOn(const(Object) receiver, Value[] args, CallSite caller)
+    {
+        return receiverInvoker is null ? invokeWithContext(args, caller)
+            : receiverInvoker(receiver, args, caller);
     }
 
     override size_t expectedArity() const
@@ -147,6 +161,11 @@ final class OverloadedReflectedCallable : CallableValue
 
     override Value invokeWithContext(Value[] args, CallSite caller)
     {
+        return invokeOn(null, args, caller);
+    }
+
+    override Value invokeOn(const(Object) receiver, Value[] args, CallSite caller)
+    {
         ReflectedCallable match;
         int bestScore = int.min;
         bool ambiguous;
@@ -174,7 +193,7 @@ final class OverloadedReflectedCallable : CallableValue
                 debugName, args.length, allowedArities()));
         enforce(!ambiguous,
             format("Function '%s' has multiple matching overloads for %s arguments", debugName, args.length));
-        return match.invokeWithContext(args, caller);
+        return match.invokeOn(receiver, args, caller);
     }
 
     // enforce evaluates its message lazily; successful calls need no strings.
@@ -202,6 +221,30 @@ unittest
         assert(error.msg == "Function 'select' has multiple matching overloads for 1 arguments");
 }
 
+// Only explicit host table inspection needs object-specific CallableValue handles.
+// Normal script calls carry their receiver in Value and use the shared invoker.
+private final class ClassReceiverCallable : CallableValue
+{
+    private CallableValue target;
+    private Object receiver;
+
+    this(CallableValue target, Object receiver)
+    {
+        super(target.debugName);
+        this.target = target;
+        this.receiver = receiver;
+    }
+
+    override Value invoke(Value[] args) { return invokeWithContext(args, CallSite.init); }
+    override Value invokeWithContext(Value[] args, CallSite caller)
+    {
+        return target.invokeOn(receiver, args, caller);
+    }
+    override size_t expectedArity() const { return target.expectedArity(); }
+    override size_t minimumArity() const { return target.minimumArity(); }
+    override size_t maximumArity() const { return target.maximumArity(); }
+}
+
 private final class ReflectedStructStorage(T)
 {
     T value;
@@ -212,15 +255,17 @@ private final class ReflectedStructStorage(T)
     }
 }
 
-private final class ReflectedClassStorage
+private struct ReflectedClassStorage
 {
-    const(Object) instance;
+    // Qualification is enforced by the flags and the qualified type descriptor.
+    // Keeping the internal handle rebindable lets Value remain assignable.
+    Object instance;
     bool isMutable;
     bool isImmutable;
 
     this(const(Object) instance, bool isMutable, bool isImmutable)
     {
-        this.instance = instance;
+        this.instance = cast(Object) instance;
         this.isMutable = isMutable;
         this.isImmutable = isImmutable;
     }
@@ -296,9 +341,9 @@ private final class TableStorage
     // Value.  Conversion performs a checked cast to ReflectedStructStorage!T,
     // so reflection metadata such as type chains is never treated as identity.
     Object nativeOwner;
-    // Class identity is independent of struct ownership/copying and of all
-    // script-visible metadata. Keep the original object strongly reachable.
-    ReflectedClassStorage nativeClass;
+    // Shared class descriptors contain no object reference.
+    bool classPrototype;
+    string function(const(Object)) classStringifier;
     Value[] typeChain;
     Value[] aliasThisTargets;
     Value[] aliasThisChain;
@@ -492,6 +537,207 @@ private ReflectedLayout reflectedLayout(T)()
     return cached;
 }
 
+// Class descriptors and invokers are registered once per qualified D type/thread.
+// The only per-return data is the original D reference in Value.
+private ReflectedCallable makeClassCallable(alias declaration, Root, string expression = "receiver")(
+    string debugName)
+{
+    static if (__traits(isStaticFunction, declaration))
+        return makeStaticReflectedCallable!declaration(debugName);
+    else
+    {
+        Root receiver;
+        alias Delegate = typeof(&__traits(child, mixin(expression), declaration));
+        auto factory = function Delegate(const(Object) instance) {
+            auto receiver = cast(Root) instance;
+            return &__traits(child, mixin(expression), declaration);
+        };
+        Delegate empty;
+        return makeReflectedCallableWithDefaults!declaration(debugName, empty, null, factory);
+    }
+}
+
+private void registerClassMethods(Root, Target, string expression = "receiver")(
+    TableStorage layout, bool properties = true)
+{
+    static foreach (name; __traits(allMembers, Target))
+    {{
+        static if (name != "this" && name != "__ctor" && name != "Monitor" && name != "factory"
+            && __traits(compiles, __traits(getOverloads, Target, name)))
+        {
+            ReflectedCallable[] overloads;
+            static foreach (overload; __traits(getOverloads, Target, name))
+            {{
+                static if (__traits(compiles, makeClassCallable!(overload, Root, expression)(name)))
+                    overloads ~= makeClassCallable!(overload, Root, expression)(Root.stringof ~ "." ~ name);
+            }}
+            if (name !in layout.entries && overloads.length)
+            {
+                layout.entries[name] = Value.fromFunction(overloads.length == 1 ? cast(CallableValue) overloads[0]
+                    : new OverloadedReflectedCallable(Root.stringof ~ "." ~ name, overloads));
+                if (properties)
+                    foreach (overload; overloads)
+                    {
+                        if (overload.acceptsArity(0)) layout.propertyGetters[name] = Value.fromFunction(overload);
+                        if (overload.acceptsArity(1)) layout.propertySetters[name] = Value.fromFunction(overload);
+                    }
+            }
+        }
+    }}
+}
+
+private void registerClassOperators(Root, Target, string expression = "receiver")(TableStorage layout)
+{
+    static foreach (op; ["+", "-", "*", "/", "%", "~", "&", "|", "^", "<<", ">>"])
+    {{
+        static foreach (method; ["opBinary", "opBinaryRight"])
+        {{
+            static if (staticIndexOf!(method, __traits(allMembers, Target)) >= 0)
+            {
+                if (method ~ op !in layout.entries)
+                {
+                    ReflectedCallable[] candidates;
+                    static foreach (overload; __traits(getOverloads, Target, method, true))
+                    {{
+                        static if (__traits(compiles, makeClassCallable!(overload!op, Root, expression)(method)))
+                            candidates ~= makeClassCallable!(overload!op, Root, expression)(method ~ op);
+                    }}
+                    static foreach (overload; __traits(getOverloads, Target, method, true))
+                    {{
+                        static foreach (R; AliasSeq!(long, double))
+                        {{
+                            static if (__traits(compiles, makeClassCallable!(overload!(op, R), Root, expression)(method)))
+                                candidates ~= makeClassCallable!(overload!(op, R), Root, expression)(method ~ op);
+                        }}
+                    }}
+                    layout.entries[method ~ op] = Value.fromFunction(new ReflectedCallable(method ~ op, 2,
+                        null, null, null, size_t.max, false, null,
+                        (const(Object) instance, Value[] args, CallSite caller) {
+                            ReflectedCallable match;
+                            int bestScore = -1;
+                            foreach (candidate; candidates)
+                            {
+                                auto score = candidate.matchArguments(args[1 .. $]);
+                                if (score > bestScore) { bestScore = score; match = candidate; }
+                            }
+                            enforce(match !is null, format("Operator '%s' has no overload matching RHS kind %s",
+                                op, args[1].kind));
+                            return match.invokeOn(instance, args[1 .. $], caller);
+                        }));
+                }
+            }
+        }}
+    }}
+    static foreach (op; ["-", "!"])
+    {{
+        static if (__traits(compiles, makeClassCallable!(Target.opUnary!op, Root, expression)(op)))
+        {
+            auto bound = makeClassCallable!(Target.opUnary!op, Root, expression)("opUnary" ~ op);
+            if ("opUnary" ~ op !in layout.entries)
+                layout.entries["opUnary" ~ op] = Value.fromFunction(new ReflectedCallable("opUnary" ~ op, 1,
+                    null, null, null, size_t.max, false, null,
+                    (const(Object) instance, Value[] args, CallSite caller) {
+                        return bound.invokeOn(instance, args[1 .. $], caller);
+                    }));
+        }
+    }}
+    static if (expression != "receiver"
+        && __traits(compiles, makeClassCallable!(Target.opEquals, Root, expression)("__eq")))
+    {
+        if ("__eq" !in layout.entries)
+        {
+            auto bound = makeClassCallable!(Target.opEquals, Root, expression)("__eq");
+            layout.entries["__eq"] = Value.fromFunction(new ReflectedCallable("__eq", 2,
+                null, null, null, size_t.max, false, null,
+                (const(Object) instance, Value[] args, CallSite caller) {
+                    return bound.invokeOn(instance, args[1 .. $], caller);
+                }));
+        }
+    }
+}
+
+private void registerClassAliases(Root, Current, string expression = "receiver", Seen...)(TableStorage layout)
+{
+    Root receiver;
+    static if (__traits(getAliasThis, Current).length)
+    {
+        enum name = __traits(getAliasThis, Current)[0];
+        enum raw = expression ~ "." ~ name;
+        alias Member = typeof(mixin(raw));
+        static if (isCallable!Member && !isAggregateType!Member)
+        {
+            enum next = raw ~ "()";
+            alias Target = Unqual!(ReturnType!Member);
+        }
+        else
+        {
+            enum next = raw;
+            alias Target = Unqual!Member;
+        }
+        static if (staticIndexOf!(Target, Seen) < 0)
+        {
+            layout.aliasThisTargets ~= Value.fromFunction(new ReflectedCallable(
+                Root.stringof ~ ".alias this -> " ~ Target.stringof, 0,
+                null, null, null, size_t.max, false, null,
+                (const(Object) instance, Value[] args, CallSite caller) {
+                    auto receiver = cast(Root) instance;
+                    return convertToValue(mixin(next));
+                }));
+            layout.aliasThisChain ~= Value.from(Target.stringof);
+            static if (is(Target == class))
+                static foreach (Base; BaseClassesTuple!Target)
+                    layout.aliasThisChain ~= Value.from(Base.stringof);
+            static if (isAggregateType!Target)
+            {
+                registerClassMethods!(Root, Target, next)(layout, false);
+                registerClassOperators!(Root, Target, next)(layout);
+                registerClassAliases!(Root, Target, next, Seen, Target)(layout);
+            }
+        }
+    }
+}
+
+private TableStorage reflectedClassLayout(T)()
+{
+    static TableStorage cached;
+    if (cached !is null) return cached;
+    auto layout = new TableStorage;
+    registerClassMethods!(T, T)(layout);
+    registerClassOperators!(T, T)(layout);
+    static foreach (name; FieldNameTuple!T)
+    {{
+        static if (__traits(compiles, convertToValue(mixin("(*cast(T*) null)." ~ name))))
+        {
+            layout.entries[name] = Value.nullValue();
+            layout.propertyGetters[name] = Value.fromFunction(new ReflectedCallable(T.stringof ~ "." ~ name ~ ".getter", 0,
+                null, null, null, size_t.max, false, null,
+                (const(Object) instance, Value[] args, CallSite caller) {
+                    auto receiver = cast(T) instance;
+                    return convertToValue(mixin("receiver." ~ name));
+                }));
+            static if (__traits(compiles, mixin("(*cast(T*) null)." ~ name) = mixin("(*cast(T*) null)." ~ name)))
+                layout.propertySetters[name] = Value.fromFunction(new ReflectedCallable(T.stringof ~ "." ~ name ~ ".setter", 1,
+                    null, null, null, size_t.max, false, null,
+                    (const(Object) instance, Value[] args, CallSite caller) {
+                        auto receiver = cast(T) instance;
+                        alias Field = typeof(mixin("receiver." ~ name));
+                        mixin("receiver." ~ name) = convertFromValue!Field(args[0]);
+                        return Value.nullValue();
+                    }));
+        }
+    }}
+    registerClassAliases!(T, T, "receiver", T)(layout);
+    layout.typeChain = ReflectedTypeMetadata!T.chain();
+    layout.classPrototype = true;
+    static if (__traits(compiles, format("%s", T.init)))
+        layout.classStringifier = function string(const(Object) instance) {
+            auto receiver = cast(T) instance;
+            return format("%s", receiver);
+        };
+    cached = layout;
+    return layout;
+}
+
 struct AssociativeEntry
 {
     Value key;
@@ -619,6 +865,7 @@ struct Value
 
     package(dua) void moduleOwner(Object owner)
     {
+        materializeClass();
         if (tableStorage is null) tableStorage = new TableStorage;
         tableStorage.moduleOwner = owner;
     }
@@ -629,6 +876,8 @@ struct Value
     string stringValue;
     Value[] arrayValue;
     private TableStorage tableStorage;
+    private ReflectedClassStorage nativeClass;
+    private Object functionReceiver;
     private AssociativeStorage associativeStorage;
     CallableValue functionValue;
     string nativeTypeName;
@@ -683,7 +932,7 @@ struct Value
                 foreach (name, field; tableValue) result.tableValue[name] = field.keyCopy();
                 return result;
             case ValueKind.table:
-                if (tableStorage.nativeClass !is null) return cast(Value) this;
+                if (nativeClass.instance !is null) return cast(Value) this;
                 goto default;
             default:
                 enforce(false, format("Unsupported associative array key kind: %s", kind));
@@ -693,6 +942,7 @@ struct Value
 
     ref Value[string] tableValue()
     {
+        materializeClass();
         if (tableStorage is null)
             tableStorage = new TableStorage();
         if (tableStorage.reflected !is null) tableStorage.reflected.materialize(tableStorage);
@@ -701,6 +951,12 @@ struct Value
 
     const(Value[string]) tableValue() const
     {
+        if (tableStorage !is null && tableStorage.classPrototype)
+        {
+            auto handle = cast(Value) this;
+            handle.materializeClass();
+            return handle.tableStorage.entries;
+        }
         // Logical constness: binding a descriptor only memoizes callable
         // wrappers. Native field snapshots and receivers stay unchanged.
         if (tableStorage !is null && tableStorage.reflected !is null)
@@ -718,8 +974,58 @@ struct Value
         return name in tableStorage.entries;
     }
 
+    package(dua) bool isClassReference() const { return nativeClass.instance !is null; }
+
+    // Binding a receiver copies only the handle, never a callable or a table.
+    package(dua) Value withReceiver(Value receiver) const
+    {
+        auto result = cast(Value) this;
+        if (kind == ValueKind.function_ && receiver.isClassReference)
+            result.functionReceiver = receiver.nativeClass.instance;
+        return result;
+    }
+
+    /// Invokes a function handle, including an extracted class method receiver.
+    Value invoke(Value[] args, CallSite caller = CallSite.init)
+    {
+        enforce(kind == ValueKind.function_, "Only functions are callable");
+        return functionValue.invokeOn(functionReceiver, args, caller);
+    }
+
+    private void materializeClass()
+    {
+        if (tableStorage is null || !tableStorage.classPrototype) return;
+        auto prototype = tableStorage;
+        auto storage = new TableStorage;
+        storage.typeChain = prototype.typeChain;
+        storage.aliasThisChain = prototype.aliasThisChain;
+        storage.classStringifier = prototype.classStringifier;
+        CallableValue[CallableValue] wrappers;
+        Value bind(Value value)
+        {
+            if (value.kind != ValueKind.function_) return value;
+            auto cached = value.functionValue in wrappers;
+            if (cached !is null) return Value.fromFunction(*cached);
+            auto wrapper = new ClassReceiverCallable(value.functionValue, nativeClass.instance);
+            wrappers[value.functionValue] = wrapper;
+            return Value.fromFunction(wrapper);
+        }
+        foreach (name, member; prototype.entries)
+        {
+            if (member.kind == ValueKind.function_) storage.entries[name] = bind(member);
+            else if (auto getter = name in prototype.propertyGetters)
+                storage.entries[name] = getter.withReceiver(this).invoke([]);
+            else storage.entries[name] = member;
+        }
+        foreach (name, getter; prototype.propertyGetters) storage.propertyGetters[name] = bind(getter);
+        foreach (name, setter; prototype.propertySetters) storage.propertySetters[name] = bind(setter);
+        foreach (target; prototype.aliasThisTargets) storage.aliasThisTargets ~= bind(target);
+        tableStorage = storage;
+    }
+
     package(dua) void refreshMember(string name, Value value)
     {
+        materializeClass();
         if (auto member = findMember(name)) *member = value;
         else tableValue[name] = value;
     }
@@ -925,13 +1231,41 @@ struct Value
 
     package(dua) void setAliasThisMetadata(Value[] targets, Value[] chain)
     {
+        materializeClass();
         if (tableStorage is null) tableStorage = new TableStorage();
         tableStorage.aliasThisTargets = targets.dup;
         tableStorage.aliasThisChain = chain.dup;
     }
 
+    package(dua) bool lookupPropertyGetter(string name, out Value getter)
+    {
+        if (tableStorage !is null && tableStorage.classPrototype)
+        {
+            auto found = name in tableStorage.propertyGetters;
+            if (found is null) return false;
+            getter = found.withReceiver(this);
+            return true;
+        }
+        if (auto found = propertyGetter(name)) { getter = *found; return true; }
+        return false;
+    }
+
+    package(dua) bool lookupPropertySetter(string name, out Value setter)
+    {
+        if (tableStorage !is null && tableStorage.classPrototype)
+        {
+            auto found = name in tableStorage.propertySetters;
+            if (found is null) return false;
+            setter = found.withReceiver(this);
+            return true;
+        }
+        if (auto found = propertySetter(name)) { setter = *found; return true; }
+        return false;
+    }
+
     package(dua) Value* propertyGetter(string name)
     {
+        materializeClass();
         if (tableStorage !is null && tableStorage.reflected !is null
             && !tableStorage.reflected.detachedProperties)
             tableStorage.reflected.bind(name, tableStorage);
@@ -940,6 +1274,7 @@ struct Value
 
     package(dua) Value* propertySetter(string name)
     {
+        materializeClass();
         if (tableStorage !is null && tableStorage.reflected !is null
             && !tableStorage.reflected.detachedProperties)
             tableStorage.reflected.bind(name, tableStorage);
@@ -948,6 +1283,7 @@ struct Value
 
     package(dua) void setPropertyMetadata(Value[string] getters, Value[string] setters)
     {
+        materializeClass();
         if (tableStorage is null) tableStorage = new TableStorage();
         if (tableStorage.reflected !is null) tableStorage.reflected.detachedProperties = true;
         tableStorage.propertyGetters = getters.dup;
@@ -956,6 +1292,7 @@ struct Value
 
     package(dua) void setCoroutineId(size_t id)
     {
+        materializeClass();
         if (tableStorage is null) tableStorage = new TableStorage();
         tableStorage.coroutineId = id;
         tableStorage.hasCoroutineId = true;
@@ -971,6 +1308,7 @@ struct Value
 
     package(dua) void setTypeChain(Value[] chain)
     {
+        materializeClass();
         if (tableStorage is null) tableStorage = new TableStorage();
         tableStorage.typeChain = chain.dup;
         if (kind == ValueKind.struct_ && tableStorage.copier !is null)
@@ -1003,15 +1341,15 @@ struct Value
     /// This lets module export values use the same call(name, args) shape as ScriptEngine.
     Value call(string functionName, scope const(Value)[] args = [])
     {
-        enforce(kind == ValueKind.table,
-            format("Cannot call member '%s' on %s value", functionName, kind));
-        auto member = functionName in tableValue;
-        enforce(member !is null, format("Undefined module export '%s'", functionName));
-        enforce(member.kind == ValueKind.function_,
-            format("Module export '%s' is not callable", functionName));
+        if (kind != ValueKind.table)
+            throw new Exception(format("Cannot call member '%s' on %s value", functionName, kind));
+        auto member = findMember(functionName);
+        if (member is null) throw new Exception(format("Undefined module export '%s'", functionName));
+        if (member.kind != ValueKind.function_)
+            throw new Exception(format("Module export '%s' is not callable", functionName));
 
-        auto copiedArgs = (cast(Value[]) args).dup;
-        return member.functionValue.invoke(copiedArgs);
+        auto copiedArgs = args.length ? (cast(Value[]) args).dup : null;
+        return member.withReceiver(this).invoke(copiedArgs);
     }
 
     /// Looks up a named entry in a table value (for example, a module export).
@@ -1073,14 +1411,23 @@ struct Value
     static Value reflect(T)(auto ref T value)
         if (isAggregateType!T)
     {
-        static if (is(T == struct) && !hasAggregateAliasThis!T)
+        static if (is(T == class))
+        {
+            if (value is null) return Value.nullValue();
+            Value result;
+            result.kind = ValueKind.table;
+            result.tableStorage = reflectedClassLayout!T();
+            result.nativeClass = ReflectedClassStorage(value, is(T : Object), is(T : immutable(Object)));
+            return result;
+        }
+        else static if (is(T == struct) && !hasAggregateAliasThis!T)
             return reflectWithLayout(value);
         else
             return reflectEager(value);
     }
 
     // Forwarding to an aggregate can evaluate user getters while discovering
-    // equality methods. Classes also keep their existing reflection path.
+    // equality methods. Explicit host table access also uses this compatibility path.
     private static Value reflectEager(T)(auto ref T value)
     {
         static if (is(T == class))
@@ -1288,7 +1635,7 @@ struct Value
         }
         else static if (is(T == class))
         {
-            result.tableStorage.nativeClass = new ReflectedClassStorage(
+            result.nativeClass = ReflectedClassStorage(
                 reflectedTarget, is(T : Object), is(T : immutable(Object)));
             static if (__traits(hasMember, T, "toString")
                 && __traits(compiles, format("%s", reflectedTarget)))
@@ -1415,6 +1762,8 @@ struct Value
                 return entries.length ? "[" ~ entries.join(", ") ~ "]" : "[:]";
             case ValueKind.table:
             case ValueKind.struct_:
+                if (tableStorage !is null && tableStorage.classStringifier !is null)
+                    return tableStorage.classStringifier(nativeClass.instance);
                 if (tableStorage !is null && tableStorage.stringifier !is null)
                     return tableStorage.stringifier();
                 string[] parts;
@@ -1487,6 +1836,8 @@ struct Value
                 return associativeEntries.length > 0;
             case ValueKind.table:
             case ValueKind.struct_:
+                if (tableStorage !is null && tableStorage.classPrototype)
+                    return tableStorage.entries.length > 0;
                 return tableValue.length > 0;
             case ValueKind.function_:
                 return true;
@@ -1650,7 +2001,8 @@ private void assignReflectedDefault(alias declaration, size_t index, T)(ref T ta
 
 private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C)(string debugName,
     auto ref C callable,
-    Object lifetimeOwner = null)
+    Object lifetimeOwner = null,
+    C function(const(Object)) receiverFactory = null)
     if (isCallable!C)
 {
     alias Params = Parameters!C;
@@ -1660,14 +2012,16 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
     enum minimum = isTypesafeVariadic ? fixedArity : reflectedMinimumArity!declaration;
     enum maximum = isTypesafeVariadic ? size_t.max : fixedArity;
     auto storedCallable = callable;
-    auto invoker = (Value[] args, CallSite caller) {
-        enforce(args.length >= minimum && args.length <= maximum,
+    auto receiverInvoker = (const(Object) receiver, Value[] args, CallSite caller) {
+        if (args.length < minimum || args.length > maximum)
+            throw new Exception(
             minimum == maximum
                 ? format("Function '%s' expected %s arguments but got %s", debugName, minimum, args.length)
                 : maximum == size_t.max
                     ? format("Function '%s' expected at least %s arguments but got %s", debugName, minimum, args.length)
                     : format("Function '%s' expected %s to %s arguments but got %s", debugName, minimum, maximum, args.length));
 
+        auto actualCallable = receiverFactory is null ? storedCallable : receiverFactory(receiver);
         auto converted = Tuple!MutableParams();
         static foreach (index; 0 .. fixedArity)
         {{
@@ -1690,12 +2044,13 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
 
         static if (is(ReturnType!C == void))
         {
-            storedCallable(converted.expand);
+            actualCallable(converted.expand);
             return Value.nullValue();
         }
         else
-            return convertToValue(storedCallable(converted.expand));
+            return convertToValue(actualCallable(converted.expand));
     };
+    auto invoker = (Value[] args, CallSite caller) { return receiverInvoker(null, args, caller); };
     return new ReflectedCallable(debugName, minimum, null, lifetimeOwner, (scope const(Value)[] args) {
         static if (isTypesafeVariadic)
         {
@@ -1729,7 +2084,7 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
             }
         }
         return score;
-    }, maximum, isTypesafeVariadic, invoker);
+    }, maximum, isTypesafeVariadic, invoker, receiverInvoker);
 }
 
 package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C callable,
@@ -2217,13 +2572,13 @@ private T reflectedClass(T)(const(Value) value) if (is(T == class))
     // Reflection stores an unshared object; a cast must not invent sharing.
     static if (!is(T : const(Object))) return null;
     if (value.kind != ValueKind.table || value.tableStorage is null
-        || value.tableStorage.nativeClass is null)
+        || value.nativeClass.instance is null)
         return null;
     static if (is(T : Object))
-        if (!value.tableStorage.nativeClass.isMutable) return null;
+        if (!value.nativeClass.isMutable) return null;
     static if (is(T : immutable(Object)))
-        if (!value.tableStorage.nativeClass.isImmutable) return null;
-    return cast(T) value.tableStorage.nativeClass.instance;
+        if (!value.nativeClass.isImmutable) return null;
+    return cast(T) value.nativeClass.instance;
 }
 
 /// Returns a non-negative overload ranking when a Value can be converted to T.
@@ -2379,7 +2734,7 @@ private int aliasThisConversionScore(T)(const(Value) value, int fallback = -1)
         {
             auto target = cast(Value) stored;
             if (target.kind == ValueKind.function_ && target.functionValue.acceptsArity(0))
-                target = (cast(CallableValue) target.functionValue).invoke([]);
+                target = target.withReceiver(cast(Value) value).invoke([]);
             auto score = conversionScore!T(target);
             if (score >= 0) return score - 1;
         }
@@ -2395,7 +2750,7 @@ private bool convertAliasThisTarget(T)(const(Value) value, out T result)
         {
             auto target = cast(Value) stored;
             if (target.kind == ValueKind.function_ && target.functionValue.acceptsArity(0))
-                target = (cast(CallableValue) target.functionValue).invoke([]);
+                target = target.withReceiver(cast(Value) value).invoke([]);
             if (conversionScore!T(target) >= 0)
             {
                 result = convertFromValue!T(target);
@@ -2453,7 +2808,7 @@ private T convertFromValue(T)(const(Value) value)
             format("Expected function value to convert into '%s' but got %s", T.stringof, value.kind));
         // A const Value only makes the handle const; invoking a function may
         // legitimately mutate the script closure captured by the callable.
-        auto callable = cast(CallableValue) value.functionValue;
+        auto callable = cast(Value) value;
 
         ReturnType!T converted(Parameters!T args)
         {
@@ -2710,8 +3065,8 @@ private bool associativeKeysEqual(Value left, Value right)
 {
     if (left.kind != right.kind) return false;
     if (left.kind == ValueKind.table)
-        return left.tableStorage.nativeClass !is null && right.tableStorage.nativeClass !is null
-            && left.tableStorage.nativeClass.instance is right.tableStorage.nativeClass.instance;
+        return left.nativeClass.instance !is null && right.nativeClass.instance !is null
+            && left.nativeClass.instance is right.nativeClass.instance;
     if (left.kind == ValueKind.array)
     {
         if (left.arrayValue.length != right.arrayValue.length) return false;
@@ -2766,6 +3121,8 @@ bool valuesEqual(Value left, Value right)
                 return true;
             case ValueKind.table:
             case ValueKind.struct_:
+                if (left.isClassReference || right.isClassReference)
+                    return left.nativeClass.instance is right.nativeClass.instance;
                 if (left.tableValue.length != right.tableValue.length)
                 {
                     return false;
@@ -2789,7 +3146,8 @@ bool valuesEqual(Value left, Value right)
                 }
                 return true;
             case ValueKind.function_:
-                return left.functionValue is right.functionValue;
+                return left.functionValue is right.functionValue
+                    && left.functionReceiver is right.functionReceiver;
             case ValueKind.native:
                 return left.nativeTypeName == right.nativeTypeName
                     && left.nativeDisplay == right.nativeDisplay;

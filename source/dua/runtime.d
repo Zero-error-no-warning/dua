@@ -910,12 +910,13 @@ final class ScriptEngine
                         enforce(userArgs[0].kind == ValueKind.table, format("%s.new init argument must be table", name));
                         foreach (key, entry; userArgs[0].tableValue)
                         {
-                            if (auto setter = reflected.propertySetter(key))
+                            Value setter;
+                            if (reflected.lookupPropertySetter(key, setter))
                             {
-                                enforce((*setter).kind == ValueKind.function_,
+                                enforce(setter.kind == ValueKind.function_,
                                     format("%s.new setter '%s' is not callable", name, key));
                                 Value[] setterArgs = [cast(Value) entry];
-                                (*setter).functionValue.invoke(setterArgs);
+                                setter.invoke(setterArgs);
                             }
                         }
                     }

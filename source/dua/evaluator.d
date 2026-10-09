@@ -923,9 +923,10 @@ mixin template EvaluatorImplementation()
                             return;
                         }
                     }
-                    if (auto setter = container.propertySetter(get.memberName))
+                    Value setter;
+                    if (container.lookupPropertySetter(get.memberName, setter))
                     {
-                        invokeFunctionValue(*setter, [value]);
+                        invokeFunctionValue(setter, [value]);
                         return;
                     }
                     if (!applyTableNewIndex(container, get.memberName, value))
@@ -1138,11 +1139,12 @@ mixin template EvaluatorImplementation()
                         return associativeProperty(container, get.memberName);
                     enforce(container.isFieldAggregate,
                         "Property access currently supports tables/reflected structs/classes");
-                    if (auto getter = container.propertyGetter(get.memberName))
+                    Value getter;
+                    if (container.lookupPropertyGetter(get.memberName, getter))
                     {
-                        auto refreshed = invokeFunctionValueWithThis(*getter, [], container, callSite(get));
+                        auto refreshed = invokeFunctionValueWithThis(getter, [], container, callSite(get));
                         auto property = container.findMember(get.memberName);
-                        if (property is null || property.kind != ValueKind.function_)
+                        if (!container.isClassReference && (property is null || property.kind != ValueKind.function_))
                         {
                             container.refreshMember(get.memberName, refreshed);
                         }
@@ -1155,7 +1157,7 @@ mixin template EvaluatorImplementation()
                         {
                             return invokeFunctionValueWithThis(*value, [], container, callSite(get));
                         }
-                        return *value;
+                        return value.withReceiver(container);
                     }
                     Value resolved;
                     if (resolveTableIndex(container, get.memberName, resolved))
@@ -1551,7 +1553,7 @@ mixin template EvaluatorImplementation()
         {
             evaluatorContext.thisContextStack.pop();
         }
-        return invokeFunctionValue(callable, args, caller);
+        return invokeFunctionValue(callable.withReceiver(thisValue), args, caller);
     }
 
     private bool hasThisContext() const
@@ -1659,7 +1661,7 @@ mixin template EvaluatorImplementation()
         }
         try
         {
-            return callable.functionValue.invokeWithContext(copyValues(args), caller).valueCopy();
+            return callable.invoke(copyValues(args), caller).valueCopy();
         }
         catch (Exception error)
         {
@@ -1975,9 +1977,15 @@ mixin template EvaluatorImplementation()
 
     private bool resolveTableIndex(Value container, string key, out Value resolved)
     {
+        Value getter;
+        if (container.isClassReference && container.lookupPropertyGetter(key, getter))
+        {
+            resolved = invokeFunctionValueWithThis(getter, [], container);
+            return true;
+        }
         if (auto direct = container.findMember(key))
         {
-            resolved = *direct;
+            resolved = direct.withReceiver(container);
             return true;
         }
 
@@ -2024,7 +2032,7 @@ mixin template EvaluatorImplementation()
         {
             if (directMeta.kind == ValueKind.function_)
             {
-                invokeFunctionValue(*directMeta, [container, Value.from(key), value]);
+                invokeFunctionValue(directMeta.withReceiver(container), [container, Value.from(key), value]);
                 return true;
             }
             if (directMeta.kind == ValueKind.table)
@@ -2067,7 +2075,7 @@ mixin template EvaluatorImplementation()
     {
         if (auto direct = container.findMember(key))
         {
-            method = *direct;
+            method = direct.withReceiver(container);
             return true;
         }
 
