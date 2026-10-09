@@ -251,3 +251,141 @@ unittest
     }).truthy());
     assert(camera.position.value == 17);
 }
+
+private class ReferenceBase
+{
+    int inherited() const { return 7; }
+    int virtualRead() const { return -1; }
+}
+
+private class ReferenceNode : ReferenceBase
+{
+    int value;
+    ReferenceNode peer;
+    this(int value) { this.value = value; }
+    ReferenceNode self() { return this; }
+    int read() const { return value; }
+    override int virtualRead() const { return value; }
+    int add(int amount) { return value += amount; }
+    int choose(int amount) { return value + amount; }
+    string choose(string text) { return text; }
+    @property int current() const { return value; }
+    @property void current(int next) { value = next; }
+    int sum(int initial, int[] rest...) { foreach (item; rest) initial += item; return value + initial; }
+    private int hidden = 99;
+}
+
+unittest
+{
+    // Warm the type descriptor, then measure the boundary itself. Neither class
+    // returns, direct calls nor field getters should allocate a table/wrapper.
+    auto object = new ReferenceNode(10);
+    object.peer = object;
+    auto reflected = Value.reflect(object);
+    Value getter;
+    assert(reflected.lookupPropertyGetter("value", getter));
+    assert(reflected.call("self").to!ReferenceNode() is object);
+    auto before = GC.allocatedInCurrentThread();
+    foreach (_; 0 .. 256)
+    {
+        auto returned = Value.fromAuto(object).call("self");
+        assert(returned.to!ReferenceNode() is object);
+        assert(returned.call("read").toInt() == 10);
+        assert(getter.invoke([]).toInt() == 10);
+        assert(valuesEqual(returned, reflected));
+    }
+    assert(GC.allocatedInCurrentThread() == before);
+    assert(!valuesEqual(reflected, Value.reflect(new ReferenceNode(10))));
+
+    // Host table inspection remains available and binds all callbacks to this
+    // instance without changing the shared descriptor used by later returns.
+    assert(reflected.tableValue["peer"].to!ReferenceNode() is object);
+    assert(reflected.tableValue["add"].functionValue.invoke([Value.from(1)]).toInt() == 11);
+    assert(Value.reflect(object).call("read").toInt() == 11);
+    const snapshot = Value.reflect(object);
+    assert(snapshot.tableValue["value"].toInt() == 11);
+}
+
+unittest
+{
+    auto first = new ReferenceNode(10);
+    auto second = new ReferenceNode(20);
+    first.peer = second;
+    second.peer = first;
+    auto engine = new ScriptEngine;
+    engine.bindFunc("getFirst", () => first);
+    engine.bindFunc("getSecond", () => second);
+    engine.bindFunc("asBase", () => cast(ReferenceBase) first);
+    engine.bindFunc("missing", () => cast(ReferenceNode) null);
+    engine.bindFunc("collect", () { GC.collect(); });
+    assert(engine.run(q{
+        auto a = getFirst();
+        auto b = getSecond();
+        a.value = 30;
+        b.current = 40;
+        auto addA = a.add;
+        auto addB = b.add;
+        collect();
+        auto changedA = addA(2);
+        auto changedB = addB(3);
+        auto check = a.self() == a && getFirst() == a && a != b
+            && a.peer == b && b.peer.peer == b
+            && changedA == 32 && changedB == 43
+            && a.current == 32 && b.value == 43
+            && a.choose(2) == 34 && b.choose("text") == "text"
+            && a.sum(1, 2, 3) == 38 && a.inherited() == 7
+            && asBase().virtualRead() == 32 && missing() == null;
+        return check;
+    }).truthy());
+    assert(first.value == 32 && second.value == 43);
+    assert(!engine.runSafe("return getFirst().hidden;").ok);
+
+    // An escaped method must keep its receiver after host and engine handles go.
+    auto escaped = engine.run("return getFirst().add;").to!(int delegate(int))();
+    first = null;
+    second = null;
+    engine = null;
+    GC.collect();
+    assert(escaped(5) == 37);
+}
+
+private class ScalarClassAlias
+{
+    long number;
+    alias number this;
+    this(long value) { number = value; }
+}
+
+private struct AliasClassTarget
+{
+    long value;
+    long read() const { return value; }
+    long add(long amount) { return value += amount; }
+    long opBinary(string op)(long rhs) const if (op == "+") { return value + rhs; }
+}
+
+private class AggregateClassAlias
+{
+    AliasClassTarget target;
+    alias target this;
+    this(long value) { target = AliasClassTarget(value); }
+}
+
+unittest
+{
+    auto scalar = new ScalarClassAlias(12);
+    auto aggregate = new AggregateClassAlias(20);
+    auto engine = new ScriptEngine;
+    engine.bindFunc("scalar", () => scalar);
+    engine.bindFunc("aggregate", () => aggregate);
+    engine.bindFunc("number", (long value) => value);
+    assert(engine.run(q{
+        auto a = scalar();
+        auto b = aggregate();
+        a.number = 15;
+        b.add(2);
+        return number(a) == 15 && b.read() == 22 && b + 3 == 25;
+    }).truthy());
+    aggregate.target = AliasClassTarget(30);
+    assert(engine.run("return aggregate().read();").toInt() == 30);
+}
