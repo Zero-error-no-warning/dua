@@ -13,3 +13,7 @@ dua-test-*
 *.o
 *.obj
 *.lst
+editors/vscode-dua/node_modules/
+editors/vscode-dua/.npm-cache/
+editors/vscode-dua/*.vsix
+editors/vscode-dua/bin/

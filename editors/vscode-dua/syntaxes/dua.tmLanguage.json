@@ -30,11 +30,15 @@
           "beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.dua" } },
           "end": "\\+/",
           "endCaptures": { "0": { "name": "punctuation.definition.comment.end.dua" } },
-          "patterns": [
-            { "include": "#comments" }
-          ]
+          "patterns": [{ "include": "#block-comment" }]
         }
       ]
+    },
+    "block-comment": {
+      "name": "comment.block.dua",
+      "begin": "/\\+",
+      "end": "\\+/",
+      "patterns": [{ "include": "#block-comment" }]
     },
     "interpolated-string": {
       "name": "string.quoted.double.interpolated.dua",
@@ -43,7 +47,7 @@
         "0": { "name": "storage.type.string.dua" },
         "1": { "name": "punctuation.definition.string.begin.dua" }
       },
-      "end": "\"",
+      "end": "\"|$",
       "endCaptures": { "0": { "name": "punctuation.definition.string.end.dua" } },
       "patterns": [
         {
@@ -54,19 +58,28 @@
           "name": "meta.interpolation.dua",
           "begin": "\\$\\(",
           "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.dua" } },
-          "end": "\\)",
+          "end": "\\)|(?=\"|$)",
           "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.dua" } },
           "patterns": [
+            { "include": "#interpolation-parentheses" },
             { "include": "$self" }
           ]
         }
+      ]
+    },
+    "interpolation-parentheses": {
+      "begin": "\\(",
+      "end": "\\)|(?=\"|$)",
+      "patterns": [
+        { "include": "#interpolation-parentheses" },
+        { "include": "$self" }
       ]
     },
     "string": {
       "name": "string.quoted.double.dua",
       "begin": "\"",
       "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.dua" } },
-      "end": "\"",
+      "end": "\"|$",
       "endCaptures": { "0": { "name": "punctuation.definition.string.end.dua" } }
     },
     "numbers": {
@@ -95,7 +108,7 @@
     },
     "types": {
       "name": "support.type.primitive.dua",
-      "match": "\\b(?:any|bool|double|int|string|void)\\b"
+      "match": "\\b(?:any|void|bool|byte|ubyte|short|ushort|int|uint|long|ulong|float|double|real|string)\\b"
     },
     "function-declaration": {
       "name": "meta.function.dua",

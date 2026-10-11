@@ -3945,6 +3945,28 @@ unittest
     assert(result.toHostString() == "hero:100:9:8135");
 }
 
+unittest
+{
+    auto engine = new ScriptEngine();
+    RunOptions options;
+    options.typeCheck = true;
+    auto result = engine.run(q{
+        double one = 1.;
+        double identity(double value) { return value; }
+        return [one, 0., -42., 1.+2., identity(2.), (1.), 1.25, [1., 2.][1]];
+    }, options);
+    auto expected = [1.0, 0.0, -42.0, 3.0, 2.0, 1.0, 1.25, 2.0];
+    assert(result.arrayValue.length == expected.length);
+    foreach (index, value; result.arrayValue)
+    {
+        assert(value.kind == ValueKind.floating);
+        assert(value.toFloat() == expected[index]);
+    }
+
+    assert(engine.run("auto values = [10, 20, 30]; return values[1..3][0];").toInt() == 20);
+    assert(engine.run("int next(int value) { return value + 1; } return 1.next();").toInt() == 2);
+}
+
 private struct RuntimeAliasAngleFixture
 {
     double value;

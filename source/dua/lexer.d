@@ -183,8 +183,12 @@ Token[] lex(string source)
         {
             auto start = index;
             bool seenDot;
+            // Keep range/spread operators and member access separate from numbers.
             while (index < source.length && (isDigit(source[index])
-                || (!seenDot && source[index] == '.' && isDigit(peek(source, index + 1)))))
+                || (!seenDot && source[index] == '.'
+                    && peek(source, index + 1) != '.'
+                    && !isAlpha(peek(source, index + 1))
+                    && peek(source, index + 1) != '_')))
             {
                 if (source[index] == '.')
                 {
@@ -462,6 +466,37 @@ unittest
         assert(tokens[index + 11].kind == kind);
         assert(tokens[index + 11].line == 2);
         assert(tokens[index + 11].column == index * 3 + 1);
+    }
+}
+
+unittest
+{
+    foreach (spelling; ["0.", "1.", "42.", "1.25"])
+    {
+        foreach (suffix; ["", " ", "\n", ";", "+2", ")", "]", ",",
+            "# comment", "// comment", "/+ comment +/"])
+        {
+            auto tokens = lex(spelling ~ suffix);
+            assert(tokens[0].kind == TokenKind.number);
+            assert(tokens[0].lexeme == spelling);
+        }
+    }
+
+    auto tokens = lex("1.\n42.;");
+    assert(tokens[1].line == 2 && tokens[1].column == 1);
+    assert(tokens[2].kind == TokenKind.semicolon && tokens[2].column == 4);
+}
+
+unittest
+{
+    auto expectedKinds = [TokenKind.dotDot, TokenKind.ellipsis,
+        TokenKind.dot, TokenKind.dot, TokenKind.dot, TokenKind.dot];
+    foreach (index, source; ["1..3", "1...values", "1.foo", "1._foo", "1.new", "1.instance"])
+    {
+        auto tokens = lex(source);
+        assert(tokens[0].kind == TokenKind.number && tokens[0].lexeme == "1");
+        assert(tokens[1].column == 2);
+        assert(tokens[1].kind == expectedKinds[index]);
     }
 }
 

@@ -19,7 +19,7 @@ auto empty = null;
 ```
 
 - 識別子は英字または `_` で始まり、続きには英数字と `_` を使えます。
-- 数値は10進整数か小数です。負数はリテラルではなく単項 `-` を適用した式です。
+- 数値は10進整数か小数です。小数点以下は省略でき、`1.` は `1.0` と同じ浮動小数点値です。負数はリテラルではなく単項 `-` を適用した式です。
 - 文字列はダブルクォートで1行に記述します。現在、文字列リテラル内のエスケープシーケンスは提供しません。
 - 文は原則 `;` で終わり、ブロックは `{ ... }` で囲みます。
 - キーワードは `auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。`.new` などのメンバー名には引き続きアクセスできます。

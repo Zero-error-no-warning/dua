@@ -21,6 +21,15 @@
 		{
 			"name":"unittest",
 			"targetType":"library"
+		},
+		{
+			"name":"vscode-check",
+			"targetType":"executable",
+			"mainSourceFile":"tools/vscode-check/main.d",
+			"excludedSourceFiles": ["source/app.d"],
+			"sourcePaths": ["source", "tools/vscode-check"],
+			"targetPath":"editors/vscode-dua/bin",
+			"targetName":"dua-check"
 		}
 	]
 }
