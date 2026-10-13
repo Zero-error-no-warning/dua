@@ -1,10 +1,24 @@
 {
   "name": "dua-language",
   "displayName": "Dua Language",
-  "description": "Syntax highlighting and editor support for the Dua scripting language.",
-  "version": "0.1.0",
+  "description": "Syntax highlighting, completions, snippets and diagnostics for the Dua scripting language.",
+  "version": "0.2.0",
   "publisher": "dua-lang",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Zero-error-no-warning/dua.git",
+    "directory": "editors/vscode-dua"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:dua"
+  ],
+  "scripts": {
+    "build:checker": "node scripts/build-checker.js",
+    "test": "node --test test/*.test.js",
+    "package": "npm run build:checker && vsce package --target win32-x64"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -16,7 +30,43 @@
     "syntax highlighting",
     "embedded scripting"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Completions and highlighting are available; diagnostics require workspace trust."
+    }
+  },
   "contributes": {
+    "configuration": {
+      "title": "Dua",
+      "properties": {
+        "dua.diagnostics.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show syntax and static type errors while editing Dua files."
+        },
+        "dua.diagnostics.delay": {
+          "type": "integer",
+          "default": 400,
+          "minimum": 0,
+          "maximum": 5000,
+          "description": "Delay in milliseconds before checking an edited document."
+        },
+        "dua.checkerPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "restricted": true,
+          "description": "Absolute path to a dua-check executable. Empty uses the bundled checker."
+        }
+      }
+    },
+    "snippets": [
+      {
+        "language": "dua",
+        "path": "./snippets/dua.json"
+      }
+    ],
     "languages": [
       {
         "id": "dua",
@@ -37,5 +87,10 @@
         "path": "./syntaxes/dua.tmLanguage.json"
       }
     ]
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^4.0.0",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
   }
 }

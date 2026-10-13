@@ -76,7 +76,7 @@ HTML版は外部依存のない単体ファイルです。原稿を更新した�
 
 ## エディターサポート
 
-- [Visual Studio Code 拡張](editors/vscode-dua/README.md) — `.dua` のシンタックスハイライト、コメント、括弧補完、折りたたみ
+- [Visual Studio Code 拡張](editors/vscode-dua/README.md) — `.dua` のハイライト、入力補完、スニペット、構文・型エラー表示。Windows x64用VSIXを作成してインストールできます
 
 ## リポジトリ構成
 

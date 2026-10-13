@@ -1,0 +1,52 @@
+{
+  "Function": {
+    "prefix": "func",
+    "body": ["${1:any} ${2:name}(${3:any value}) {", "\t$0", "}"],
+    "description": "型付き関数を宣言"
+  },
+  "If / else": {
+    "prefix": "ifelse",
+    "body": ["if (${1:condition}) {", "\t${2}", "} else {", "\t$0", "}"],
+    "description": "条件分岐"
+  },
+  "For loop": {
+    "prefix": "for",
+    "body": ["for (auto ${1:i} = 0; ${1:i} < ${2:count}; ${1:i} = ${1:i} + 1) {", "\t$0", "}"],
+    "description": "添字によるループ"
+  },
+  "Foreach": {
+    "prefix": "foreach",
+    "body": ["foreach (${1:value}; ${2:collection}) {", "\t$0", "}"],
+    "description": "コレクションを走査"
+  },
+  "Try / catch": {
+    "prefix": "try",
+    "body": ["try {", "\t${1}", "} catch (${2:err}) {", "\t$0", "}"],
+    "description": "エラーを捕捉"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": ["struct ${1:Name} {", "\t${2:int} ${3:field};", "\t$0", "}"],
+    "description": "値型structを宣言"
+  },
+  "Lambda": {
+    "prefix": "lambda",
+    "body": "(${1:any value}) => ${0:value}",
+    "description": "式を返すラムダ"
+  },
+  "Import": {
+    "prefix": "import",
+    "body": "import ${1:module} as ${2:Alias};$0",
+    "description": "モジュールを読み込み"
+  },
+  "Instance import": {
+    "prefix": "instanceimport",
+    "body": "instance import ${1:module};$0",
+    "description": "モジュールごとの依存実体"
+  },
+  "Interpolated string": {
+    "prefix": "istr",
+    "body": "i\"${1:text} \\$(${2:expression})\"$0",
+    "description": "文字列補間"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/**
+.npm-cache/**
+test/**
+scripts/**
+package-lock.json
+*.vsix
+bin/*.obj
+bin/*.pdb
+bin/*.lib
+bin/*.o
+bin/*.a
