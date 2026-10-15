@@ -95,6 +95,15 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                             diagnostics ~= CheckDiagnostic(target.line, target.column,
                                 format("Indexed assignment expects %s but has type %s", expected, actual));
                     }
+                    else if (target.kind == Expression.Kind.get)
+                    {
+                        auto get = cast(GetExpression) target;
+                        auto container = inferExpressionType(get.target, variables, functions, diagnostics);
+                        string element, key;
+                        if (get.memberName == "length" && (container == "array"
+                            || (splitContainerType(container, element, key) && !key.length)))
+                            diagnostics ~= CheckDiagnostic(target.line, target.column, "Array length is read-only");
+                    }
                 }
                 break;
             case Statement.Kind.return_:
@@ -141,7 +150,15 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                     {
                         auto iterableType = inferExpressionType(statement.iterable, variables, functions, diagnostics);
                         string element, key;
-                        if (splitContainerType(iterableType, element, key))
+                        if (statement.rangeEnd !is null)
+                        {
+                            auto endType = inferExpressionType(statement.rangeEnd, variables, functions, diagnostics);
+                            if ((iterableType != "int" && iterableType != "any")
+                                || (endType != "int" && endType != "any"))
+                                addDiagnostic(diagnostics, statement, "Range foreach bounds must be integers");
+                            nestedVariables[statement.iteratorName] = "int";
+                        }
+                        else if (splitContainerType(iterableType, element, key))
                         {
                             nestedVariables[statement.iteratorName] = statement.iteratorSecondName.length
                                 ? (key.length ? key : "int") : element;
@@ -283,6 +300,12 @@ private string inferExpressionType(Expression expression, ref string[string] var
             }
             return "any";
         case Expression.Kind.get:
+            auto get = cast(GetExpression) expression;
+            auto targetType = inferExpressionType(get.target, variables, functions, diagnostics);
+            string element, key;
+            if (get.memberName == "length" && (targetType == "array"
+                || splitContainerType(targetType, element, key)))
+                return "int";
             return "any";
     }
 }

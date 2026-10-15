@@ -237,7 +237,20 @@ long offset = 2;
 engine.bindFunc("addOffset", (long value) => value + offset);
 ```
 
-同名関数のオーバーロード集合もそのまま渡せます。Duaの実引数に対して、完全一致する型、損失のない数値変換、その他の変換の順で最適な候補を選びます。同じ優先度の候補が複数残る場合は曖昧エラーになります。クラス・構造体のreflectされたメンバー関数と `bindType` で公開されるstatic関数にも同じ規則を適用します。Dの型安全な可変長引数にも対応しますが、C形式variadicと引数型を省略したgeneric lambdaは対象外です。
+同名関数のオーバーロード集合もそのまま渡せます。`__traits(getOverloads)` で変換可能な具体的な宣言を列挙し、引数数・デフォルト引数・実引数の変換適合度で候補を選びます。Duaの整数表現は `long`、浮動小数点は `double` で、それぞれ完全一致を優先し、整数から浮動小数点、文字列化などの変換は低い優先度です。Dのコンパイル時のoverload解決や損失のない変換を完全に再現するものではありません。同じ優先度の候補が複数残る場合は曖昧エラーになります。クラス・構造体のreflectされたメンバー関数と `bindType` で公開されるstatic関数にも同じ規則を適用します。Dの型安全な可変長引数にも対応しますが、C形式variadicと引数型を省略したgeneric lambdaは対象外です。
+
+```d
+string describe(long value) { return "integer"; }
+string describe(string value) { return "text"; }
+engine.bindFunc!describe("describe"); // Dua: describe(42)、describe("hello")
+
+// 特定のoverloadだけを公開するときは型付きwrapperを使います。
+engine.bindFunc!((long value) => describe(value))("describeInteger");
+```
+
+数値などを D の `string` 引数へ渡す場合は既存の `Value.toHostString()` による文字列化を使用します。ただし同じ集合に数値型・delegate型の候補があれば、そちらの適合度が優先されます。`int` と `uint` など同順位の狭め変換や、引数型だけが異なるdelegate同士は曖昧エラーになります。テンプレート関数の任意の実体化は自動では行いません。必要な型で実体化するか、型付きwrapperを公開してください。
+
+`Font.Pixel` のように実行時の状態を読むデフォルト引数にも対応します。必要引数数の判定に既定式のCTFE評価は不要で、省略された既定値を呼び出し時に取得します。明示された引数はそのまま使います。既存の定数デフォルトと位置マクロの扱いは維持します。
 
 #### D の位置マクロをデフォルト引数に使う
 

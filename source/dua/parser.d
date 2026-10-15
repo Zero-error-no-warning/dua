@@ -438,6 +438,12 @@ private struct Parser
             }
             consume(TokenKind.semicolon, "Expected ';' between iterator and iterable");
             statement.iterable = parseExpression();
+            if (match(TokenKind.dotDot))
+            {
+                enforce(statement.iteratorSecondName.length == 0,
+                    "Range foreach expects a single iterator variable");
+                statement.rangeEnd = parseExpression();
+            }
             consume(TokenKind.rightParen, "Expected ')' after foreach clauses");
             statement.body = [parseStatement()];
             return statement;

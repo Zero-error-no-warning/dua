@@ -107,6 +107,7 @@ final class Statement : AstNode
     string iteratorName;
     string iteratorSecondName;
     Expression iterable;
+    Expression rangeEnd; // foreach の上端。null なら従来のコレクション反復。
     SwitchCase[] switchCases;
 
     this(Kind kind)

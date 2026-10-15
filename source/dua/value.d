@@ -1961,16 +1961,18 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
     }
 }
 
-private template RequiredDefaultArity(Defaults...)
+private template RequiredDefaultArity(alias declaration, size_t index = 0)
 {
-    static if (Defaults.length == 0 || !is(Defaults[0] == void))
-        enum RequiredDefaultArity = 0;
+    static if (index == Parameters!declaration.length)
+        enum RequiredDefaultArity = index;
+    else static if (parameterHasDefault!(declaration, index))
+        enum RequiredDefaultArity = index;
     else
-        enum RequiredDefaultArity = 1 + RequiredDefaultArity!(Defaults[1 .. $]);
+        enum RequiredDefaultArity = RequiredDefaultArity!(declaration, index + 1);
 }
 
 private enum reflectedMinimumArity(alias declaration) =
-    RequiredDefaultArity!(ParameterDefaults!declaration);
+    RequiredDefaultArity!declaration;
 
 private bool hasLocationDefaults(alias declaration)()
 {
@@ -1996,7 +1998,12 @@ private void assignReflectedDefault(alias declaration, size_t index, T)(ref T ta
             return;
         }
     }
-    target = ParameterDefaults!declaration[index];
+    // 位置マクロを含む既存のCTFE可能な既定値の意味は保ちます。
+    // 実行時の状態を読む式だけを、呼出時に取得します。
+    static if (__traits(compiles, ParameterDefaults!declaration))
+        target = ParameterDefaults!declaration[index];
+    else
+        target = evaluateParameterDefault!(declaration, index)();
 }
 
 private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C)(string debugName,
@@ -2027,7 +2034,7 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
         {{
             if (index < args.length)
                 converted[index] = convertFromValue!(MutableParams[index])(args[index]);
-            else static if (!is(ParameterDefaults!declaration[index] == void))
+            else static if (parameterHasDefault!(declaration, index))
             {
                 // Inspect the declaration, since a bound delegate may have lost
                 // its defaults. Metadata is determined during reflection.
@@ -2372,7 +2379,7 @@ ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugNam
             {
                 static foreach (index; 0 .. Params.length)
                 {{
-                    static if (!is(ParameterDefaults!constructor[index] == void))
+                    static if (parameterHasDefault!(constructor, index))
                         if (index >= args.length)
                             assignReflectedDefault!(constructor, index)(converted[index], caller);
                 }}
