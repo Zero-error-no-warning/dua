@@ -685,7 +685,23 @@ mixin template EvaluatorImplementation()
                     break;
                 case Statement.Kind.foreach_:
                     auto iterable = evaluate(statement.iterable, environment);
-                    if (iterable.kind == ValueKind.array)
+                    if (statement.rangeEnd !is null)
+                    {
+                        // 境界を開始時に一度だけ評価し、配列を確保せず上端非包含で進めます。
+                        auto end = evaluate(statement.rangeEnd, environment);
+                        enforce(iterable.kind == ValueKind.integer && end.kind == ValueKind.integer,
+                            "Range foreach bounds must be integers");
+                        foreach (index; iterable.integerValue .. end.integerValue)
+                        {
+                            auto itemEnvironment = new Environment(environment, layoutFor(statement));
+                            itemEnvironment.define(statement.iteratorName, Value.from(index));
+                            result = executeStatement(statement.body[0], itemEnvironment);
+                            if (result.returned) return result;
+                            if (result.broke) { result.broke = false; break; }
+                            result.continued = false;
+                        }
+                    }
+                    else if (iterable.kind == ValueKind.array)
                     {
                         foreach (index, item; iterable.arrayValue)
                         {
@@ -912,6 +928,8 @@ mixin template EvaluatorImplementation()
                 case Expression.Kind.get:
                     auto get = cast(GetExpression) target;
                     auto container = evaluate(get.target, environment);
+                    enforce(container.kind != ValueKind.array || get.memberName != "length",
+                        "Array length is read-only");
                     enforce(container.isFieldAggregate,
                         "Property assignment currently supports tables/reflected structs/classes");
                     if (auto property = container.findMember(get.memberName))
@@ -1135,6 +1153,8 @@ mixin template EvaluatorImplementation()
                 case Expression.Kind.get:
                     auto get = cast(GetExpression) expression;
                     auto container = evaluate(get.target, environment);
+                    if (container.kind == ValueKind.array && get.memberName == "length")
+                        return Value.from(cast(long) container.arrayValue.length);
                     if (container.kind == ValueKind.associativeArray)
                         return associativeProperty(container, get.memberName);
                     enforce(container.isFieldAggregate,

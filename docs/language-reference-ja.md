@@ -107,6 +107,7 @@ default:
 ```
 
 - `foreach (value; collection)` は値だけ、`foreach (key, value; collection)` は配列の添字またはテーブルのキーと値を受け取ります。
+- `foreach (idx; a .. b)` は整数 `a` から `b` 未満までを反復します。境界は開始時に左から一度だけ評価し、`a >= b` なら0回です。負数・変数式も使えます。配列は生成せず、反復変数は各回のローカル変数です。範囲では変数は1個だけで、整数以外の境界はエラーになります。
 - `break` / `continue` はループで使用します。`switch` の分岐を終えるときも `break` を使用できます。
 - 三項演算子 `condition ? whenTrue : whenFalse` も利用できます。
 - 現在の `switch` は最初に選ばれた節だけを実行し、次の節へフォールスルーしません。`default` は最後に置いてください。
@@ -115,6 +116,8 @@ default:
 
 ```D
 auto values = [10, 20, 30];
+auto count = values.length; # 読み取り専用の配列長。空配列は0
+foreach (idx; 0 .. values.length) { values[idx] += 1; }
 auto indices = iota(10);   # [0, 1, ..., 9]
 auto section = iota(5, 9); # [5, 6, 7, 8]
 auto odds = iota(1, 8, 2); # [1, 3, 5, 7]

@@ -1,6 +1,36 @@
 module dua.native_defaults;
 
 import std.ascii : isAlpha, isDigit, isWhite;
+import std.traits : FunctionTypeOf, ParameterIdentifierTuple;
+
+// ParameterDefaultsは既定式をCTFEで評価するため、実行時の状態を読む既定値では
+// overload自体が反映できません。引数の有無だけを型検査し、値は呼出時に取得します。
+package(dua) template parameterHasDefault(alias declaration, size_t index)
+{
+    static if (is(FunctionTypeOf!declaration P == __parameters))
+    {
+        enum name = ParameterIdentifierTuple!declaration[index];
+        enum argsName = "duaDefaultArgs" ~ (name == "duaDefaultArgs" ? "_" : "");
+        enum probe = mixin("(P[index .. index + 1] " ~ argsName ~ ") => true");
+        enum parameterHasDefault = is(typeof(probe()));
+    }
+    else
+        enum parameterHasDefault = false;
+}
+
+package(dua) auto evaluateParameterDefault(alias declaration, size_t index)()
+{
+    static assert(parameterHasDefault!(declaration, index));
+    static if (is(FunctionTypeOf!declaration P == __parameters))
+    {
+        enum name = ParameterIdentifierTuple!declaration[index];
+        enum argsName = "duaDefaultArgs" ~ (name == "duaDefaultArgs" ? "_" : "");
+        enum valueName = "duaDefaultValue" ~ (name == "duaDefaultValue" ? "_" : "");
+        auto getter = mixin("(P[index .. index + 1] " ~ argsName ~ ") { auto "
+            ~ valueName ~ " = " ~ argsName ~ "[0]; return " ~ valueName ~ "; }");
+        return getter();
+    }
+}
 
 package(dua) enum LocationDefault { none, moduleName, sourceName, line }
 
