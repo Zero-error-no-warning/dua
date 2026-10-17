@@ -64,9 +64,9 @@ async function until(predicate, description) {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
 }
-function mockEditor(root) {
+function mockEditor(root, isTrusted = true) {
   const documents = [], watchers = [], logs = [], values = new Map(), unrelated = new Map([['other', 'keep']]);
-  const changes = signal(), opens = signal(), closes = signal(), folders = signal();
+  const changes = signal(), opens = signal(), closes = signal(), folders = signal(), grants = signal();
   let revision = 0;
   const uri = fsPath => ({ scheme: 'file', fsPath });
   const context = { subscriptions: [] };
@@ -83,11 +83,13 @@ function mockEditor(root) {
         delete(uri) { values.delete(fileKey(uri.fsPath)); }, dispose() { values.clear(); } };
     } },
     workspace: {
+      isTrusted,
       workspaceFolders: [{ uri: uri(root) }], textDocuments: documents,
       onDidChangeTextDocument: callback => changes.subscribe(callback),
       onDidOpenTextDocument: callback => opens.subscribe(callback),
       onDidCloseTextDocument: callback => closes.subscribe(callback),
       onDidChangeWorkspaceFolders: callback => folders.subscribe(callback),
+      onDidGrantWorkspaceTrust: callback => grants.subscribe(callback),
       createFileSystemWatcher(pattern) {
         const create = signal(), change = signal(), remove = signal();
         const watcher = { pattern: pattern.pattern, onDidCreate: callback => create.subscribe(callback),
@@ -98,9 +100,11 @@ function mockEditor(root) {
     }
   };
   activateSceneDiagnostics(vscode, context, { appendLine(text) { logs.push(text); } });
-  return { values, unrelated, logs, documents, uri, changes, opens, closes,
-    inbox: watchers.find(w => w.pattern === '.dua-diagnostics/*.json'),
-    source: watchers.find(w => w.pattern === '**/*.dua'),
+  return { values, unrelated, logs, documents, uri, changes, opens, closes, folders,
+    get inbox() { return watchers.find(w => w.pattern === '.dua-diagnostics/*.json'); },
+    get source() { return watchers.find(w => w.pattern === '**/*.dua'); },
+    watcherCount() { return watchers.length; },
+    grantTrust() { vscode.workspace.isTrusted = true; grants.fire(); },
     settle() { const previous = revision; return until(() => revision > previous, 'diagnostic refresh'); },
     dispose() { for (const item of context.subscriptions.toReversed()) item.dispose(); } };
 }
@@ -108,6 +112,29 @@ async function writeInbox(root, data, filename = `${data.scopeId}.json`) {
   const directory = path.join(root, '.dua-diagnostics'); await fs.mkdir(directory, { recursive: true });
   const file = path.join(directory, filename); await fs.writeFile(file, JSON.stringify(data)); return file;
 }
+
+test('untrusted workspaces create no watchers and perform no I/O until trust is granted', () => fixture(async ({ root, source, data, file }) => {
+  await writeInbox(root, data);
+  const originals = new Map(['realpath', 'stat', 'readdir', 'readFile'].map(name => [name, fs[name]]));
+  let reads = 0, bufferReads = 0, editor;
+  for (const [name, original] of originals) fs[name] = function (...args) { reads++; return original.apply(this, args); };
+  try {
+    editor = mockEditor(root, false);
+    const document = { uri: editor.uri(file), getText() { bufferReads++; return source; } };
+    editor.documents.push(document);
+    editor.opens.fire(document); editor.changes.fire({ document }); editor.closes.fire(document); editor.folders.fire({});
+    await new Promise(resolve => setTimeout(resolve, 260));
+    assert.equal(editor.watcherCount(), 0, 'untrusted workspace must not watch runtime output');
+    assert.equal(reads, 0, 'untrusted workspace must not read or resolve files');
+    assert.equal(bufferReads, 0, 'untrusted workspace must not materialize document diagnostics');
+    assert.equal(editor.values.size, 0); assert.deepEqual(editor.logs, []);
+    editor.grantTrust();
+    assert.equal(editor.watcherCount(), 2, 'granting trust starts inbox and source watchers');
+    await until(() => editor.values.has(fileKey(file)), 'diagnostics after workspace trust');
+    assert.ok(reads > 0); assert.ok(bufferReads > 0);
+    assert.deepEqual([...editor.unrelated], [['other', 'keep']]);
+  } finally { for (const [name, original] of originals) fs[name] = original; editor?.dispose(); }
+}));
 
 test('inbox edits, corruption, empty reruns and deletion invalidate only their own scope', () => fixture(async ({ root, data, file }) => {
   const a = await writeInbox(root, data), other = { ...data, scopeId: 'scene-b', sceneId: 'Scene B' };

@@ -87,9 +87,10 @@ function activateSceneDiagnostics(vscode, context, output) {
   // Retain scopes separately so invalidating one inbox never clears another.
   let snapshots = new Map();
   const notices = new Set(), watchers = [];
+  const trusted = () => !disposed && vscode.workspace.isTrusted === true;
   const log = text => { if (!notices.has(text)) { if (notices.size > 1024) notices.clear(); notices.add(text); output.appendLine(`ZsD: ${text}`); } };
   function publish() {
-    if (disposed) return;
+    if (!trusted()) return;
     const grouped = new Map();
     for (const snapshot of snapshots.values()) for (const entry of snapshot.entries) {
       const id = key(entry.file);
@@ -107,6 +108,7 @@ function activateSceneDiagnostics(vscode, context, output) {
     }));
   }
   async function refresh() {
+    if (!trusted()) return;
     const current = ++generation, next = new Map();
     const open = new Map(vscode.workspace.textDocuments.filter(d => d.uri.scheme === 'file').map(d => [key(d.uri.fsPath), d.getText()]));
     const openByReal = await canonicalOpenSources(open);
@@ -136,11 +138,15 @@ function activateSceneDiagnostics(vscode, context, output) {
         }
       } catch (error) { if (error.code !== 'ENOENT') log(`Cannot read scene diagnostics: ${error.message}`); }
     }
-    if (disposed || current !== generation) return;
+    if (!trusted() || current !== generation) return;
     snapshots = next; publish();
   }
-  function schedule() { generation++; clearTimeout(timer); timer = setTimeout(() => { void refresh(); }, 200); }
+  function schedule() {
+    if (!trusted()) return;
+    generation++; clearTimeout(timer); timer = setTimeout(() => { void refresh(); }, 200);
+  }
   function sourceChanged(event) {
+    if (!trusted()) return;
     const uri = event?.document?.uri || event?.uri || event;
     if (uri?.scheme === 'file') {
       // Resolving junctions is async. Clear our collection now, then rebuild by
@@ -150,12 +156,15 @@ function activateSceneDiagnostics(vscode, context, output) {
     schedule();
   }
   function inboxChanged(uri) {
+    if (!trusted()) return;
     if (uri?.scheme === 'file') { snapshots.delete(key(uri.fsPath)); publish(); }
     schedule();
   }
   function watch() {
+    generation++; clearTimeout(timer);
     watchers.splice(0).forEach(w => w.dispose());
     snapshots.clear(); publish();
+    if (!trusted()) return;
     for (const folder of vscode.workspace.workspaceFolders || []) if (folder.uri.scheme === 'file') {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, '.dua-diagnostics/*.json'));
       watcher.onDidCreate(inboxChanged); watcher.onDidChange(inboxChanged); watcher.onDidDelete(inboxChanged); watchers.push(watcher);
@@ -166,6 +175,7 @@ function activateSceneDiagnostics(vscode, context, output) {
   }
   context.subscriptions.push(collection, vscode.workspace.onDidChangeTextDocument(sourceChanged), vscode.workspace.onDidCloseTextDocument(sourceChanged),
     vscode.workspace.onDidOpenTextDocument(sourceChanged),
+    vscode.workspace.onDidGrantWorkspaceTrust(watch),
     vscode.workspace.onDidChangeWorkspaceFolders(watch), { dispose() { disposed = true; generation++; clearTimeout(timer); watchers.forEach(w => w.dispose()); } });
   watch();
 }
