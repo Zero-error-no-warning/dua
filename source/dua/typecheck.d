@@ -2,7 +2,7 @@ module dua.typecheck;
 
 import dua.ast;
 import dua.execution : CheckDiagnostic;
-import dua.lexer : lex;
+import dua.lexer : lex, TokenKind;
 import dua.parser : parse;
 import dua.value : ValueKind;
 import dua.type_syntax;
@@ -16,14 +16,31 @@ private struct StaticFunctionInfo
 }
 
 /// Checks a source unit with the host class names registered by its engine.
-package(dua) CheckDiagnostic[] checkSource(string source, string[] nativeClassTypes = null)
+package(dua) CheckDiagnostic[] checkSource(string source, string[] nativeClassTypes = null,
+    string[] registeredClassTypes = null)
 {
     CheckDiagnostic[] diagnostics;
     try
     {
-        auto program = parse(lex(source));
+        auto tokens = lex(source);
+        auto program = parse(tokens);
         string[string] variableTypes;
         foreach (name; nativeClassTypes) variableTypes["#class_" ~ name] = "class";
+        // 到達性や呼出しを解析しません。同一ソースに同名の型宣言がある公開クラスだけ、
+        // 実行順で解決が変わり得る型として、実行時の厳密な検証へ委ねます。
+        foreach (index, token; tokens)
+        {
+            string name;
+            if ((token.kind == TokenKind.keywordAlias || token.kind == TokenKind.keywordStruct)
+                && index + 1 < tokens.length) name = tokens[index + 1].lexeme;
+            else if (token.kind == TokenKind.identifier && token.lexeme == "table"
+                && index + 2 < tokens.length && tokens[index + 1].kind == TokenKind.identifier
+                && tokens[index + 2].kind == TokenKind.leftBrace) name = tokens[index + 1].lexeme;
+            else if (token.kind == TokenKind.identifier && token.lexeme.length > 11
+                && token.lexeme[0 .. 11] == "__dua_type_") name = token.lexeme[11 .. $];
+            if (!isBuiltinTypeName(name) && registeredClassTypes.canFind(name))
+                variableTypes["#dynamic_type_" ~ name] = "runtime";
+        }
         StaticFunctionInfo[string] functions;
         checkStatements(program.statements, variableTypes, functions, diagnostics, "");
     }
@@ -315,6 +332,8 @@ private string inferExpressionType(Expression expression, ref string[string] var
 private string resolveStaticType(string name, ref string[string] variables, size_t depth = 0)
 {
     if (depth >= 64) return "any";
+    if (isBuiltinTypeName(name)) return name;
+    if (("#dynamic_type_" ~ name in variables) !is null) return "any";
     if (auto aliasType = "#type_" ~ name in variables)
         return resolveStaticType(*aliasType, variables, depth + 1);
     string element, key;
@@ -326,7 +345,8 @@ private string resolveStaticType(string name, ref string[string] variables, size
 
 private bool staticTypesCompatible(string actual, string expected, ref string[string] variables)
 {
-    if (actual == "null" && ("#class_" ~ expected in variables) !is null) return true;
+    if (actual == "null" && !isBuiltinTypeName(expected)
+        && ("#class_" ~ expected in variables) !is null) return true;
     if (actual == "any" || expected == "any" || expected == "auto") return true;
     string element, key;
     if (splitContainerType(expected, element, key))

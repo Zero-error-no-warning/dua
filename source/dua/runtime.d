@@ -1224,7 +1224,18 @@ final class ScriptEngine
 
     CheckDiagnostic[] check(string source)
     {
-        return checkSource(source, nativeClassTypes.keys);
+        // 前の実行で同名tableやaliasが定義された場合も、現在の型定義を優先します。
+        try
+        {
+            string[] nullableClassTypes;
+            foreach (name; nativeClassTypes.byKey)
+                if (typeAllowsNull(name)) nullableClassTypes ~= name;
+            return checkSource(source, nullableClassTypes, nativeClassTypes.keys);
+        }
+        catch (Exception error)
+        {
+            return [CheckDiagnostic(0, 0, error.msg)];
+        }
     }
 
     Value call(string functionName, scope const(Value)[] args = [])
@@ -1387,6 +1398,32 @@ final class ScriptEngine
 
     private Value* findTypeDefinition(string name)
     {
+        auto definition = findTypeDefinitionEntry(name);
+        if (definition is null) return null;
+        // globalの通常値で内部名が占有されても、型処理をRangeErrorで終了させません。
+        enforce(definition.kind == ValueKind.table && !definition.isClassReference,
+            "Invalid type metadata for '" ~ name ~ "'");
+        auto isTable = "isTable" in definition.tableValue;
+        enforce(isTable !is null && isTable.kind == ValueKind.boolean,
+            "Invalid type metadata for '" ~ name ~ "'");
+        if (isTable.booleanValue)
+        {
+            auto fields = "fields" in definition.tableValue;
+            enforce(fields !is null && fields.kind == ValueKind.table && !fields.isClassReference,
+                "Invalid type fields for '" ~ name ~ "'");
+            foreach (field; fields.tableValue.byValue)
+                enforce(field.kind == ValueKind.string_, "Invalid type field for '" ~ name ~ "'");
+        }
+        auto names = (isTable.booleanValue ? "chain" : "alternatives") in definition.tableValue;
+        enforce(names !is null && names.kind == ValueKind.array,
+            "Invalid type names for '" ~ name ~ "'");
+        foreach (entry; names.arrayValue)
+            enforce(entry.kind == ValueKind.string_, "Invalid type name for '" ~ name ~ "'");
+        return definition;
+    }
+
+    private Value* findTypeDefinitionEntry(string name)
+    {
         // Common spellings need neither concatenation nor a cache lookup.
         // Still consult globals: even these registry entries can be rebound.
         switch (name)
@@ -1469,12 +1506,25 @@ final class ScriptEngine
         return result;
     }
 
+    private bool typeAllowsNull(string typeName, size_t depth = 0)
+    {
+        if (depth >= 64) return false;
+        if (typeName == "auto" || typeName == "any" || typeName == "null" || typeName == "void")
+            return true;
+        string elementType, keyType;
+        if (isBuiltinTypeName(typeName) || splitContainerType(typeName, elementType, keyType)
+            || canFind(typeName, " delegate(")) return false;
+        auto definition = findTypeDefinition(typeName);
+        if (definition is null) return (typeName in nativeClassTypes) !is null;
+        if (definition.tableValue["isTable"].booleanValue) return false;
+        foreach (alternative; definition.tableValue["alternatives"].arrayValue)
+            if (typeAllowsNull(alternative.stringValue, depth + 1)) return true;
+        return false;
+    }
+
     private bool valueMatchesType(Value value, string typeName)
     {
-        // nullはホストの参照型だけで受け入れ、structや未登録型には広げません。
-        if (value.kind == ValueKind.null_ && (typeName in nativeClassTypes) !is null
-            && findTypeDefinition(typeName) is null)
-            return true;
+        if (value.kind == ValueKind.null_) return typeAllowsNull(typeName);
         string elementType, keyType;
         if (splitContainerType(resolveContainerType(typeName), elementType, keyType))
         {
@@ -1546,10 +1596,11 @@ final class ScriptEngine
 
     private bool valueIsType(Value value, string typeName)
     {
+        if (isBuiltinTypeName(typeName)) return valueMatchesType(value, typeName);
         auto definition = findTypeDefinition(typeName);
         // 代入可能であっても、null自体がクラスの実体になるわけではありません。
         if (definition is null && value.kind == ValueKind.null_
-            && (typeName in nativeClassTypes) !is null)
+            && !isBuiltinTypeName(typeName))
             return false;
         if (definition is null) return valueMatchesType(value, typeName);
         if (!definition.tableValue["isTable"].truthy())
