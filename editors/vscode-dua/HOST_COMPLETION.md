@@ -39,3 +39,24 @@ Schema version 1 uses:
 ```
 
 Module/static members use dotted symbol keys. Instance members are under `types`. The extension follows straightforward local declarations, assignments, aliases, function return types and property chains. Unknown expressions invalidate inferred values. This is conservative token analysis, not a full type checker; arbitrary flow, script-defined functions, and overload resolution are not implemented. Existing language completion remains available without a catalog. Use `Ctrl+Space` to request candidates.
+
+## Asset string arguments and scene context
+
+Hosts may add the following generic arrays. No host-specific API or scene-format names are built into the extension.
+
+```json
+{
+  "assets": [{"path":"hero.asset", "type":"Actor", "size":100, "modifiedMs":1790000000000,
+    "names":{"motions":["Walk"], "parts":["Arm"]}}],
+  "stringArguments": [{"receiverType":"Actor", "method":"morph", "argument":0, "source":"motions"}],
+  "assetLoaders": [{"function":"loadActor", "returnType":"Actor", "pathArguments":[1], "pathWrappers":["resource"]}],
+  "contexts": [{"script":"actor.dua", "assetDirectory":".",
+    "sources":[{"path":"level.scene", "size":200, "modifiedMs":1790000000000}],
+    "bindings":{"self":{"type":"Actor", "assets":["hero.asset"]},
+      "scenes.Player":{"type":"Actor", "assets":["hero.asset"]}}}]
+}
+```
+
+Paths are relative to the workspace root; `modifiedMs` is integer Unix milliseconds. Source size/time are checked on every request. Missing, moved or changed assets/scene contexts are ignored until regeneration. JSON is cached by its own file stamp. An atomic host rewrite or deletion is picked up on the next request. Regeneration must enumerate current files, so deleted paths do not accumulate.
+
+Literal loader calls, direct aliases and matching script contexts narrow asset candidates. Listed wrappers resolve relative to the scene directory; plain literals resolve relative to the project root. Dynamic paths show project candidates with their source and uncertainty. Shared script contexts show the union and mark multiple candidates. Runtime data flow is not evaluated. Only a configured direct string argument receives names; nested calls, comments and interpolated strings do not inherit outer suggestions. Insertion escapes names and replaces the string content.

@@ -62,7 +62,7 @@ function splitArguments(input) {
 
 function entryValue(entry, symbol) {
   if (!entry) return null;
-  return { types: entry.type ? [entry.type] : [], entry, symbol,
+  return { types: entry.types || (entry.type ? [entry.type] : []), entry, symbol,
     assets: entry.assets || null, typeObject: entry.kind === 'type' };
 }
 function combine(values) {
@@ -70,12 +70,14 @@ function combine(values) {
   if (!values.length) return null;
   return { types: [...new Set(values.flatMap(v => v.types || []))],
     assets: values.every(v => v.assets) ? [...new Set(values.flatMap(v => v.assets))] : null,
+    uncertain: values.some(v => v.uncertain),
     entries: values.flatMap(v => v.entries || (v.entry ? [v.entry] : [])) };
 }
 function memberValue(base, name, catalog) {
   if (!base) return null;
   const symbol = base.symbol ? `${base.symbol}.${name}` : null;
   if (symbol && catalog.symbols[symbol]) return entryValue(catalog.symbols[symbol], symbol);
+  if (symbol && Object.keys(catalog.symbols).some(key => key.startsWith(symbol + '.'))) return entryValue({ kind: 'module' }, symbol);
   const values = (base.types || []).flatMap(type => {
     const member = catalog.types[type]?.members?.[name];
     return member && (!base.typeObject || member.static) ? [entryValue(member)] : [];
@@ -96,7 +98,8 @@ function resolveExpression(input, environment, catalog, context = {}) {
     if (!first) return null;
     let value;
     if (first.text === '(') { value = read(); if (input[index]?.text !== ')') return null; index++; }
-    else if (first.kind === 'identifier') value = environment.get(first.text) || entryValue(catalog.symbols[first.text], first.text);
+    else if (first.kind === 'identifier') value = environment.get(first.text) || entryValue(catalog.symbols[first.text]
+      || (Object.keys(catalog.symbols).some(key => key.startsWith(first.text + '.')) ? { kind: 'module' } : null), first.text);
     else return null;
     while (index < input.length) {
       const next = input[index];
@@ -126,9 +129,21 @@ function resolveExpression(input, environment, catalog, context = {}) {
 function environmentAt(input, catalog, initial = new Map(), context = {}) {
   const scopes = [new Map(initial)];
   const lookup = { get(name) { for (let i = scopes.length - 1; i >= 0; i--) if (scopes[i].has(name)) return scopes[i].get(name); } };
-  function set(name, value, declaration) {
+  function set(name, value, declaration, conditional = false) {
     const scope = declaration ? scopes.at(-1) : [...scopes].reverse().find(s => s.has(name)) || scopes.at(-1);
+    if (!declaration && (conditional || scope !== scopes.at(-1))) value = { ...combine([scope.get(name) || { types: [], assets: null }, value || { types: [], assets: null }]), uncertain: true };
     scope.set(name, value || { types: [], assets: null });
+  }
+  function conditionalBefore(index) {
+    let depth = 0;
+    for (let i = index - 1; i >= 0; i--) {
+      const p = input[i].text;
+      if (')]}'.includes(p)) depth++;
+      if ('([{'.includes(p)) { if (!depth) break; depth--; }
+      if (!depth && [';', '{', '}'].includes(p)) break;
+      if (!depth && ['if', 'else', 'while', 'for', 'foreach', 'case'].includes(p)) return true;
+    }
+    return false;
   }
   for (let i = 0; i < input.length; i++) {
     const t = input[i];
@@ -155,7 +170,7 @@ function environmentAt(input, catalog, initial = new Map(), context = {}) {
     if (end === input.length) continue;
     const value = resolveExpression(input.slice(expression, end), lookup, catalog, context)
       || (catalog.types[declaredType] ? { types: [declaredType], assets: null } : null);
-    set(name, value, declaration); i = end;
+    set(name, value, declaration, conditionalBefore(i)); i = end;
   }
   return lookup;
 }
@@ -203,19 +218,50 @@ function apiCompletions(source, offset, catalog, context = {}) {
   }));
 }
 
+const catalogCache = new Map();
+const record = value => value && typeof value === 'object' && !Array.isArray(value);
+function cleanEntry(value) {
+  if (!record(value)) return null;
+  const entry = {};
+  for (const name of ['kind', 'type']) if (typeof value[name] === 'string') entry[name] = value[name];
+  if (typeof value.static === 'boolean') entry.static = value.static;
+  if (Array.isArray(value.signatures)) entry.signatures = value.signatures.filter(s => record(s) && typeof s.returnType === 'string' && Array.isArray(s.parameters))
+    .map(s => ({ returnType: s.returnType, parameters: s.parameters.filter(p => record(p) && typeof p.name === 'string' && typeof p.type === 'string') }));
+  return entry;
+}
 function loadCatalog(root, metadataFiles = ['.dua-completion.json']) {
   const result = { symbols: Object.create(null), types: Object.create(null), assets: [], contexts: [], stringArguments: [], assetLoaders: [], root };
-  for (const filename of metadataFiles) {
+  for (const filename of Array.isArray(metadataFiles) ? metadataFiles : []) {
+    if (typeof filename !== 'string') continue;
     const absolute = path.resolve(root, filename);
     if (!absolute.startsWith(path.resolve(root) + path.sep)) continue;
     try {
-      if (fs.statSync(absolute).size > 16 * 1024 * 1024) continue;
-      const data = JSON.parse(fs.readFileSync(absolute, 'utf8'));
-      if (data.schemaVersion !== 1 || !data.symbols || !data.types) continue;
+      const stat = fs.statSync(absolute), stamp = `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`;
+      if (stat.size > 16 * 1024 * 1024) continue;
+      let cached = catalogCache.get(absolute);
+      if (!cached || cached.stamp !== stamp) {
+        const parsed = JSON.parse(fs.readFileSync(absolute, 'utf8'));
+        if (parsed?.schemaVersion !== 1 || !record(parsed.symbols) || !record(parsed.types)) continue;
+        const data = { ...parsed, symbols: Object.create(null), types: Object.create(null) };
+        for (const [name, value] of Object.entries(parsed.symbols)) { const entry = cleanEntry(value); if (entry) data.symbols[name] = entry; }
+        for (const [name, value] of Object.entries(parsed.types)) if (record(value?.members)) {
+          const members = Object.create(null);
+          for (const [member, v] of Object.entries(value.members)) { const entry = cleanEntry(v); if (entry) members[member] = entry; }
+          data.types[name] = { members };
+        }
+        cached = { stamp, data };
+        if (catalogCache.size >= 32) catalogCache.clear();
+        catalogCache.set(absolute, cached);
+      }
+      const data = cached.data;
       Object.assign(result.symbols, data.symbols); Object.assign(result.types, data.types);
       result.origin = data.origin || filename;
       for (const key of ['assets', 'contexts', 'stringArguments', 'assetLoaders']) if (Array.isArray(data[key])) result[key].push(...data[key]);
     } catch { /* A missing/partially replaced catalog must not break language features. */ }
+  }
+  for (const name of Object.keys(result.symbols)) if (name.includes('.')) {
+    const parent = name.split('.')[0];
+    if (!result.symbols[parent]) result.symbols[parent] = { kind: 'module' };
   }
   return result;
 }
