@@ -48,6 +48,15 @@ unittest
     auto afterYield=engine.runSafe(caller,options);
     assert(!afterYield.ok && afterYield.diagnostic.sourceName==options.sourceName);
     assert(afterYield.diagnostic.sourceText==caller,"Yield must restore the caller's source snapshot");
+    auto workerSource="export void fail(){\n missing();\n}";
+    engine.registerModule("wrappedWorker",workerSource);
+    auto wrapCaller="import wrappedWorker;auto wrapped=coroutine.wrap(wrappedWorker.fail);wrapped();";
+    auto wrapFailure=engine.runSafe(wrapCaller,options);
+    assert(!wrapFailure.ok && wrapFailure.diagnostic.sourceName=="wrappedWorker");
+    assert(wrapFailure.diagnostic.line==2 && wrapFailure.diagnostic.column==2);
+    assert(wrapFailure.diagnostic.sourceText==workerSource);
+    auto handled=engine.runSafe("import wrappedWorker;auto handledCo=coroutine.create(wrappedWorker.fail);auto resumeResult=coroutine.resume(handledCo);return resumeResult[0];",options);
+    assert(handled.ok && !handled.value.truthy(),"resume still returns a handled failure without throwing");
 }
 
 unittest

@@ -22,6 +22,7 @@ package final class CoroutineState
     bool dead;
     bool failed;
     string errorMessage;
+    Exception failure;
     string sourceName;
     string sourceText;
     bool hasSourceText;
@@ -67,6 +68,7 @@ package mixin template CoroutineImplementation()
             {
                 state.failed = true;
                 state.errorMessage = error.msg;
+                state.failure = error;
             }
             state.dead = true;
         });
@@ -199,8 +201,13 @@ package mixin template CoroutineImplementation()
                 enforce(resumed.kind == ValueKind.array && resumed.arrayValue.length >= 1,
                     "coroutine.wrap resume failed");
                 if (!resumed.arrayValue[0].truthy())
+                {
+                    // wrapは失敗を再送出するため、呼出元で元の位置を置き換えません。
+                    auto failure = requireCoroutineState(handle).failure;
+                    if (failure !is null) throw failure;
                     enforce(false, resumed.arrayValue.length > 1
                         ? resumed.arrayValue[1].toHostString() : "coroutine.wrap failure");
+                }
                 return resumed.arrayValue.length > 1 ? resumed.arrayValue[1] : Value.nullValue();
             }));
         }));
