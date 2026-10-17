@@ -13,12 +13,12 @@ Duaスクリプト（`.dua`）向けのVS Code拡張です。
 
 ## インストール（Windows x64）
 
-`dua-language-win32-x64-0.3.1.vsix` を用意し、VS Codeのコマンドパレットで **Extensions: Install from VSIX...** を実行して選択します。必要に応じて **Developer: Reload Window** を実行してください。
+`dua-language-win32-x64-0.4.0.vsix` を用意し、VS Codeのコマンドパレットで **Extensions: Install from VSIX...** を実行して選択します。必要に応じて **Developer: Reload Window** を実行してください。
 
 コマンドからインストールする場合は、リポジトリのルートで次を実行します。
 
 ```powershell
-code --install-extension .\editors\vscode-dua\dua-language-win32-x64-0.3.1.vsix
+code --install-extension .\editors\vscode-dua\dua-language-win32-x64-0.4.0.vsix
 ```
 
 Windows x64用VSIXには診断ツールを含むため、利用時にDコンパイラーやNode.jsを別途インストールする必要はありません。`.dua` を開けばDuaとして認識され、`Ctrl+Space` で補完候補を表示できます。ワークスペースが信頼済みの場合、診断は自動で有効になります。
@@ -70,3 +70,15 @@ npm run package
 `npm run package` は診断ツールを再ビルドし、Windows x64用VSIXを作ります。別のプラットフォーム向けには、その環境で `npm run build:checker` を実行し、`npx vsce package --target linux-x64` など、ビルド環境に合うターゲットを指定してください。
 
 拡張を開発するときは `code --extensionDevelopmentPath=<拡張ディレクトリの絶対パス>` で開発ホストを起動できます。`npm test` は実際の診断ツールとの連携、TextMateのトークン化、補完、文字位置の変換、診断更新の制御を検証します。
+
+## ZsD シーン実行時の診断
+
+ZsD がワークスペース直下の `.dua-diagnostics/<scopeId>.json` に出力する実行結果を監視し、実行時・読込時のエラーを波線と「問題」へ表示します。別ウィンドウのプレビューも同じ経路です。拡張は JSON と本文を非同期で読み、シーンやスクリプト、コマンドを起動しません。
+
+位置は Dua の構造化情報だけを採用し、1始まりの UTF-8 バイト列を VS Code の UTF-16 列へ変換します。実行済み本文の SHA-256 と、開いている文書（未保存の編集を含む）または保存済み本文が一致した場合だけ位置を表示します。位置不明・本文変更・対象外パスは出力 **Dua** だけへ記録します。修正後はシーンを再実行してください。
+
+再実行・成功・停止・シーン切替・通常終了ではその所有者の古い診断を消去します。別シーンや既存の構文診断コレクションは維持します。強制終了・クラッシュ時に残った JSON は、ZsD を閉じた状態で `.dua-diagnostics` を削除できます。アセットディレクトリが設定済みの未保存シーンでは、そのディレクトリから決めたプロジェクトが出力先になります。未設定の場合は出力先が確定するまで連携しません。
+
+プロトコルは `schemaVersion:1`、`producer:"ZsD"`、`scopeId`、`runId`、`sceneId`、`diagnostics` を持つ固定ファイルの原子的な置換です。各診断は `file`、`line`、`column`、`message`、`severity`、実行済み本文の `sourceHash` を持ちます。位置不明は0で、ハッシュ不明の診断は出力だけです。最大128所有者、各256診断、JSON 512KB、本文1MBを上限とし、破損したスナップショットは採用しません。
+
+実行時の位置表示・文書監視はワークスペース内の `.dua` ファイルが対象です。Markdown・JavaScript・ワークスペース外の編集では再読取や診断消去を行いません。`.dua` 以外の診断ソースは Output のみへ記録します。

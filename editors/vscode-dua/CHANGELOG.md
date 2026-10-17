@@ -1,3 +1,9 @@
+## 0.4.0
+
+- Receive structured ZsD scene runtime/load errors through an asynchronous JSON inbox.
+- Show source-matched locations in Problems; route unknown/stale locations to Output.
+- Keep scene/run ownership, clear stale results on edits and lifecycle events, and preserve other diagnostic collections.
+
 # Changelog
 
 ## 0.3.0

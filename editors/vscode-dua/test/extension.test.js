@@ -46,6 +46,7 @@ test('extension debounces checks, drops stale responses, clears closed files and
     Module._load = function(name, ...args) {
       if (name === 'vscode') return vscode;
       if (name === './checker') return checker;
+      if (name === './sceneDiagnostics') return { activateSceneDiagnostics() {} };
       return original.call(this, name, ...args);
     };
     extension = require(file);
@@ -79,4 +80,9 @@ test('extension debounces checks, drops stale responses, clears closed files and
   assert.deepEqual(warnings, []);
   for (const subscription of context.subscriptions) subscription.dispose();
   delete require.cache[file];
+});
+
+test('startup activation installs the inbox watcher before the first external scene run', () => {
+  const manifest = require('../package.json');
+  assert.ok(manifest.activationEvents.includes('onStartupFinished'));
 });
