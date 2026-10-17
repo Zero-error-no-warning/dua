@@ -45,6 +45,8 @@ unittest
     auto instanceRun=engine.runSafe(instanceSource,options),instanceLoad=engine.loadSafe(instanceSource,options);
     assert(!instanceRun.ok && instanceRun.diagnostic.line==2 && instanceRun.diagnostic.column==10);
     assert(!instanceLoad.ok && instanceLoad.diagnostic.line==2 && instanceLoad.diagnostic.column==10);
+    auto emptyInstance=engine.runSafe("\ninstance {}",options);
+    assert(!emptyInstance.ok && emptyInstance.diagnostic.line==2 && emptyInstance.diagnostic.column==1);
     auto limitOptions=options;limitOptions.limits.maxSteps=2;
     auto stepLimit=engine.runSafe("1;\n2;",limitOptions);
     assert(!stepLimit.ok && stepLimit.errorKind==RunErrorKind.stepLimit);

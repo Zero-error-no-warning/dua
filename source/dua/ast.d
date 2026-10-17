@@ -7,6 +7,8 @@ final class Program
 {
     Statement[] statements;
     bool hasInstanceDeclarations;
+    // 空のinstanceブロックを平坦化した後も、拒否位置を保持します。
+    Statement firstInstanceDeclaration;
 
     this(Statement[] statements)
     {
