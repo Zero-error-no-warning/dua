@@ -957,6 +957,13 @@ mixin template EvaluatorImplementation()
                     auto container = evaluate(indexed.target, environment);
                     enforce(!indexed.isSlice, "Slice cannot be an assignment target");
                     enforce(indexed.indices.length == 1, "Index assignment requires a single index");
+                    // A compound target already resolved its index to a literal and measured length once.
+                    auto pushedLength = indexed.index.kind != Expression.Kind.literal && canMeasureLength(container);
+                    if (pushedLength) evaluatorContext.indexLengthStack.push(measuredLength(container));
+                    scope (exit)
+                    {
+                        if (pushedLength) evaluatorContext.indexLengthStack.pop();
+                    }
                     auto index = evaluate(indexed.index, environment);
                     if (container.kind == ValueKind.associativeArray)
                     {
@@ -971,6 +978,12 @@ mixin template EvaluatorImplementation()
                     {
                         auto position = cast(size_t) index.toInt();
                         enforce(position < container.arrayValue.length, "Array index out of range");
+                        if (container.arrayElementType.length)
+                        {
+                            value = prepareArrayElement(value, container.arrayElementType);
+                            enforce(valueMatchesType(value, container.arrayElementType),
+                                "Array element expected " ~ container.arrayElementType);
+                        }
                         container.arrayValue[position] = value.valueCopy();
                         return;
                     }
@@ -1216,7 +1229,7 @@ mixin template EvaluatorImplementation()
                         {
                             sliced = container.arrayValue[lowerBound .. upperBound].dup;
                         }
-                        return Value.fromOwnedArray(sliced);
+                        return Value.fromOwnedArray(sliced, container.arrayElementType);
                     }
                     auto indices = evaluateExpressionList(indexed.indices, environment);
                     return readIndex(container, indices, callSite(indexed));
@@ -1410,13 +1423,21 @@ mixin template EvaluatorImplementation()
         switch (operatorCode(operatorSymbol))
         {
             case operatorCode("~"):
-                if (left.kind == ValueKind.array && right.kind == ValueKind.array)
+                if (left.kind == ValueKind.array)
                 {
+                    auto added = right.kind == ValueKind.array ? right.arrayValue : [right];
                     Value[] combined;
-                    combined.length = left.arrayValue.length + right.arrayValue.length;
+                    combined.length = left.arrayValue.length + added.length;
                     combined[0 .. left.arrayValue.length] = left.arrayValue;
-                    combined[left.arrayValue.length .. $] = right.arrayValue;
-                    return Value.fromOwnedArray(combined);
+                    combined[left.arrayValue.length .. $] = added;
+                    if (left.arrayElementType.length)
+                        foreach (ref element; combined)
+                        {
+                            element = prepareArrayElement(element, left.arrayElementType);
+                            enforce(valueMatchesType(element, left.arrayElementType),
+                                "Array element expected " ~ left.arrayElementType);
+                        }
+                    return Value.fromOwnedArray(combined, left.arrayElementType);
                 }
                 return Value.from(stringify(left) ~ stringify(right));
             case operatorCode("+"):
@@ -1707,6 +1728,15 @@ mixin template EvaluatorImplementation()
     private Value delegate(Value) containerValidator(string declaredType)
     {
         return (Value next) => prepareContainerValue(next, declaredType);
+    }
+
+    private Value prepareArrayElement(Value value, string type)
+    {
+        string element, key;
+        // Preserve references to already typed nested arrays; untyped inputs still need normalization.
+        if (value.kind == ValueKind.array && splitContainerType(resolveContainerType(type), element, key)
+            && !key.length && value.arrayElementType == element) return value;
+        return prepareContainerValue(value, type);
     }
 
     private Value checkedAssociativeKey(Value container, Value key)

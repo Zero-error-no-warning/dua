@@ -1482,7 +1482,7 @@ final class ScriptEngine
                 enforce(valueMatchesType(prepared, elementType), "Array element expected " ~ elementType);
                 elements[index] = prepared;
             }
-            return Value.fromOwnedArray(elements);
+            return Value.fromOwnedArray(elements, elementType);
         }
         // [] may initialize an empty typed AA; {} remains a distinct table.
         if (value.kind == ValueKind.array && value.arrayValue.length == 0)
