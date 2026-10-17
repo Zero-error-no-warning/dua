@@ -300,3 +300,31 @@ unittest
     options.typeCheck = true;
     assert(engine.run("NativeItem value = null; return value == null;", options).truthy());
 }
+
+unittest
+{
+    // globalやホストのbindで内部名が通常値になってもcheckをErrorで終了させません。
+    foreach (invalid; [Value.from(7), Value.nullValue(), Value.from("ordinary"),
+        Value.from(cast(Value[string]) null), Value.reflect(new NativeItem),
+        Value.from(["isTable": Value.from(false)]),
+        Value.from(["isTable": Value.from("false"), "alternatives": Value.from([Value.from("null")])]),
+        Value.from(["isTable": Value.from(false), "alternatives": Value.from(7)]),
+        Value.from(["isTable": Value.from(false), "alternatives": Value.from([Value.from("null"), Value.from(7)])]),
+        Value.from(["isTable": Value.from(true)]),
+        Value.from(["isTable": Value.from(true), "fields": Value.from(7), "chain": Value.from([Value.from("NativeItem")])])])
+    {
+        auto engine = itemEngine();
+        engine.bind("__dua_type_NativeItem", invalid);
+        assert(engine.check("").length != 0);
+        auto diagnostics = engine.check("NativeItem value = null;");
+        assert(diagnostics.length != 0 && diagnostics[0].message.canFind("Invalid type"));
+        assert(!engine.runSafe("NativeItem value = null;").ok);
+        RunOptions options;
+        options.typeCheck = true;
+        assert(!engine.runSafe("NativeItem value = null;", options).ok);
+    }
+    auto engine = itemEngine();
+    assert(engine.loadSafe("auto __dua_type_NativeItem = 7;").ok);
+    assert(engine.check("NativeItem value = null;").length != 0);
+    assert(!engine.runSafe("NativeItem value = null;").ok);
+}
