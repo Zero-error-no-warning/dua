@@ -23,6 +23,7 @@ import std.file : exists, readText, remove, write;
 import std.format : format;
 import std.string : join, replace, startsWith;
 import std.traits : BaseClassesTuple, isAggregateType, isNumeric, Parameters, ReturnType;
+import std.meta : staticIndexOf;
 
 // Decide visibility before attempting conversion. Probing private renderer or
 // resource-management state with __traits(compiles) can instantiate unsupported
@@ -846,23 +847,28 @@ final class ScriptEngine
         if (completionRegistry_ !is null) completionRegistry_.typed!T(name);
     }
 
-    private void registerHostType(T)()
+    private void registerHostType(T, Seen...)()
     {
-        static if (isAggregateType!T)
-            if (completionRegistry_ !is null) completionRegistry_.registerType!T();
-        static if (is(T == class))
+        // Callable aggregates can return or accept themselves, including cycles
+        // through other callable structs. Visit each type once per traversal.
+        static if (staticIndexOf!(T, Seen) < 0)
         {
-            nativeClassTypes[T.stringof] = true;
-            static foreach (Base; BaseClassesTuple!T)
-                nativeClassTypes[Base.stringof] = true;
-        }
-        else static if (isHostCallable!T)
-        {
-            static if (isAggregateType!(ReturnType!T))
-                registerHostType!(ReturnType!T)();
-            static foreach (Parameter; Parameters!T)
-                static if (isAggregateType!Parameter)
-                    registerHostType!Parameter();
+            static if (isAggregateType!T)
+                if (completionRegistry_ !is null) completionRegistry_.registerType!T();
+            static if (is(T == class))
+            {
+                nativeClassTypes[T.stringof] = true;
+                static foreach (Base; BaseClassesTuple!T)
+                    nativeClassTypes[Base.stringof] = true;
+            }
+            else static if (isHostCallable!T)
+            {
+                static if (isAggregateType!(ReturnType!T))
+                    registerHostType!(ReturnType!T, Seen, T)();
+                static foreach (Parameter; Parameters!T)
+                    static if (isAggregateType!Parameter)
+                        registerHostType!(Parameter, Seen, T)();
+            }
         }
     }
 

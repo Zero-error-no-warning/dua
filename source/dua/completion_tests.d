@@ -20,6 +20,30 @@ private struct CompletionVec { double x; double y; }
 private CompletionVec makeVec() { ++calls; return CompletionVec(1, 2); }
 private class RawCompletionFixture { Value echo(Value input){ return input; } }
 
+private struct CallableSelf { CallableSelf opCall(CallableSelf input){ return input; } }
+private struct CallableLeft { CallableRight opCall(){ return CallableRight.init; } }
+private struct CallableRight { CallableLeft opCall(){ return CallableLeft.init; } }
+private CallableSelf makeCallableSelf(){ assert(false,"Host factory must not run during registration"); }
+private CallableLeft makeCallableLeft(){ assert(false,"Host factory must not run during registration"); }
+
+unittest
+{
+    foreach(metadata;[false,true])
+    {
+        auto engine = new Dua.ScriptEngine;
+        if(metadata)engine.enableCompletionMetadata(true);
+        engine.bindFunc!makeCallableSelf("makeCallableSelf");
+        engine.bindFunc!makeCallableLeft("makeCallableLeft");
+        engine.bindFunc("callable",CallableSelf.init);
+        if(metadata)
+        {
+            auto types = engine.completionRegistry.toJson()["types"].object;
+            foreach(name;["CallableSelf","CallableLeft","CallableRight"])
+                assert(name in types,"Missing callable aggregate: " ~ name);
+        }
+    }
+}
+
 unittest
 {
     auto engine = new Dua.ScriptEngine;
