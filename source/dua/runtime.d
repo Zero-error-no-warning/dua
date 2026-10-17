@@ -243,6 +243,8 @@ final class ModuleHandle
     private bool hostCreated;
     private Program moduleProgram;
     private string sourceName;
+    private string sourceText;
+    private bool hasSourceText;
     private Environment sharedEnvironment;
     private ModuleHandle definition;
     private bool ready;
@@ -341,7 +343,7 @@ final class ModuleHandle
     Value run(string source, RunOptions options)
     {
         auto result = runSafe(source, options);
-        enforce(result.ok, result.errorMessage);
+        if(!result.ok)throw outcomeException(result,result.errorMessage);
         return result.value;
     }
 
@@ -358,7 +360,7 @@ final class ModuleHandle
     void load(string source)
     {
         auto result = loadSafe(source);
-        enforce(result.ok, result.errorMessage);
+        if(!result.ok)throw outcomeException(result,result.errorMessage);
     }
 
     RunOutcome loadSafe(string source)
@@ -374,7 +376,7 @@ final class ModuleHandle
     void loadFile(string path)
     {
         auto result = loadFileSafe(path);
-        enforce(result.ok, result.errorMessage);
+        if(!result.ok)throw outcomeException(result,result.errorMessage);
     }
 
     RunOutcome loadFileSafe(string path)
@@ -392,6 +394,7 @@ final class ModuleHandle
             RunOutcome outcome;
             outcome.ok = false;
             outcome.errorMessage = engine.withSourceContext(error, path).msg;
+            outcome.diagnostic = scriptDiagnostic(engine.withSourceContext(error, path));
             outcome.errorKind = RunErrorKind.runtime;
             return outcome;
         }
@@ -709,6 +712,8 @@ final class ScriptCallable : CallableValue
     private string[] parameterTypes;
     private string returnType;
     private string sourceName;
+    private string sourceText;
+    private bool hasSourceText;
     private string moduleName;
     private ScopeLayout scopeLayout;
 
@@ -730,6 +735,8 @@ final class ScriptCallable : CallableValue
         this.parameterTypes = parameterTypes.dup;
         this.returnType = returnType;
         this.sourceName = engine.evaluatorContext.sourceName;
+        this.sourceText = engine.evaluatorContext.sourceText;
+        this.hasSourceText = engine.evaluatorContext.hasSourceText;
         this.moduleName = engine.evaluatorContext.moduleName;
         this.scopeLayout = scopeLayout is null ? planScope(this.body, ["this"] ~ this.parameters) : scopeLayout;
     }
@@ -737,6 +744,10 @@ final class ScriptCallable : CallableValue
     override Value invoke(Value[] args)
     {
         auto previousSource = engine.evaluatorContext.sourceName;
+        auto previousText = engine.evaluatorContext.sourceText;
+        auto previousHasText = engine.evaluatorContext.hasSourceText;
+        engine.evaluatorContext.sourceText=sourceText;engine.evaluatorContext.hasSourceText=hasSourceText;
+        scope(exit){engine.evaluatorContext.sourceText=previousText;engine.evaluatorContext.hasSourceText=previousHasText;}
         auto previousModule = engine.evaluatorContext.moduleName;
         engine.evaluatorContext.sourceName = sourceName;
         engine.evaluatorContext.moduleName = moduleName;
@@ -1140,7 +1151,7 @@ final class ScriptEngine
         auto trace = result.stackTrace.length > 0
             ? "\nStack:\n  " ~ result.stackTrace.join("\n  ")
             : "";
-        enforce(false, result.errorMessage ~ trace);
+        throw outcomeException(result,result.errorMessage ~ trace);
         assert(0);
     }
 
@@ -1151,7 +1162,7 @@ final class ScriptEngine
         {
             return result.value;
         }
-        enforce(false, result.errorMessage);
+        throw outcomeException(result,result.errorMessage);
         assert(0);
     }
 
@@ -1166,7 +1177,7 @@ final class ScriptEngine
         auto trace = result.stackTrace.length > 0
             ? "\nStack:\n  " ~ result.stackTrace.join("\n  ")
             : "";
-        enforce(false, result.errorMessage ~ trace);
+        throw outcomeException(result,result.errorMessage ~ trace);
         assert(0);
     }
 
@@ -1177,7 +1188,7 @@ final class ScriptEngine
         {
             return result.value;
         }
-        enforce(false, result.errorMessage);
+        throw outcomeException(result,result.errorMessage);
         assert(0);
     }
 
@@ -1208,6 +1219,7 @@ final class ScriptEngine
             RunOutcome outcome;
             outcome.ok = false;
             outcome.errorMessage = withSourceContext(error, path).msg;
+            outcome.diagnostic = scriptDiagnostic(withSourceContext(error, path));
             outcome.errorKind = RunErrorKind.runtime;
             return outcome;
         }
@@ -1224,7 +1236,7 @@ final class ScriptEngine
         auto trace = result.stackTrace.length > 0
             ? "\nStack:\n  " ~ result.stackTrace.join("\n  ")
             : "";
-        enforce(false, result.errorMessage ~ trace);
+        throw outcomeException(result,result.errorMessage ~ trace);
     }
 
     void loadFile(string path)
@@ -1238,7 +1250,7 @@ final class ScriptEngine
         auto trace = result.stackTrace.length > 0
             ? "\nStack:\n  " ~ result.stackTrace.join("\n  ")
             : "";
-        enforce(false, result.errorMessage ~ trace);
+        throw outcomeException(result,result.errorMessage ~ trace);
     }
 
     RunOutcome loadSafe(string source)
@@ -1268,6 +1280,7 @@ final class ScriptEngine
             RunOutcome outcome;
             outcome.ok = false;
             outcome.errorMessage = withSourceContext(error, path).msg;
+            outcome.diagnostic = scriptDiagnostic(withSourceContext(error, path));
             outcome.errorKind = RunErrorKind.runtime;
             return outcome;
         }
@@ -1294,6 +1307,11 @@ final class ScriptEngine
         }
     }
 
+    ScriptDiagnostic diagnostic(Throwable error)
+    {
+        return scriptDiagnostic(error);
+    }
+
     Value call(string functionName, scope const(Value)[] args = [])
     {
         return globalModule_.call(functionName, args);
@@ -1309,6 +1327,9 @@ final class ScriptEngine
     private RunOutcome runInEnvironmentSafe(string source, Environment environment, RunOptions options)
     {
         auto previousSource = evaluatorContext.sourceName;
+        auto previousText=evaluatorContext.sourceText;auto previousHasText=evaluatorContext.hasSourceText;
+        evaluatorContext.sourceText=source;evaluatorContext.hasSourceText=true;
+        scope(exit){evaluatorContext.sourceText=previousText;evaluatorContext.hasSourceText=previousHasText;}
         evaluatorContext.sourceName = options.sourceName;
         scope (exit) evaluatorContext.sourceName = previousSource;
         evaluatorContext.callStack.clear();
@@ -1322,9 +1343,9 @@ final class ScriptEngine
             if (options.typeCheck)
             {
                 auto typeDiagnostics = check(source);
-                enforce(typeDiagnostics.length == 0,
-                    typeDiagnostics.length == 0 ? "" : format("Type check failed at %s:%s: %s",
-                        typeDiagnostics[0].line, typeDiagnostics[0].column, typeDiagnostics[0].message));
+                if(typeDiagnostics.length)throw locatedException(format("Type check failed at %s:%s: %s",
+                    typeDiagnostics[0].line,typeDiagnostics[0].column,typeDiagnostics[0].message),
+                    typeDiagnostics[0].line,typeDiagnostics[0].column);
             }
             auto program = parse(lex(source));
             enforce(!program.hasInstanceDeclarations,
@@ -1341,11 +1362,13 @@ final class ScriptEngine
         {
             outcome.ok = false;
             outcome.errorMessage = withSourceContext(error, options.sourceName).msg;
+            outcome.diagnostic = scriptDiagnostic(withSourceContext(error, options.sourceName));
             outcome.stackTrace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack.dup : evaluatorContext.callStack.snapshot();
             outcome.errorKind = cast(StepLimitException) error !is null
                 ? RunErrorKind.stepLimit
                 : cast(CallDepthLimitException) error !is null
                     ? RunErrorKind.callDepthLimit : RunErrorKind.runtime;
+            if(!outcome.diagnostic.hasSourceText && outcome.diagnostic.sourceName == options.sourceName){outcome.diagnostic.sourceText=source;outcome.diagnostic.hasSourceText=true;}
             outcome.stepsExecuted = evaluatorContext.executedSteps;
             return outcome;
         }

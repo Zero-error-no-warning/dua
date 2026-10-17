@@ -1,5 +1,6 @@
 module dua.parser;
 
+import dua.execution : locatedException, scriptDiagnostic;
 import dua.ast;
 import dua.lexer : Token, TokenKind, lex;
 import dua.value : Value;
@@ -474,7 +475,7 @@ private struct Parser
                     continue;
                 }
                 auto token = peek();
-                enforce(false, format("Expected case/default in switch at %s:%s", token.line, token.column));
+                throw locatedException(format("Expected case/default in switch at %s:%s", token.line, token.column), token.line, token.column);
             }
 
             consume(TokenKind.rightBrace, "Expected '}' after switch body");
@@ -637,7 +638,7 @@ private struct Parser
         }
 
         auto token = peek();
-        enforce(false, format("Expected table key at %s:%s", token.line, token.column));
+        throw locatedException(format("Expected table key at %s:%s", token.line, token.column), token.line, token.column);
         assert(0);
     }
 
@@ -992,7 +993,7 @@ private struct Parser
         }
 
         auto token = peek();
-        enforce(false, format("Unexpected token %s at %s:%s", token.kind, token.line, token.column));
+        throw locatedException(format("Unexpected token %s at %s:%s", token.kind, token.line, token.column), token.line, token.column);
         assert(0);
     }
 
@@ -1024,7 +1025,7 @@ private struct Parser
 
                 auto end = findInterpolationEnd(stringToken.lexeme, cursor + 2, prefixToken);
                 auto embedded = stringToken.lexeme[cursor + 2 .. end];
-                auto embeddedExpressions = parseInterpolationExpressionSequence(embedded, prefixToken);
+                auto embeddedExpressions = parseInterpolationExpressionSequence(embedded, prefixToken, stringToken.line, stringToken.column + cursor + 3);
                 foreach (expression; embeddedExpressions)
                 {
                     // Convert each value before concatenation, including a lone
@@ -1072,9 +1073,17 @@ private struct Parser
         return literal;
     }
 
-    Expression[] parseInterpolationExpressionSequence(string source, Token contextToken)
+    Expression[] parseInterpolationExpressionSequence(string source, Token contextToken, size_t baseLine, size_t baseColumn)
     {
-        auto embeddedTokens = lex(source);
+        Token[] embeddedTokens;
+        try{embeddedTokens=lex(source);}
+        catch(Exception error){
+            auto diagnostic=scriptDiagnostic(error);
+            if(diagnostic.line)throw locatedException(error.msg,baseLine+diagnostic.line-1,
+                diagnostic.line==1 ? baseColumn+diagnostic.column-1 : diagnostic.column);
+            throw error;
+        }
+        foreach(ref token;embeddedTokens){if(token.line==1)token.column+=baseColumn-1;token.line+=baseLine-1;}
         auto embeddedParser = Parser(embeddedTokens, 0);
         auto expressions = embeddedParser.parseExpressionList();
         enforce(embeddedParser.check(TokenKind.eof),
@@ -1137,7 +1146,7 @@ private struct Parser
             ++cursor;
         }
 
-        enforce(false, format("Unterminated interpolation sequence at %s:%s", token.line, token.column));
+        throw locatedException(format("Unterminated interpolation sequence at %s:%s", token.line, token.column), token.line, token.column);
         assert(0);
     }
 
@@ -1443,7 +1452,7 @@ private struct Parser
             return advance();
         }
         auto token = peek();
-        enforce(false, format("%s at %s:%s", message, token.line, token.column));
+        throw locatedException(format("%s at %s:%s", message, token.line, token.column), token.line, token.column);
         assert(0);
     }
 
@@ -1527,7 +1536,7 @@ private struct Parser
             return advance();
         }
         auto token = peek();
-        enforce(false, format("%s at %s:%s", message, token.line, token.column));
+        throw locatedException(format("%s at %s:%s", message, token.line, token.column), token.line, token.column);
         assert(0);
     }
 }

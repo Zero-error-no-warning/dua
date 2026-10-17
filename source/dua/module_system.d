@@ -71,6 +71,7 @@ mixin template ModuleImplementation()
         result.sharedEnvironment = definition.sharedEnvironment;
         result.moduleProgram = definition.moduleProgram;
         result.sourceName = definition.sourceName;
+        result.sourceText = definition.sourceText;result.hasSourceText=definition.hasSourceText;
         initializeModuleInstance(result, false);
         return result;
     }
@@ -108,6 +109,9 @@ mixin template ModuleImplementation()
         scope(exit) moduleCreationPath.length -= 1;
         auto previousSource = evaluatorContext.sourceName;
         auto previousModule = evaluatorContext.moduleName;
+        auto previousText=evaluatorContext.sourceText;auto previousHasText=evaluatorContext.hasSourceText;
+        evaluatorContext.sourceText=handle.sourceText;evaluatorContext.hasSourceText=handle.hasSourceText;
+        scope(exit){evaluatorContext.sourceText=previousText;evaluatorContext.hasSourceText=previousHasText;}
         evaluatorContext.sourceName = handle.sourceName;
         evaluatorContext.moduleName = handle.moduleName;
         scope(exit) evaluatorContext.sourceName = previousSource;
@@ -141,7 +145,7 @@ mixin template ModuleImplementation()
         }
         catch (Exception error)
         {
-            throw withSourceContext(error, handle.moduleName);
+            throw withSourceContext(error, handle.sourceName);
         }
     }
 
@@ -183,7 +187,7 @@ mixin template ModuleImplementation()
 
         auto trace = result.stackTrace.length > 0
             ? "\nStack:\n  " ~ result.stackTrace.join("\n  ") : "";
-        enforce(false, result.errorMessage ~ trace);
+        throw outcomeException(result,result.errorMessage ~ trace);
         assert(0);
     }
 
@@ -205,6 +209,7 @@ mixin template ModuleImplementation()
         {
             outcome.ok = false;
             outcome.errorMessage = withSourceContext(error, name).msg;
+            outcome.diagnostic = scriptDiagnostic(withSourceContext(error, name));
             outcome.stackTrace = evaluatorContext.lastErrorStack.length > 0
                 ? evaluatorContext.lastErrorStack.dup : evaluatorContext.callStack.snapshot();
             outcome.errorKind = RunErrorKind.runtime;
@@ -223,7 +228,7 @@ mixin template ModuleImplementation()
 
         auto trace = result.stackTrace.length > 0
             ? "\nStack:\n  " ~ result.stackTrace.join("\n  ") : "";
-        enforce(false, result.errorMessage ~ trace);
+        throw outcomeException(result,result.errorMessage ~ trace);
         assert(0);
     }
 
@@ -240,6 +245,7 @@ mixin template ModuleImplementation()
             RunOutcome outcome;
             outcome.ok = false;
             outcome.errorMessage = withSourceContext(error, path).msg;
+            outcome.diagnostic = scriptDiagnostic(withSourceContext(error, path));
             outcome.errorKind = RunErrorKind.runtime;
             return outcome;
         }
@@ -385,6 +391,7 @@ mixin template ModuleImplementation()
         handle.sharedEnvironment = sharedScope;
         auto origin = name in moduleSourceNames;
         handle.sourceName = origin is null ? name : *origin;
+        handle.sourceText=*source;handle.hasSourceText=true;
         // Preserve identity for ordinary cycles, but do not permit new until ready.
         handle.moduleValue.moduleOwner = handle;
         modules[name] = handle; // Make cycles share module identity while loading.
@@ -395,7 +402,7 @@ mixin template ModuleImplementation()
             handle.moduleProgram = parse(lex(*source));
             initializeModuleInstance(handle, true);
         }
-        catch (Exception error) { throw withSourceContext(error, name); }
+        catch (Exception error) { throw withDiagnosticSource(withSourceContext(error, handle.sourceName),handle.sourceName,handle.sourceText); }
         return handle;
     }
 

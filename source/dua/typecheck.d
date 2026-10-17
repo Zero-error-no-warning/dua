@@ -1,7 +1,7 @@
 module dua.typecheck;
 
 import dua.ast;
-import dua.execution : CheckDiagnostic;
+import dua.execution : CheckDiagnostic, scriptDiagnostic;
 import dua.lexer : lex, TokenKind;
 import dua.parser : parse;
 import dua.value : ValueKind;
@@ -46,7 +46,8 @@ package(dua) CheckDiagnostic[] checkSource(string source, string[] nativeClassTy
     }
     catch (Exception error)
     {
-        diagnostics ~= CheckDiagnostic(0, 0, error.msg);
+        auto diagnostic=scriptDiagnostic(error);
+        diagnostics ~= CheckDiagnostic(diagnostic.line, diagnostic.column, error.msg);
     }
     return diagnostics;
 }
