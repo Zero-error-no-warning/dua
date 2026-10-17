@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const hash = source => crypto.createHash('sha256').update(source, 'utf8').digest('hex');
 const key = file => process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
 const validScope = scope => typeof scope === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(scope);
+const duaSource = file => typeof file === 'string' && path.extname(file).toLowerCase() === '.dua';
 function resolveFile(root, filename) {
   if (typeof filename !== 'string' || !filename || filename.includes('\0')) return null;
   const paths = /^[A-Za-z]:[\\/]/.test(root) ? path.win32 : path;
@@ -47,7 +48,9 @@ async function materialize(data, root, openSources = new Map(), resolvedOpenSour
     throw new Error('Invalid scene diagnostic snapshot');
   const entries = [], output = [], seen = new Set(), realSeen = new Set(), sources = new Map();
   const realRoot = await fs.realpath(root);
-  const openByReal = resolvedOpenSources || await canonicalOpenSources(openSources);
+  const relevantOpen = new Map([...openSources].filter(([file]) => duaSource(file)
+    && (resolveFile(root, file) || resolveFile(realRoot, file))));
+  const openByReal = resolvedOpenSources || await canonicalOpenSources(relevantOpen);
   for (const item of data.diagnostics) {
     if (!item || typeof item.message !== 'string' || !item.message || item.message.length > 16384) continue;
     const message = `[${data.sceneId} / ${data.runId}] ${item.message}`;
@@ -55,9 +58,12 @@ async function materialize(data, root, openSources = new Map(), resolvedOpenSour
     const identity = JSON.stringify([file, item.line, item.column, item.message]);
     if (seen.has(identity)) continue; seen.add(identity);
     if (!file || !/^[0-9a-f]{64}$/i.test(item.sourceHash || '')) { output.push(message); continue; }
+    // ZsD source modules use .dua. Other source names remain output-only: their
+    // open buffers are deliberately not watched or read by this extension.
+    if (!duaSource(file)) { output.push(`${message} (runtime locations require a workspace .dua source)`); continue; }
     try {
       const realFile = await fs.realpath(file);
-      if (!resolveFile(realRoot, realFile)) { output.push(message); continue; }
+      if (!resolveFile(realRoot, realFile) || !duaSource(realFile)) { output.push(message); continue; }
       const id = key(realFile), realIdentity = JSON.stringify([id, item.line, item.column, item.message]);
       if (realSeen.has(realIdentity)) continue; realSeen.add(realIdentity);
       if (!sources.has(id)) {
@@ -86,8 +92,15 @@ function activateSceneDiagnostics(vscode, context, output) {
   // Each producer scope atomically replaces one fixed scopeId.json inbox.
   // Retain scopes separately so invalidating one inbox never clears another.
   let snapshots = new Map();
+  let realWorkspaceRoots = [];
   const notices = new Set(), watchers = [];
   const trusted = () => !disposed && vscode.workspace.isTrusted === true;
+  const fileFolders = () => (vscode.workspace.workspaceFolders || []).filter(folder => folder.uri.scheme === 'file');
+  function relevantUri(uri) {
+    return uri?.scheme === 'file' && duaSource(uri.fsPath)
+      && [...fileFolders().map(folder => folder.uri.fsPath), ...realWorkspaceRoots]
+        .some(root => resolveFile(root, uri.fsPath));
+  }
   const log = text => { if (!notices.has(text)) { if (notices.size > 1024) notices.clear(); notices.add(text); output.appendLine(`ZsD: ${text}`); } };
   function publish() {
     if (!trusted()) return;
@@ -110,13 +123,19 @@ function activateSceneDiagnostics(vscode, context, output) {
   async function refresh() {
     if (!trusted()) return;
     const current = ++generation, next = new Map();
-    const open = new Map(vscode.workspace.textDocuments.filter(d => d.uri.scheme === 'file').map(d => [key(d.uri.fsPath), d.getText()]));
+    const folders = fileFolders();
+    const roots = await Promise.all(folders.map(async folder => {
+      try { return await fs.realpath(folder.uri.fsPath); } catch { return null; }
+    }));
+    if (!trusted() || current !== generation) return;
+    realWorkspaceRoots = roots.filter(Boolean);
+    const open = new Map(vscode.workspace.textDocuments.filter(d => relevantUri(d.uri)).map(d => [key(d.uri.fsPath), d.getText()]));
     const openByReal = await canonicalOpenSources(open);
-    for (const folder of vscode.workspace.workspaceFolders || []) {
-      if (folder.uri.scheme !== 'file') continue;
+    for (const [index, folder] of folders.entries()) {
       const root = folder.uri.fsPath, directory = path.join(root, '.dua-diagnostics');
       try {
-        const realRoot = await fs.realpath(root), realDirectory = await fs.realpath(directory);
+        const realRoot = roots[index]; if (!realRoot) continue;
+        const realDirectory = await fs.realpath(directory);
         if (!resolveFile(realRoot, realDirectory) || !(await fs.stat(realDirectory)).isDirectory()) {
           log('Scene diagnostic directory is outside the workspace'); continue;
         }
@@ -148,11 +167,10 @@ function activateSceneDiagnostics(vscode, context, output) {
   function sourceChanged(event) {
     if (!trusted()) return;
     const uri = event?.document?.uri || event?.uri || event;
-    if (uri?.scheme === 'file') {
-      // Resolving junctions is async. Clear our collection now, then rebuild by
-      // canonical identity; otherwise another alias can retain an old squiggle.
-      snapshots.clear(); collection.clear();
-    }
+    if (!relevantUri(uri)) return;
+    // Resolving junctions is async. Clear our collection now, then rebuild by
+    // canonical identity; otherwise another alias can retain an old squiggle.
+    snapshots.clear(); collection.clear();
     schedule();
   }
   function inboxChanged(uri) {
@@ -162,6 +180,7 @@ function activateSceneDiagnostics(vscode, context, output) {
   }
   function watch() {
     generation++; clearTimeout(timer);
+    realWorkspaceRoots = [];
     watchers.splice(0).forEach(w => w.dispose());
     snapshots.clear(); publish();
     if (!trusted()) return;

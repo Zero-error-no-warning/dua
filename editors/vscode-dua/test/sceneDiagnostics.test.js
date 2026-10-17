@@ -104,6 +104,7 @@ function mockEditor(root, isTrusted = true) {
     get inbox() { return watchers.find(w => w.pattern === '.dua-diagnostics/*.json'); },
     get source() { return watchers.find(w => w.pattern === '**/*.dua'); },
     watcherCount() { return watchers.length; },
+    publicationCount() { return revision; },
     grantTrust() { vscode.workspace.isTrusted = true; grants.fire(); },
     settle() { const previous = revision; return until(() => revision > previous, 'diagnostic refresh'); },
     dispose() { for (const item of context.subscriptions.toReversed()) item.dispose(); } };
@@ -134,6 +135,45 @@ test('untrusted workspaces create no watchers and perform no I/O until trust is 
     assert.ok(reads > 0); assert.ok(bufferReads > 0);
     assert.deepEqual([...editor.unrelated], [['other', 'keep']]);
   } finally { for (const [name, original] of originals) fs[name] = original; editor?.dispose(); }
+}));
+
+test('unrelated Markdown, JavaScript and outside-workspace events do not read buffers, touch disk or clear runtime diagnostics', () => fixture(async ({ root, data, file }) => {
+  await writeInbox(root, data);
+  const editor = mockEditor(root), ignoredFiles = [path.join(root, 'large.md'), path.join(root, 'unrelated.js'),
+    path.join(path.dirname(root), 'outside-workspace.dua')];
+  const ignored = new Set(ignoredFiles.map(fileKey));
+  let bufferReads = 0, unrelatedIo = 0, io = 0;
+  const documents = ignoredFiles.map(fsPath => ({ uri: editor.uri(fsPath), getText() { bufferReads++; return 'unrelated'.repeat(1024 * 1024); } }));
+  editor.documents.push(...documents);
+  const originals = new Map(['realpath', 'stat', 'readdir', 'readFile'].map(name => [name, fs[name]]));
+  for (const [name, original] of originals) fs[name] = function (filename, ...args) {
+    io++; if (typeof filename === 'string' && ignored.has(fileKey(filename))) unrelatedIo++;
+    return original.call(this, filename, ...args);
+  };
+  try {
+    await until(() => editor.values.has(fileKey(file)), 'initial runtime diagnostic');
+    assert.equal(bufferReads, 0, 'refresh must not getText unrelated open documents');
+    assert.equal(unrelatedIo, 0, 'refresh must not realpath unrelated documents');
+    io = 0; const published = editor.publicationCount();
+    for (const document of documents) {
+      editor.opens.fire(document); editor.changes.fire({ document }); editor.closes.fire(document);
+      editor.source.change(document.uri.fsPath); editor.source.remove(document.uri.fsPath);
+    }
+    assert.equal(editor.values.has(fileKey(file)), true, 'unrelated events must not clear the collection');
+    await new Promise(resolve => setTimeout(resolve, 280));
+    assert.equal(editor.publicationCount(), published);
+    assert.equal(io, 0, 'unrelated events must not schedule any refresh I/O');
+    assert.equal(bufferReads, 0); assert.equal(unrelatedIo, 0);
+    assert.deepEqual([...editor.unrelated], [['other', 'keep']]);
+  } finally { for (const [name, original] of originals) fs[name] = original; editor.dispose(); }
+}));
+
+test('non-Dua runtime sources remain output-only instead of using unmonitored dirty buffers', () => fixture(async ({ root, data, item, source }) => {
+  const file = path.join(root, 'custom.js'); await fs.writeFile(file, source);
+  const result = await materialize({ ...data, diagnostics: [{ ...item, file: 'custom.js' }] }, root,
+    new Map([[fileKey(file), '\n' + source]]));
+  assert.equal(result.entries.length, 0); assert.equal(result.output.length, 1);
+  assert.match(result.output[0], /workspace \.dua source/);
 }));
 
 test('inbox edits, corruption, empty reruns and deletion invalidate only their own scope', () => fixture(async ({ root, data, file }) => {
