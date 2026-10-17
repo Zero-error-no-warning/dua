@@ -32,11 +32,10 @@ function tokens(source) {
       const quote = i++;
       let closed = false;
       while (i < source.length && source[i] !== '\n' && source[i] !== '\r') {
-        if (source[i] === '\\') i += Math.min(2, source.length - i);
-        else if (source[i++] === '"') { closed = true; break; }
+        if (source[i++] === '"') { closed = true; break; }
       }
       let value;
-      if (closed && !interpolated) { try { value = JSON.parse(source.slice(quote, i)); } catch {} }
+      if (closed && !interpolated) value = source.slice(quote + 1, i - 1);
       result.push({ text: source.slice(start, i), kind: 'string', value, start, end: i, quote, closed, interpolated });
       if (!closed && i === source.length) state = 'string';
       continue;
@@ -147,13 +146,43 @@ function environmentAt(input, catalog, initial = new Map(), context = {}) {
   }
   for (let i = 0; i < input.length; i++) {
     const t = input[i];
-    if (t.text === '{') { scopes.push(new Map()); continue; }
+    if (t.text === '{') {
+      scopes.push(new Map());
+      // A typed parameter hides an outer binding even before it is assigned.
+      let close = i - 1;
+      if (input[close]?.text === '>') close -= 2;
+      if (input[close]?.text === ')') {
+        let open = close, depth = 1;
+        while (--open >= 0 && depth) { if (input[open].text === ')') depth++; if (input[open].text === '(') depth--; }
+        open++;
+        if (!['if', 'while', 'for', 'foreach', 'switch', 'catch', 'with'].includes(input[open - 1]?.text)) {
+          for (let p of splitArguments(input.slice(open + 1, close))) {
+            const equal = p.findIndex(t => t.text === '=');
+            if (equal >= 0) p = p.slice(0, equal);
+            const name = p.at(-1), type = p.slice(0, -1).map(t => t.text).join('');
+            if (name?.kind === 'identifier') set(name.text, { types: catalog.types[type] ? [type] : [], assets: null }, true);
+          }
+        }
+      }
+      continue;
+    }
     if (t.text === '}') { if (scopes.length > 1) scopes.pop(); continue; }
     if (t.text === 'import' && input[i + 1]?.kind === 'identifier') {
       const name = input[i + 1].text, alias = input[i + 2]?.text === 'as' ? input[i + 3]?.text : name;
       if (alias) set(alias, entryValue(catalog.symbols[name] || { kind: 'module' }, name), true);
     }
     let name, expression, declaration = false, declaredType;
+    if (t.kind === 'identifier' && (catalog.types[t.text] || /^(?:auto|bool|int|long|double|float|string|[A-Z]\w*)$/.test(t.text))) {
+      let next = i + 1;
+      while (input[next]?.text === '[') {
+        let depth = 1; next++;
+        while (next < input.length && depth) { if (input[next].text === '[') depth++; if (input[next].text === ']') depth--; next++; }
+        if (depth) break;
+      }
+      if (input[next]?.kind === 'identifier' && input[next + 1]?.text === ';') {
+        set(input[next].text, { types: next === i + 1 && catalog.types[t.text] ? [t.text] : [], assets: null }, true); i = next + 1; continue;
+      }
+    }
     if (t.kind === 'identifier' && input[i + 1]?.kind === 'identifier' && input[i + 2]?.text === '=') {
       declaredType = t.text; name = input[i + 1].text; expression = i + 3; declaration = true;
     } else if (t.kind === 'identifier' && input[i + 1]?.text === '=' && input[i - 1]?.text !== '.'

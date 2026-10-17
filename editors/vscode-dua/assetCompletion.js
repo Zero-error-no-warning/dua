@@ -6,6 +6,18 @@ const host = require('./hostCompletion');
 
 function key(filename) { const p = path.resolve(filename); return process.platform === 'win32' ? p.toLowerCase() : p; }
 function inside(root, filename) { const relative = path.relative(root, filename); return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative); }
+// Retain digests, never asset buffers. ctime/inode also invalidate same-size rewrites.
+const digestCache = new Map();
+function stamp(stat) { return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.dev}:${stat.ino}`; }
+function digest(absolute, stat) {
+  const id = key(absolute), version = stamp(stat), cached = digestCache.get(id);
+  if (cached?.version === version) return cached.hash;
+  const hash = crypto.createHash('sha256').update(fs.readFileSync(absolute)).digest('hex');
+  if (stamp(fs.statSync(absolute)) !== version) return null;
+  if (digestCache.size >= 512) digestCache.delete(digestCache.keys().next().value);
+  digestCache.set(id, { version, hash });
+  return hash;
+}
 function validSource(root, source) {
   if (!source || typeof source.path !== 'string') return false;
   const absolute = path.resolve(root, source.path);
@@ -14,7 +26,7 @@ function validSource(root, source) {
     const stat = fs.statSync(absolute);
     return stat.isFile() && (source.size === undefined || stat.size === source.size)
       && (source.modifiedMs === undefined || Math.abs(Math.trunc(stat.mtimeMs) - source.modifiedMs) <= 1)
-      && (source.sha256 === undefined || crypto.createHash('sha256').update(fs.readFileSync(absolute)).digest('hex') === source.sha256);
+      && (source.sha256 === undefined || digest(absolute, stat) === source.sha256);
   } catch { return false; }
 }
 function literalPath(input, wrappers = []) {
@@ -91,7 +103,6 @@ function stringCompletions(source, offset, context) {
   let end = offset;
   while (end < source.length && source[end] !== '\n' && source[end] !== '\r') {
     if (source[end] === '"') break;
-    if (source[end] === '\\') end++;
     end++;
   }
   const result = [];
@@ -99,9 +110,10 @@ function stringCompletions(source, offset, context) {
     const candidates = context.assets.filter(a => a.type === rule.receiverType
       && (value?.assets ? value.assets.includes(a.absolute) : true));
     for (const asset of candidates) for (const name of Array.isArray(asset.names[rule.source]) ? asset.names[rule.source] : []) {
-      if (typeof name !== 'string') continue;
+      // Dua strings are raw: quotes/newlines cannot be represented in one literal.
+      if (typeof name !== 'string' || /["\r\n]/.test(name)) continue;
       const status = !value?.assets ? '対象未確定・プロジェクト候補' : context.shared || value.uncertain ? '複数の静的参照候補' : '静的参照';
-      result.push({ label: name, insertText: JSON.stringify(name).slice(1, -1), kind: 'value',
+      result.push({ label: name, insertText: name, kind: 'value',
         detail: `${rule.source} · ${asset.path} · ${status}`,
         documentation: `${context.catalog.origin || 'Host asset'}\n${asset.path}`,
         start: current.quote + 1, end });

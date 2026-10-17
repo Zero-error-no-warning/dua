@@ -858,10 +858,10 @@ final class ScriptEngine
         }
         else static if (isHostCallable!T)
         {
-            static if (is(ReturnType!T == class))
+            static if (isAggregateType!(ReturnType!T))
                 registerHostType!(ReturnType!T)();
             static foreach (Parameter; Parameters!T)
-                static if (is(Parameter == class))
+                static if (isAggregateType!Parameter)
                     registerHostType!Parameter();
         }
     }
