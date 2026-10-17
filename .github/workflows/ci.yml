@@ -17,3 +17,18 @@ jobs:
 
       - name: Run tests
         run: dub test
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build extension checker
+        run: dub build --compiler=ldc2 --config=vscode-check --build=release
+
+      - name: Install extension test dependencies
+        working-directory: editors/vscode-dua
+        run: npm ci
+
+      - name: Run extension regression tests
+        working-directory: editors/vscode-dua
+        run: npm test

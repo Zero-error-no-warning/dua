@@ -3,6 +3,8 @@ const vscode = require('vscode');
 const path = require('node:path');
 const fs = require('node:fs');
 const language = require('./language');
+const host = require('./hostCompletion');
+const assets = require('./assetCompletion');
 const { checkSource } = require('./checker');
 
 function activate(context) {
@@ -14,7 +16,8 @@ function activate(context) {
   const kinds = {
     keyword: vscode.CompletionItemKind.Keyword, type: vscode.CompletionItemKind.TypeParameter,
     function: vscode.CompletionItemKind.Function, variable: vscode.CompletionItemKind.Variable,
-    module: vscode.CompletionItemKind.Module
+    module: vscode.CompletionItemKind.Module, method: vscode.CompletionItemKind.Method,
+    property: vscode.CompletionItemKind.Property, value: vscode.CompletionItemKind.Value
   };
 
   function clear(uri) {
@@ -71,14 +74,24 @@ function activate(context) {
   context.subscriptions.push(diagnostics, output,
     vscode.languages.registerCompletionItemProvider(selector, {
       provideCompletionItems(document, position) {
-        return language.completions(document.getText(), document.offsetAt(position)).map(entry => {
+        const source = document.getText(), offset = document.offsetAt(position);
+        const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+        const config = vscode.workspace.getConfiguration('dua', document.uri);
+        const catalog = folder?.uri.scheme === 'file' ? host.loadCatalog(folder.uri.fsPath, config.get('completion.metadataFiles', ['.dua-completion.json'])) : null;
+        const entries = new Map(language.completions(source, offset).map(entry => [entry.label, entry]));
+        const assetContext = catalog ? assets.createContext(catalog, document.uri.fsPath) : null;
+        if (assetContext) for (const entry of host.apiCompletions(source, offset, assetContext.catalog, assetContext)) entries.set(entry.label, entry);
+        const stringEntries = assetContext ? assets.stringCompletions(source, offset, assetContext) : [];
+        return [...entries.values(), ...stringEntries].map(entry => {
           const item = new vscode.CompletionItem(entry.label, kinds[entry.kind]);
           item.detail = entry.detail;
           item.documentation = entry.documentation;
+          if (entry.insertText !== undefined) item.insertText = entry.insertText;
+          if (entry.start !== undefined) item.range = new vscode.Range(document.positionAt(entry.start), document.positionAt(entry.end));
           return item;
         });
       }
-    }, '.'),
+    }, '.', '"'),
     vscode.workspace.onDidOpenTextDocument(schedule),
     vscode.workspace.onDidChangeTextDocument(event => schedule(event.document)),
     vscode.workspace.onDidCloseTextDocument(document => clear(document.uri)),

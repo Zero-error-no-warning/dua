@@ -2497,6 +2497,118 @@ private string hostTypeName(T)()
     else return Unqual!T.stringof;
 }
 
+/// Stable type spelling for generated host completion catalogs.
+string hostCompletionName(T)() { return hostTypeName!T; }
+
+/// Declaration inspection only: defaults are marked, never evaluated.
+auto hostCompletionSignature(alias declaration)()
+{
+    import std.json : JSONValue;
+    import std.traits : ParameterIdentifierTuple;
+    JSONValue[] parameters;
+    static foreach (index, P; Parameters!declaration)
+    {{
+        enum name = ParameterIdentifierTuple!declaration[index];
+        parameters ~= JSONValue([
+            "name": JSONValue(name.length ? name : "arg" ~ index.stringof),
+            "type": JSONValue(hostTypeName!P),
+            "optional": JSONValue(parameterHasDefault!(declaration, index)),
+            "variadic": JSONValue(variadicFunctionStyle!declaration == Variadic.typesafe
+                && index + 1 == Parameters!declaration.length)]);
+    }}
+    return JSONValue(["parameters": JSONValue(parameters),
+        "returnType": JSONValue(hostTypeName!(ReturnType!declaration))]);
+}
+
+/// Uses the same callable/field conversion probes as reflection, without a receiver.
+auto describeHostCompletionType(T)()
+{
+    import std.json : JSONValue;
+    JSONValue[string] members;
+    static foreach (name; __traits(allMembers, T))
+    {{
+        static if (name != "this" && name != "__ctor" && name != "Monitor" && name != "factory"
+            && name.length && name[0] != '_'
+            && __traits(compiles, __traits(getOverloads, T, name)))
+        {
+            JSONValue[] signatures;
+            bool isStatic;
+            static foreach (overload; __traits(getOverloads, T, name))
+            {{
+                // Visibility is checked before probing unsupported native types.
+                static if ((__traits(getVisibility, overload) == "public"
+                    || __traits(getVisibility, overload) == "export")
+                    && __traits(compiles, makeBoundReflectedCallable!overload(name, *cast(T*) null)))
+                {
+                    signatures ~= hostCompletionSignature!overload();
+                    isStatic = __traits(isStaticFunction, overload);
+                }
+            }}
+            if (signatures.length)
+            {
+                auto entry = JSONValue(["kind": JSONValue("method"),
+                    "signatures": JSONValue(signatures), "static": JSONValue(isStatic)]);
+                foreach (signature; signatures)
+                    if (!signature["parameters"].array.length)
+                        entry["type"] = signature["returnType"];
+                members[name] = entry;
+            }
+        }
+    }}
+    static foreach (name; FieldNameTuple!T)
+    {{
+        static if (name.length && name[0] != '_'
+            && __traits(compiles, mixin("(*cast(T*) null)." ~ name))
+            && __traits(compiles, convertToValue(mixin("(*cast(T*) null)." ~ name))))
+        {
+            alias Field = typeof(mixin("(*cast(T*) null)." ~ name));
+            members[name] = JSONValue(["kind": JSONValue("property"),
+                "type": JSONValue(hostTypeName!Field),
+                "readonly": JSONValue(!__traits(compiles,
+                    mixin("(*cast(T*) null)." ~ name) = mixin("(*cast(T*) null)." ~ name)))]);
+        }
+    }}
+    static foreach (name; __traits(allMembers, T))
+    {{
+        static if (name.length && name[0] != '_'
+            && __traits(compiles, __traits(getVisibility, __traits(getMember, T, name)))
+            && (__traits(getVisibility, __traits(getMember, T, name)) == "public"
+                || __traits(getVisibility, __traits(getMember, T, name)) == "export"))
+        {
+            static if (is(__traits(getMember, T, name) == enum))
+            {
+                alias E = __traits(getMember, T, name);
+                JSONValue[string] entries;
+                static foreach (key; __traits(allMembers, E))
+                    entries[key] = JSONValue(["kind": JSONValue("property"),
+                        "type": JSONValue(hostTypeName!E), "static": JSONValue(true)]);
+                members[name] = JSONValue(["kind": JSONValue("module"),
+                    "members": JSONValue(entries), "static": JSONValue(true)]);
+            }
+            else static if (__traits(compiles, typeof(__traits(getMember, T, name)))
+                && !isCallable!(typeof(__traits(getMember, T, name)))
+                && __traits(compiles, Value.fromAuto(__traits(getMember, T, name))))
+            {
+                members[name] = JSONValue(["kind": JSONValue("property"),
+                    "type": JSONValue(hostTypeName!(typeof(__traits(getMember, T, name)))),
+                    "static": JSONValue(true)]);
+            }
+        }
+    }}
+    JSONValue[] constructors;
+    static if (__traits(compiles, __traits(getOverloads, T, "__ctor")))
+        static foreach (ctor; __traits(getOverloads, T, "__ctor"))
+        {{
+            static if (__traits(compiles, makeReflectedConstructor!(ctor, T)("new")))
+            {
+                auto signature = hostCompletionSignature!ctor();
+                signature["returnType"] = JSONValue(hostTypeName!T);
+                constructors ~= signature;
+            }
+        }}
+    return JSONValue(["members": JSONValue(members), "constructors": JSONValue(constructors)]);
+}
+
 private Value convertToTypedValue(T)(auto ref T value)
 {
     static if (isAssociativeArray!T) return Value.fromAssociativeArray(value);

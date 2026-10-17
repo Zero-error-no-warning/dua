@@ -13,6 +13,7 @@ import dua.parser : parse;
 import dua.stdlib.core : StdlibContext, installStandardLibraries;
 import dua.typecheck : checkSource;
 import dua.value;
+import dua.completion : CompletionRegistry;
 import dua.type_syntax;
 import std.algorithm : canFind, map;
 import std.array : array;
@@ -274,6 +275,8 @@ final class ModuleHandle
 
     void bind(string name, Value value)
     {
+        if (engine.completionRegistry_ !is null)
+            engine.completionRegistry_.value(completionPath(name), value);
         if (value.isClassReference)
             foreach (type; value.typeChain)
                 engine.nativeClassTypes[type.toHostString()] = true;
@@ -288,6 +291,21 @@ final class ModuleHandle
     private void registerHostType(T)()
     {
         engine.registerHostType!T();
+    }
+
+    private string completionPath(string name)
+    {
+        return visibility == ModuleVisibility.global ? name : moduleName ~ "." ~ name;
+    }
+    private void recordCompletionFunction(alias declaration)(string name)
+    {
+        if (engine.completionRegistry_ !is null)
+            engine.completionRegistry_.overload!declaration(completionPath(name));
+    }
+    private void recordCompletionValue(T)(string name)
+    {
+        if (engine.completionRegistry_ !is null)
+            engine.completionRegistry_.typed!T(completionPath(name));
     }
 
     void bindNative(string name, NativeFunction callback)
@@ -809,9 +827,29 @@ final class ScriptEngine
     private EvaluatorContext evaluatorContext;
     private ModuleHandle globalModule_;
     private bool[string] nativeClassTypes;
+    private CompletionRegistry completionRegistry_;
+    private bool completionMetadataOnly;
+
+    /// Enable before host registration. Exporting never executes user scripts.
+    void enableCompletionMetadata(bool metadataOnly = false)
+    {
+        completionRegistry_ = new CompletionRegistry;
+        completionMetadataOnly = metadataOnly;
+    }
+    CompletionRegistry completionRegistry() { return completionRegistry_; }
+    private void recordCompletionFunction(alias declaration)(string name)
+    {
+        if (completionRegistry_ !is null) completionRegistry_.overload!declaration(name);
+    }
+    private void recordCompletionValue(T)(string name)
+    {
+        if (completionRegistry_ !is null) completionRegistry_.typed!T(name);
+    }
 
     private void registerHostType(T)()
     {
+        static if (isAggregateType!T)
+            if (completionRegistry_ !is null) completionRegistry_.registerType!T();
         static if (is(T == class))
         {
             nativeClassTypes[T.stringof] = true;
@@ -875,6 +913,17 @@ final class ScriptEngine
     void bindType(T)(string name)
         if (isAggregateType!T)
     {
+        if (completionRegistry_ !is null) completionRegistry_.registerType!T();
+        if (completionMetadataOnly)
+        {
+            // bindType normally reads static values. The exporter needs only
+            // declarations, since a zero-argument static property can run code.
+            auto placeholder = Value.from(cast(Value[string]) null);
+            placeholder.setTypeChain([Value.from(hostCompletionName!T)]);
+            bind(name, placeholder);
+            completionRegistry_.typeBinding!T(name, placeholder);
+            return;
+        }
         static if (is(T == class))
         {
             registerHostType!T();
@@ -1066,6 +1115,7 @@ final class ScriptEngine
         typeValue.tableValue["__meta"] = Value.from(meta);
 
         bind(name, typeValue);
+        if (completionRegistry_ !is null) completionRegistry_.typeBinding!T(name, typeValue);
     }
 
     void bindNative(string name, NativeFunction callback)

@@ -52,6 +52,8 @@ mixin template AutoBindingAPI()
             bind(name, Value.reflect(value));
         else
             bind(name, Value.from(value));
+        static if (__traits(compiles, recordCompletionValue!T(name)))
+            recordCompletionValue!T(name);
     }
 
     void opIndexAssign(T)(auto ref T value, string name)
@@ -77,6 +79,8 @@ mixin template FunctionBindingAPI()
                     static if (__traits(compiles, registerHostType!(typeof(&overload))()))
                         registerHostType!(typeof(&overload))();
                     overloads ~= makeStaticReflectedCallable!overload(name);
+                    static if (__traits(compiles, recordCompletionFunction!overload(name)))
+                        recordCompletionFunction!overload(name);
                 }
             }
         }
@@ -85,6 +89,8 @@ mixin template FunctionBindingAPI()
             static if (__traits(compiles, registerHostType!(typeof(FUN))()))
                 registerHostType!(typeof(FUN))();
             overloads ~= makeAliasReflectedCallable!FUN(name);
+            static if (__traits(compiles, recordCompletionFunction!FUN(name)))
+                recordCompletionFunction!FUN(name);
         }
         else
         {
@@ -104,6 +110,8 @@ mixin template FunctionBindingAPI()
     {
         static if (__traits(compiles, registerHostType!C()))
             registerHostType!C();
+        static if (__traits(compiles, recordCompletionFunction!C(name)))
+            recordCompletionFunction!C(name);
         bind(name, Value.fromFunction(makeReflectedCallable(name, callable)));
     }
 }
