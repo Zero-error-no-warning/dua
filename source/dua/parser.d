@@ -149,15 +149,19 @@ private struct Parser
     {
         auto statements = appender!(Statement[])();
         bool hasInstanceDeclarations;
+        Statement firstInstanceDeclaration;
         while (!check(TokenKind.eof))
         {
             auto statement = parseStatement();
             hasInstanceDeclarations |= statement.isInstance || statement.isInstanceBlock;
+            if(firstInstanceDeclaration is null && (statement.isInstance || statement.isInstanceBlock))
+                firstInstanceDeclaration=statement;
             if (statement.isInstanceBlock) statements.put(statement.body);
             else statements.put(statement);
         }
         auto program = new Program(statements.data);
         program.hasInstanceDeclarations = hasInstanceDeclarations;
+        program.firstInstanceDeclaration = firstInstanceDeclaration;
         return program;
     }
 

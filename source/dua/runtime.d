@@ -1348,11 +1348,11 @@ final class ScriptEngine
                     typeDiagnostics[0].line,typeDiagnostics[0].column);
             }
             auto program = parse(lex(source));
-            if(program.hasInstanceDeclarations)
-                foreach(statement;program.statements)
-                    if(statement.isInstance || statement.isInstanceBlock)
-                        throw locatedException("instance declarations require a source module definition, not run/load",
-                            statement.line,statement.column);
+            if(program.hasInstanceDeclarations){
+                auto statement=program.firstInstanceDeclaration;
+                throw locatedException("instance declarations require a source module definition, not run/load",
+                    statement is null ? 0 : statement.line,statement is null ? 0 : statement.column);
+            }
             if (!environment.hasStorage()) environment.reserveSlots(planScope(program.statements));
             auto result = executeStatements(program.statements, environment);
             outcome.ok = true;
