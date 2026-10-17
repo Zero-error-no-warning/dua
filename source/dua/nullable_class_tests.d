@@ -240,89 +240,78 @@ unittest
 
 unittest
 {
+    auto createEngine = () {
+        auto engine = new ScriptEngine;
+        engine.bindAuto("native", cast(NativeItem) null);
+        return engine;
+    };
+    // checkは検査開始時の型状態を見る。同一ソースで解決が変わる名前は実行時へ委ねる。
     foreach (declaration; ["table NativeItem { int number; }", "struct NativeItem { int number; }"])
     {
-        // nullの公開だけでもクラス名を登録できます。structの生成名とは衝突させません。
-        auto createEngine = () {
-            auto engine = new ScriptEngine;
-            engine.bindAuto("native", cast(NativeItem) null);
-            return engine;
-        };
         auto source = declaration ~ " NativeItem value = null;";
         auto engine = createEngine();
-        assert(engine.check("NativeItem value = null;").length == 0);
-        assert(engine.check(source).length != 0, source);
-        // checkだけではエンジンに型を登録しません。
-        assert(engine.check("NativeItem value = null;").length == 0);
+        assert(engine.check(source).length == 0, source);
+        assert(engine.check("NativeItem value = null;").length == 0); // checkは登録しない。
+        engine.run(declaration);
+        assert(engine.check("NativeItem value = null;").length != 0); // 既存のtable/structは確定。
         foreach (checked; [false, true])
         {
-            RunOptions options;
-            options.typeCheck = checked;
-            auto result = createEngine().runSafe(source, options);
-            assert(!result.ok, source);
+            RunOptions options; options.typeCheck = checked;
+            assert(!createEngine().runSafe(source, options).ok);
+            assert(!engine.runSafe("NativeItem value = null;", options).ok);
         }
-        source = "NativeItem before = null; " ~ declaration ~ " return before == null;";
-        RunOptions options;
-        options.typeCheck = true;
-        auto beforeResult = createEngine().runSafe(source, options);
-        assert(beforeResult.ok && beforeResult.value.truthy(), beforeResult.errorMessage);
-        engine.run(declaration);
-        assert(engine.check("NativeItem value = null;").length != 0);
-        assert(!engine.runSafe("NativeItem value = null;").ok);
-        assert(!engine.runSafe("NativeItem value = null;", options).ok);
-        source = "NativeItem before = null; { " ~ declaration ~ " } NativeItem after = null;";
-        auto blockDiagnostics = createEngine().check(source);
-        assert(blockDiagnostics.length == 1 && blockDiagnostics[0].message.canFind("'after'"), source);
-        auto unusedFunction = createEngine().runSafe(
-            "void later() { " ~ declaration ~ " } NativeItem value = null; return value == null;", options);
-        assert(unusedFunction.ok && unusedFunction.value.truthy(), unusedFunction.errorMessage);
-        foreach (prefix; ["if (false)", "while (false)", "for (auto i = 0; i < 0; i += 1)",
-            "foreach (i; [])", "foreach (i; 0 .. 0)"])
-        {
-            auto skipped = createEngine().runSafe(prefix ~ " { " ~ declaration
-                ~ " } NativeItem value = null; return value == null;", options);
-            assert(skipped.ok && skipped.value.truthy(), skipped.errorMessage);
-        }
-        foreach (flow; [
-            "try { " ~ declaration ~ " } catch (err) {}",
-            "try { " ~ declaration ~ " error(\"stop\"); } catch (err) {}",
-            "if (true) { " ~ declaration ~ " }",
-            "if (false) {} else { " ~ declaration ~ " }",
-            "while (true) { " ~ declaration ~ " break; }",
-            "for (; true;) { " ~ declaration ~ " break; }",
-            "foreach (i; [1]) { " ~ declaration ~ " break; }",
-            "switch (1) { case 1: " ~ declaration ~ " break; }"
-        ])
-        {
-            auto rejectedSource = flow ~ " NativeItem value = null;";
-            assert(createEngine().check(rejectedSource).length != 0, rejectedSource);
-            foreach (checked; [false, true])
-            {
-                RunOptions flowOptions;
-                flowOptions.typeCheck = checked;
-                auto rejected = createEngine().runSafe(rejectedSource, flowOptions);
-                assert(!rejected.ok, rejectedSource);
-            }
-        }
-        auto skippedCase = createEngine().runSafe("switch (1) { case 2: " ~ declaration
-            ~ " break; default: break; } NativeItem value = null; return value == null;", options);
-        assert(skippedCase.ok && skippedCase.value.truthy(), skippedCase.errorMessage);
     }
-    // bindTypeの公開名と同名tableの組合せも、宣言した実行の内外で拒否します。
-    foreach (priorRun; [false, true])
+    foreach (source; [
+        "void define() { table NativeItem { int number; } } define(); NativeItem value = null;",
+        "void install() { table NativeItem { int number; } } any getter() { return install; } getter()(); NativeItem value = null;",
+        "try { table NativeItem { int number; } } catch (err) {} NativeItem value = null;",
+        "int pattern() { table NativeItem { int number; } return 1; } switch (1) { case pattern(): break; } NativeItem value = null;",
+        "any expose() { table NativeItem { int number; } return { x = 0 }; } int consume(NativeItem value) { return 1; } expose().x += consume(null);"
+    ])
     {
-        auto engine = itemEngine();
-        string source = "NativeItem value = null;";
-        if (priorRun) engine.run("table NativeItem { int number; }");
-        else source = "table NativeItem { int number; } " ~ source;
-        assert(engine.check(source).length != 0);
+        assert(createEngine().check(source).length == 0, source);
+        foreach (checked; [false, true])
+        {
+            RunOptions options; options.typeCheck = checked;
+            assert(!createEngine().runSafe(source, options).ok, source);
+        }
     }
-    // 既存のnullable aliasまで失わないよう、現在の実行時定義で判定します。
+    foreach (source; [
+        "void unused() { table NativeItem { int number; } } NativeItem value = null; return value == null;",
+        "while (true) { break; table NativeItem { int number; } } NativeItem value = null; return value == null;",
+        "for (auto i = 0; i < 1; i += 1) { continue; table NativeItem { int number; } } NativeItem value = null; return value == null;",
+        "void early() { return; table NativeItem { int number; } } early(); NativeItem value = null; return value == null;",
+        "try {} catch (err) { table NativeItem { int number; } } NativeItem value = null; return value == null;",
+        "void install(int x) { table NativeItem { int number; } } try { install(); } catch (err) {} NativeItem value = null; return value == null;",
+        "NativeItem value = null; alias NativeItem = int; return value == null;",
+        "alias NativeItem = string; NativeItem value = \"text\"; return value == \"text\";",
+        "any expose() { table NativeItem { int number; } return { x = 0 }; } int consume(NativeItem value) { return 1; } expose().x = consume(null); return true;"
+    ])
+    {
+        assert(createEngine().check(source).length == 0, source);
+        foreach (checked; [false, true])
+        {
+            RunOptions options; options.typeCheck = checked;
+            auto result = createEngine().runSafe(source, options);
+            assert(result.ok && result.value.truthy(), source ~ "\n" ~ result.errorMessage);
+        }
+    }
+    // structは型情報登録後のconstructor名衝突でも、実行時に残る型情報を尊重する。
+    auto partial = "void use() { try { struct NativeItem { int number; } return; } catch (err) {} NativeItem value = null; } use();";
+    assert(itemEngine().check(partial).length == 0);
+    foreach (checked; [false, true])
+    {
+        RunOptions options; options.typeCheck = checked;
+        assert(!itemEngine().runSafe(partial, options).ok);
+    }
+    // 委譲は影響する公開型名だけ。組込み型・別クラス等の既存診断を緩めない。
+    foreach (source; ["int value = \"bad\";", "OtherItem value = 1;",
+        "int use(int x) { return x; } use(\"bad\");", "int use() { return \"bad\"; }"])
+        assert(itemEngine().check("void unused() { table NativeItem { int n; } } " ~ source).length != 0, source);
     auto engine = itemEngine();
     engine.run("alias NativeItem = OtherItem | null;");
     assert(engine.check("NativeItem value = null;").length == 0);
-    RunOptions options;
-    options.typeCheck = true;
+    RunOptions options; options.typeCheck = true;
     assert(engine.run("NativeItem value = null; return value == null;", options).truthy());
 }
 

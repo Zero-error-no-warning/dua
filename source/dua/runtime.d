@@ -1230,7 +1230,7 @@ final class ScriptEngine
             string[] nullableClassTypes;
             foreach (name; nativeClassTypes.byKey)
                 if (typeAllowsNull(name)) nullableClassTypes ~= name;
-            return checkSource(source, nullableClassTypes);
+            return checkSource(source, nullableClassTypes, nativeClassTypes.keys);
         }
         catch (Exception error)
         {
