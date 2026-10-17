@@ -15,6 +15,19 @@ private struct StaticFunctionInfo
     string returnType;
 }
 
+// 型定義は変数のブロックスコープではなくエンジンに登録されます。
+private final class NullableClassTypes
+{
+    bool[string] names;
+    this(string[] types) { foreach (name; types) names[name] = true; }
+    NullableClassTypes copy()
+    {
+        auto result = new NullableClassTypes(null);
+        result.names = names.dup;
+        return result;
+    }
+}
+
 /// Checks a source unit with the host class names registered by its engine.
 package(dua) CheckDiagnostic[] checkSource(string source, string[] nativeClassTypes = null)
 {
@@ -23,9 +36,9 @@ package(dua) CheckDiagnostic[] checkSource(string source, string[] nativeClassTy
     {
         auto program = parse(lex(source));
         string[string] variableTypes;
-        foreach (name; nativeClassTypes) variableTypes["#class_" ~ name] = "class";
+        auto classTypes = new NullableClassTypes(nativeClassTypes);
         StaticFunctionInfo[string] functions;
-        checkStatements(program.statements, variableTypes, functions, diagnostics, "");
+        checkStatements(program.statements, variableTypes, functions, diagnostics, "", classTypes);
     }
     catch (Exception error)
     {
@@ -36,7 +49,7 @@ package(dua) CheckDiagnostic[] checkSource(string source, string[] nativeClassTy
 
 private void checkStatements(Statement[] statements, ref string[string] variables,
     ref StaticFunctionInfo[string] functions, ref CheckDiagnostic[] diagnostics,
-    string expectedReturnType)
+    string expectedReturnType, NullableClassTypes classTypes)
 {
     foreach (statement; statements)
         if (statement.kind == Statement.Kind.alias_)
@@ -60,12 +73,12 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                 foreach (index, name; statement.names)
                 {
                     auto actual = index < statement.expressions.length
-                        ? inferExpressionType(statement.expressions[index], variables, functions, diagnostics)
+                        ? inferExpressionType(statement.expressions[index], variables, functions, diagnostics, classTypes)
                         : "any";
                     auto declared = statement.declaredType.length > 0
                         ? resolveStaticType(statement.declaredType, variables) : actual;
                     if (statement.declaredType.length > 0 && statement.declaredType != "auto"
-                        && !staticTypesCompatible(actual, declared, variables))
+                        && !staticTypesCompatible(actual, declared, classTypes))
                         addDiagnostic(diagnostics, statement,
                             format("Variable '%s' expects %s but expression has type %s",
                                 name, statement.declaredType, actual));
@@ -80,27 +93,27 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                     if (statement.assignmentOperator.length)
                         expression = new BinaryExpression(target, statement.assignmentOperator, expression);
                     auto actual = index < statement.expressions.length
-                        ? inferExpressionType(expression, variables, functions, diagnostics)
+                        ? inferExpressionType(expression, variables, functions, diagnostics, classTypes)
                         : "any";
                     if (target.kind == Expression.Kind.variable)
                     {
                         auto expected = (cast(VariableExpression) target).name in variables;
-                        if (expected !is null && !staticTypesCompatible(actual, *expected, variables))
+                        if (expected !is null && !staticTypesCompatible(actual, *expected, classTypes))
                             diagnostics ~= CheckDiagnostic(target.line, target.column,
                                 format("Assignment to '%s' expects %s but expression has type %s",
                                     (cast(VariableExpression) target).name, *expected, actual));
                     }
                     else if (target.kind == Expression.Kind.index)
                     {
-                        auto expected = inferExpressionType(target, variables, functions, diagnostics);
-                        if (!staticTypesCompatible(actual, expected, variables))
+                        auto expected = inferExpressionType(target, variables, functions, diagnostics, classTypes);
+                        if (!staticTypesCompatible(actual, expected, classTypes))
                             diagnostics ~= CheckDiagnostic(target.line, target.column,
                                 format("Indexed assignment expects %s but has type %s", expected, actual));
                     }
                     else if (target.kind == Expression.Kind.get)
                     {
                         auto get = cast(GetExpression) target;
-                        auto container = inferExpressionType(get.target, variables, functions, diagnostics);
+                        auto container = inferExpressionType(get.target, variables, functions, diagnostics, classTypes);
                         string element, key;
                         if (get.memberName == "length" && (container == "array"
                             || (splitContainerType(container, element, key) && !key.length)))
@@ -110,10 +123,10 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                 break;
             case Statement.Kind.return_:
                 auto actual = statement.expressions.length == 0 ? "null"
-                    : inferExpressionType(statement.expressions[0], variables, functions, diagnostics);
+                    : inferExpressionType(statement.expressions[0], variables, functions, diagnostics, classTypes);
                 if (expectedReturnType.length > 0)
                 {
-                    if (!staticTypesCompatible(actual, expectedReturnType, variables))
+                    if (!staticTypesCompatible(actual, expectedReturnType, classTypes))
                         addDiagnostic(diagnostics, statement,
                             format("Return expects %s but expression has type %s",
                                 expectedReturnType, actual));
@@ -125,36 +138,37 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                     childVariables[parameter] = index < statement.parameterTypes.length
                         ? resolveStaticType(statement.parameterTypes[index], variables) : "any";
                 checkStatements(statement.body, childVariables, functions, diagnostics,
-                    statement.returnType);
+                    statement.returnType, classTypes.copy());
                 break;
             case Statement.Kind.block:
                 auto childVariables = variables.dup;
-                checkStatements(statement.body, childVariables, functions, diagnostics, expectedReturnType);
+                checkStatements(statement.body, childVariables, functions, diagnostics, expectedReturnType, classTypes);
                 break;
             case Statement.Kind.for_:
                 auto loopVariables = variables.dup;
                 if (statement.init !is null)
-                    checkStatements([statement.init], loopVariables, functions, diagnostics, expectedReturnType);
+                    checkStatements([statement.init], loopVariables, functions, diagnostics, expectedReturnType, classTypes);
                 if (statement.condition !is null)
-                    inferExpressionType(statement.condition, loopVariables, functions, diagnostics);
-                checkStatements(statement.body, loopVariables, functions, diagnostics, expectedReturnType);
+                    inferExpressionType(statement.condition, loopVariables, functions, diagnostics, classTypes);
+                auto loopClasses = classTypes.copy();
+                checkStatements(statement.body, loopVariables, functions, diagnostics, expectedReturnType, loopClasses);
                 if (statement.incrementStatement !is null)
-                    checkStatements([statement.incrementStatement], loopVariables, functions, diagnostics, expectedReturnType);
+                    checkStatements([statement.incrementStatement], loopVariables, functions, diagnostics, expectedReturnType, loopClasses);
                 break;
             case Statement.Kind.if_, Statement.Kind.while_,
                  Statement.Kind.foreach_, Statement.Kind.switch_:
                 if (statement.condition !is null)
-                    inferExpressionType(statement.condition, variables, functions, diagnostics);
+                    inferExpressionType(statement.condition, variables, functions, diagnostics, classTypes);
                 foreach (child; statement.body)
                 {
                     auto nestedVariables = variables.dup;
                     if (statement.kind == Statement.Kind.foreach_)
                     {
-                        auto iterableType = inferExpressionType(statement.iterable, variables, functions, diagnostics);
+                        auto iterableType = inferExpressionType(statement.iterable, variables, functions, diagnostics, classTypes);
                         string element, key;
                         if (statement.rangeEnd !is null)
                         {
-                            auto endType = inferExpressionType(statement.rangeEnd, variables, functions, diagnostics);
+                            auto endType = inferExpressionType(statement.rangeEnd, variables, functions, diagnostics, classTypes);
                             if ((iterableType != "int" && iterableType != "any")
                                 || (endType != "int" && endType != "any"))
                                 addDiagnostic(diagnostics, statement, "Range foreach bounds must be integers");
@@ -168,25 +182,29 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                                 nestedVariables[statement.iteratorSecondName] = element;
                         }
                     }
-                    checkStatements([child], nestedVariables, functions, diagnostics, expectedReturnType);
+                    checkStatements([child], nestedVariables, functions, diagnostics, expectedReturnType, classTypes.copy());
                 }
                 if (statement.elseBranch !is null)
                 {
                     auto nestedVariables = variables.dup;
-                    checkStatements([statement.elseBranch], nestedVariables, functions, diagnostics, expectedReturnType);
+                    checkStatements([statement.elseBranch], nestedVariables, functions, diagnostics, expectedReturnType, classTypes.copy());
                 }
                 break;
             case Statement.Kind.try_:
                 auto tryVariables = variables.dup;
-                checkStatements(statement.body, tryVariables, functions, diagnostics, expectedReturnType);
+                checkStatements(statement.body, tryVariables, functions, diagnostics, expectedReturnType, classTypes.copy());
                 auto catchVariables = variables.dup;
                 catchVariables[statement.name] = "table";
-                checkStatements(statement.elseBranch.body, catchVariables, functions, diagnostics, expectedReturnType);
+                checkStatements(statement.elseBranch.body, catchVariables, functions, diagnostics, expectedReturnType, classTypes.copy());
                 break;
             case Statement.Kind.expression:
-                inferExpressionType(statement.expression, variables, functions, diagnostics);
+                inferExpressionType(statement.expression, variables, functions, diagnostics, classTypes);
                 break;
-            case Statement.Kind.alias_, Statement.Kind.tableDecl, Statement.Kind.structDecl,
+            case Statement.Kind.tableDecl, Statement.Kind.structDecl:
+                // 宣言前のクラス利用は保ち、同名aggregateの宣言以降だけを上書きします。
+                classTypes.names.remove(statement.name);
+                break;
+            case Statement.Kind.alias_,
                  Statement.Kind.break_, Statement.Kind.continue_, Statement.Kind.yield_,
                  Statement.Kind.import_, Statement.Kind.export_:
                 break;
@@ -195,7 +213,8 @@ private void checkStatements(Statement[] statements, ref string[string] variable
 }
 
 private string inferExpressionType(Expression expression, ref string[string] variables,
-    ref StaticFunctionInfo[string] functions, ref CheckDiagnostic[] diagnostics)
+    ref StaticFunctionInfo[string] functions, ref CheckDiagnostic[] diagnostics,
+    NullableClassTypes classTypes)
 {
     if (expression is null) return "any";
     final switch (expression.kind)
@@ -223,8 +242,8 @@ private string inferExpressionType(Expression expression, ref string[string] var
             auto aa = cast(AssociativeArrayExpression) expression;
             foreach (index, key; aa.keys)
             {
-                inferExpressionType(key, variables, functions, diagnostics);
-                inferExpressionType(aa.values[index], variables, functions, diagnostics);
+                inferExpressionType(key, variables, functions, diagnostics, classTypes);
+                inferExpressionType(aa.values[index], variables, functions, diagnostics, classTypes);
             }
             return "associativeArray";
         case Expression.Kind.table: return "table";
@@ -232,15 +251,15 @@ private string inferExpressionType(Expression expression, ref string[string] var
         case Expression.Kind.unary:
             if ((cast(UnaryExpression) expression).operatorSymbol == "new") return "table";
             return (cast(UnaryExpression) expression).operatorSymbol == "!" ? "bool"
-                : inferExpressionType((cast(UnaryExpression) expression).operand, variables, functions, diagnostics);
+                : inferExpressionType((cast(UnaryExpression) expression).operand, variables, functions, diagnostics, classTypes);
         case Expression.Kind.cast_:
             auto conversion = cast(CastExpression) expression;
-            inferExpressionType(conversion.operand, variables, functions, diagnostics);
+            inferExpressionType(conversion.operand, variables, functions, diagnostics, classTypes);
             return conversion.targetType;
         case Expression.Kind.binary:
-            auto left = inferExpressionType((cast(BinaryExpression) expression).left, variables, functions, diagnostics);
+            auto left = inferExpressionType((cast(BinaryExpression) expression).left, variables, functions, diagnostics, classTypes);
             auto right = (cast(BinaryExpression) expression).operatorSymbol == "is" ? "any"
-                : inferExpressionType((cast(BinaryExpression) expression).right, variables, functions, diagnostics);
+                : inferExpressionType((cast(BinaryExpression) expression).right, variables, functions, diagnostics, classTypes);
             if (["==", "!=", "<", "<=", ">", ">=", "&&", "||", "is"].canFind((cast(BinaryExpression) expression).operatorSymbol))
                 return "bool";
             auto op = (cast(BinaryExpression) expression).operatorSymbol;
@@ -258,8 +277,8 @@ private string inferExpressionType(Expression expression, ref string[string] var
             if (["%", "&", "|", "^", "<<", ">>"].canFind(op)) return "int";
             return left == "int" && right == "int" ? "int" : "double";
         case Expression.Kind.ternary:
-            auto middle = inferExpressionType((cast(TernaryExpression) expression).whenTrue, variables, functions, diagnostics);
-            auto right = inferExpressionType((cast(TernaryExpression) expression).whenFalse, variables, functions, diagnostics);
+            auto middle = inferExpressionType((cast(TernaryExpression) expression).whenTrue, variables, functions, diagnostics, classTypes);
+            auto right = inferExpressionType((cast(TernaryExpression) expression).whenFalse, variables, functions, diagnostics, classTypes);
             return middle == right ? middle : "any";
         case Expression.Kind.call:
             if ((cast(CallExpression) expression).callee.kind == Expression.Kind.variable)
@@ -269,9 +288,9 @@ private string inferExpressionType(Expression expression, ref string[string] var
                 {
                     foreach (index, argument; (cast(CallExpression) expression).arguments)
                     {
-                        auto actual = inferExpressionType(argument, variables, functions, diagnostics);
+                        auto actual = inferExpressionType(argument, variables, functions, diagnostics, classTypes);
                         if (index < functionInfo.parameterTypes.length
-                            && !staticTypesCompatible(actual, functionInfo.parameterTypes[index], variables))
+                            && !staticTypesCompatible(actual, functionInfo.parameterTypes[index], classTypes))
                             diagnostics ~= CheckDiagnostic(argument.line, argument.column,
                                 format("Argument %s to '%s' expects %s but has type %s",
                                     index + 1, (cast(VariableExpression) (cast(CallExpression) expression).callee).name,
@@ -283,7 +302,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
             return "any";
         case Expression.Kind.index:
             auto indexExpression = cast(IndexExpression) expression;
-            auto container = inferExpressionType(indexExpression.target, variables, functions, diagnostics);
+            auto container = inferExpressionType(indexExpression.target, variables, functions, diagnostics, classTypes);
             string element, key;
             if (splitContainerType(container, element, key) && !indexExpression.isSlice)
             {
@@ -293,9 +312,9 @@ private string inferExpressionType(Expression expression, ref string[string] var
                         "Array/associative array indexing requires a single index");
                     return "any";
                 }
-                auto actual = inferExpressionType(indexExpression.index, variables, functions, diagnostics);
+                auto actual = inferExpressionType(indexExpression.index, variables, functions, diagnostics, classTypes);
                 auto expected = key.length ? key : "int";
-                if (!staticTypesCompatible(actual, expected, variables))
+                if (!staticTypesCompatible(actual, expected, classTypes))
                     diagnostics ~= CheckDiagnostic(expression.line, expression.column,
                         format("Index expects %s but has type %s", expected, actual));
                 return element;
@@ -303,7 +322,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
             return "any";
         case Expression.Kind.get:
             auto get = cast(GetExpression) expression;
-            auto targetType = inferExpressionType(get.target, variables, functions, diagnostics);
+            auto targetType = inferExpressionType(get.target, variables, functions, diagnostics, classTypes);
             string element, key;
             if (get.memberName == "length" && (targetType == "array"
                 || splitContainerType(targetType, element, key)))
@@ -315,6 +334,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
 private string resolveStaticType(string name, ref string[string] variables, size_t depth = 0)
 {
     if (depth >= 64) return "any";
+    if (isBuiltinTypeName(name)) return name;
     if (auto aliasType = "#type_" ~ name in variables)
         return resolveStaticType(*aliasType, variables, depth + 1);
     string element, key;
@@ -324,9 +344,10 @@ private string resolveStaticType(string name, ref string[string] variables, size
     return name;
 }
 
-private bool staticTypesCompatible(string actual, string expected, ref string[string] variables)
+private bool staticTypesCompatible(string actual, string expected, NullableClassTypes classTypes)
 {
-    if (actual == "null" && ("#class_" ~ expected in variables) !is null) return true;
+    if (actual == "null" && !isBuiltinTypeName(expected)
+        && (expected in classTypes.names) !is null) return true;
     if (actual == "any" || expected == "any" || expected == "auto") return true;
     string element, key;
     if (splitContainerType(expected, element, key))

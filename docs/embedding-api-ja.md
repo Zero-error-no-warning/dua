@@ -462,6 +462,9 @@ deferred = Counter();
 `RunOptions.typeCheck` の有効・無効にかかわらず利用できます。`cast(Counter) null` も
 `null` を返しますが、`null is Counter` は偽です。class の初期化式は省略できません。
 D の struct、数値型、Dua の table/struct 型や未登録の型は、この規則では nullable になりません。
+公開名が `int` などの組込み型名と衝突しても、その型のnull規則は変わりません。
+同名のDua table/struct型を宣言した場合は、その宣言以降と以後の実行・事前診断で
+Dua側の型定義を優先します。
 `Counter` 自体は型の公開テーブルであり、実体は `Counter()` / `Counter.new()` で生成します。
 型の公開テーブルやそのコピーを D の class 引数・フィールドへ渡すと変換エラーになります。
 

@@ -1224,7 +1224,11 @@ final class ScriptEngine
 
     CheckDiagnostic[] check(string source)
     {
-        return checkSource(source, nativeClassTypes.keys);
+        // 前の実行で同名tableやaliasが定義された場合も、現在の型定義を優先します。
+        string[] nullableClassTypes;
+        foreach (name; nativeClassTypes.byKey)
+            if (typeAllowsNull(name)) nullableClassTypes ~= name;
+        return checkSource(source, nullableClassTypes);
     }
 
     Value call(string functionName, scope const(Value)[] args = [])
@@ -1469,12 +1473,25 @@ final class ScriptEngine
         return result;
     }
 
+    private bool typeAllowsNull(string typeName, size_t depth = 0)
+    {
+        if (depth >= 64) return false;
+        if (typeName == "auto" || typeName == "any" || typeName == "null" || typeName == "void")
+            return true;
+        string elementType, keyType;
+        if (isBuiltinTypeName(typeName) || splitContainerType(typeName, elementType, keyType)
+            || canFind(typeName, " delegate(")) return false;
+        auto definition = findTypeDefinition(typeName);
+        if (definition is null) return (typeName in nativeClassTypes) !is null;
+        if (definition.tableValue["isTable"].truthy()) return false;
+        foreach (alternative; definition.tableValue["alternatives"].arrayValue)
+            if (typeAllowsNull(alternative.toHostString(), depth + 1)) return true;
+        return false;
+    }
+
     private bool valueMatchesType(Value value, string typeName)
     {
-        // nullはホストの参照型だけで受け入れ、structや未登録型には広げません。
-        if (value.kind == ValueKind.null_ && (typeName in nativeClassTypes) !is null
-            && findTypeDefinition(typeName) is null)
-            return true;
+        if (value.kind == ValueKind.null_) return typeAllowsNull(typeName);
         string elementType, keyType;
         if (splitContainerType(resolveContainerType(typeName), elementType, keyType))
         {
@@ -1546,10 +1563,11 @@ final class ScriptEngine
 
     private bool valueIsType(Value value, string typeName)
     {
+        if (isBuiltinTypeName(typeName)) return valueMatchesType(value, typeName);
         auto definition = findTypeDefinition(typeName);
         // 代入可能であっても、null自体がクラスの実体になるわけではありません。
         if (definition is null && value.kind == ValueKind.null_
-            && (typeName in nativeClassTypes) !is null)
+            && !isBuiltinTypeName(typeName))
             return false;
         if (definition is null) return valueMatchesType(value, typeName);
         if (!definition.tableValue["isTable"].truthy())
