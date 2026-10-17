@@ -6,10 +6,12 @@ const language = require('./language');
 const host = require('./hostCompletion');
 const assets = require('./assetCompletion');
 const { checkSource } = require('./checker');
+const { activateSceneDiagnostics } = require('./sceneDiagnostics');
 
 function activate(context) {
   const diagnostics = vscode.languages.createDiagnosticCollection('dua');
   const output = vscode.window.createOutputChannel('Dua');
+  activateSceneDiagnostics(vscode, context, output);
   const pending = new Map();
   const reported = new Set();
   const selector = { language: 'dua' };

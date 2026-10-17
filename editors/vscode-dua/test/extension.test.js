@@ -46,6 +46,7 @@ test('extension debounces checks, drops stale responses, clears closed files and
     Module._load = function(name, ...args) {
       if (name === 'vscode') return vscode;
       if (name === './checker') return checker;
+      if (name === './sceneDiagnostics') return { activateSceneDiagnostics() {} };
       return original.call(this, name, ...args);
     };
     extension = require(file);
