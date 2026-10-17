@@ -247,6 +247,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
         case Expression.Kind.table: return "table";
         case Expression.Kind.function_: return "function";
         case Expression.Kind.unary:
+            if ((cast(UnaryExpression) expression).operatorSymbol == "$") return "int";
             if ((cast(UnaryExpression) expression).operatorSymbol == "new") return "table";
             return (cast(UnaryExpression) expression).operatorSymbol == "!" ? "bool"
                 : inferExpressionType((cast(UnaryExpression) expression).operand, variables, functions, diagnostics);
@@ -266,8 +267,15 @@ private string inferExpressionType(Expression expression, ref string[string] var
                 string element, key;
                 auto leftArray = left == "array" || (splitContainerType(left, element, key) && !key.length);
                 auto rightArray = right == "array" || (splitContainerType(right, element, key) && !key.length);
-                if (leftArray && rightArray) return left;
                 if (left == "any" || right == "any" || left == "table" || right == "table") return "any";
+                if (leftArray)
+                {
+                    if (!rightArray && splitContainerType(left, element, key)
+                        && !staticTypesCompatible(right, element, variables))
+                        diagnostics ~= CheckDiagnostic(expression.line, expression.column,
+                            format("Array element expects %s but has type %s", element, right));
+                    return left;
+                }
                 return "string";
             }
             if (left == "any" || right == "any" || left == "table" || right == "table") return "any";
@@ -302,6 +310,9 @@ private string inferExpressionType(Expression expression, ref string[string] var
             auto indexExpression = cast(IndexExpression) expression;
             auto container = inferExpressionType(indexExpression.target, variables, functions, diagnostics);
             string element, key;
+            if (indexExpression.isSlice)
+                return container == "array" || (splitContainerType(container, element, key) && !key.length)
+                    ? container : "any";
             if (splitContainerType(container, element, key) && !indexExpression.isSlice)
             {
                 if (indexExpression.indices.length != 1)
@@ -348,6 +359,9 @@ private bool staticTypesCompatible(string actual, string expected, ref string[st
     if (actual == "null" && !isBuiltinTypeName(expected)
         && ("#class_" ~ expected in variables) !is null) return true;
     if (actual == "any" || expected == "any" || expected == "auto") return true;
+    if (["byte", "ubyte", "short", "ushort", "uint", "long", "ulong"].canFind(expected))
+        return actual == "int";
+    if (expected == "float" || expected == "real") return actual == "double";
     string element, key;
     if (splitContainerType(expected, element, key))
         return actual == expected || actual == (key.length ? "associativeArray" : "array")

@@ -18,7 +18,7 @@
 }
 
 Player hero = { name = <span class="str">&quot;Ada&quot;</span>, hp = <span class="num">100</span> };
-<span class="kw">return</span> i<span class="str">&quot;Hello, $(hero.name).&quot;</span>;</code></pre></div></div><div class="stats"><div class="stat"><strong>30</strong><span>の章で体系的に解説</span></div><div class="stat"><strong>69</strong><span>のコードブロック</span></div><div class="stat"><strong>Offline</strong><span>単体 HTML・外部依存なし</span></div></div><div class="note">このリポジトリの実装を基準にした日本語版です。検索は <kbd>/</kbd> または <kbd>Ctrl K</kbd>。Dua とホスト側 D のコードをラベルで区別しています。</div><noscript><p class="note">JavaScriptが無効です。目次・本文・ブラウザーのページ内検索は利用できます。独自検索・コピー・テーマ切り替えにはJavaScriptが必要です。</p></noscript></div>
+<span class="kw">return</span> i<span class="str">&quot;Hello, $(hero.name).&quot;</span>;</code></pre></div></div><div class="stats"><div class="stat"><strong>30</strong><span>の章で体系的に解説</span></div><div class="stat"><strong>70</strong><span>のコードブロック</span></div><div class="stat"><strong>Offline</strong><span>単体 HTML・外部依存なし</span></div></div><div class="note">このリポジトリの実装を基準にした日本語版です。検索は <kbd>/</kbd> または <kbd>Ctrl K</kbd>。Dua とホスト側 D のコードをラベルで区別しています。</div><noscript><p class="note">JavaScriptが無効です。目次・本文・ブラウザーのページ内検索は利用できます。独自検索・コピー・テーマ切り替えにはJavaScriptが必要です。</p></noscript></div>
 <section class="chapter" id="guide-1" data-group="はじめに" aria-labelledby="guide-1-title"><div class="chapter-meta"><span>CHAPTER 01 / はじめに</span><a href="reference-examples-ja.md">原稿 ↗</a></div><h2 id="guide-1-title">最初のプログラム<a class="anchor" href="#guide-1" aria-label="この章へのリンク">#</a></h2><p>Dua は D アプリケーションに組み込むスクリプト言語です。D に似た波括弧・型注釈・配列構文に、参照型テーブル、クロージャ、コルーチンを組み合わせています。ホストが <code>ScriptEngine</code> を作り、Dua のソースを渡して実行します。</p><figure class="code-block"><figcaption><span>Dua</span><button type="button" class="copy" aria-label="コードをコピー">コピー</button></figcaption><pre tabindex="0"><code class="language-dua"><span class="kw">int</span> twice(<span class="kw">int</span> value) {
     <span class="kw">return</span> value * <span class="num">2</span>;
 }
@@ -101,6 +101,9 @@ first, second = [second, first];</code></pre></figure><ul><li><code>auto name = 
 <span class="kw">auto</span> odds = iota(<span class="num">1</span>, <span class="num">8</span>, <span class="num">2</span>); <span class="comment"># [1, 3, 5, 7]</span>
 <span class="kw">auto</span> first = values[<span class="num">0</span>];
 <span class="kw">auto</span> tail = values[<span class="num">1</span> .. $]; <span class="comment"># $ は対象の長さ</span>
+values[$ - <span class="num">1</span>] = <span class="num">40</span>;         <span class="comment"># 通常の添字代入にも使える</span>
+values ~= <span class="num">50</span>;              <span class="comment"># 非配列の右辺は末尾の1要素として追加</span>
+<span class="kw">auto</span> more = values ~ <span class="num">60</span>;   <span class="comment"># 新しい配列。values自体の長さは変わらない</span>
 
 <span class="kw">auto</span> key = <span class="str">&quot;name&quot;</span>;
 <span class="kw">auto</span> user = {
@@ -108,7 +111,11 @@ first, second = [second, first];</code></pre></figure><ul><li><code>auto name = 
     hp = <span class="num">100</span>,       <span class="comment"># 名前付きキー</span>
     <span class="num">7</span>, <span class="num">8</span>,           <span class="comment"># 暗黙の数値キー 0, 1</span>
 };
-user.hp = user.hp - <span class="num">1</span>;</code></pre></figure><p>配列とテーブルは参照型なので、通常の代入は同じ内容を共有します。spread は新しいコンテナを作る浅いコピーです。</p><figure class="code-block"><figcaption><span>Dua</span><button type="button" class="copy" aria-label="コードをコピー">コピー</button></figcaption><pre tabindex="0"><code class="language-D"><span class="kw">auto</span> arrayCopy = [...values, <span class="num">40</span>];
+user.hp = user.hp - <span class="num">1</span>;</code></pre></figure><p>配列とテーブルは参照型なので、通常の代入は同じ内容を共有します。spread は新しいコンテナを作る浅いコピーです。</p><p><code>$</code> は現在評価している添字の対象長です。入れ子の添字では内側の対象長になり、内側の評価後に外側へ戻ります。
+通常の添字代入は右辺→対象配列→添字の順に各式を一度だけ評価します。複合代入は対象配列→添字→右辺の順です。
+右辺には代入先の <code>$</code> スコープを持ち込みません。空配列の <code>$-1</code>、範囲外・負の添字、添字の外の <code>$</code> は実行時エラーです。
+型付き配列は宣言・引数・戻り値の検証に加え、添字代入と連結でも要素型を検証します。autoの別名とスライスに要素型を保持し、
+連結結果には左辺の明示された要素型を保持します。整数型の範囲検査は実行時に行い、整数をdouble要素へ暗黙変換しません。</p><figure class="code-block"><figcaption><span>Dua</span><button type="button" class="copy" aria-label="コードをコピー">コピー</button></figcaption><pre tabindex="0"><code class="language-D"><span class="kw">auto</span> arrayCopy = [...values, <span class="num">40</span>];
 <span class="kw">auto</span> tableCopy = { ...user, hp = <span class="num">50</span> };</code></pre></figure><ul><li>spread は複数個を通常要素と混在できます。テーブルは後の要素が同じキーを上書きします。</li><li>ネストした配列・テーブルの参照は共有されます。</li><li>テーブルのメタテーブルと実行時型情報は spread されません。</li><li>テーブルの列挙順序に依存しないでください。</li></ul><h3 id="language-5-s1">5.1 型付き連想配列<a class="anchor" href="#language-5-s1" aria-label="この項目へのリンク">#</a></h3><p>テーブル <code>{ ... }</code> と別の値として、<code>値型[キー型]</code> の連想配列を使えます。リテラルは <code>[キー: 値, ...]</code> です。</p><figure class="code-block"><figcaption><span>Dua</span><button type="button" class="copy" aria-label="コードをコピー">コピー</button></figcaption><pre tabindex="0"><code class="language-dua"><span class="kw">string</span>[<span class="kw">int</span>] names = [<span class="num">1</span>: <span class="str">&quot;Alice&quot;</span>, <span class="num">2</span>: <span class="str">&quot;Bob&quot;</span>];
 names[<span class="num">3</span>] = <span class="str">&quot;Carol&quot;</span>;
 <span class="kw">auto</span> first = names[<span class="num">1</span>];
@@ -177,7 +184,9 @@ Player hero = { name = <span class="str">&quot;Ada&quot;</span>, hp = <span clas
 <span class="kw">auto</span> values = [<span class="num">10</span>, <span class="num">20</span>];
 values[$ - <span class="num">1</span>] *= <span class="num">2</span>;
 <span class="kw">auto</span> text = <span class="str">&quot;total=&quot;</span>;
-text ~= total;</code></pre></figure><p><code>target op= expr</code> は左辺の現在値と右辺を通常の二項演算（<code>opBinary</code> / <code>opBinaryRight</code> を含む）で計算し、結果を同じ場所へ代入します。左辺のコンテナ・添字と現在値を取得してから右辺を評価し、コンテナや添字の式は一度だけ評価します。変数、プロパティ、配列・連想配列・テーブルの要素に使えます。左辺と右辺はそれぞれ1つで、スライスへの代入はできません。通常の文のほか、<code>for</code> の初期化・更新節と <code>:&gt;</code> ラムダでも使用できます。<code>/=</code> の結果は通常の <code>/</code> と同じく浮動小数です。事前型検査を有効にした場合、演算結果の型を代入先の型と照合します。</p><p><code>&amp;&amp;</code> と <code>||</code> は短絡評価します。<code>/</code> は浮動小数の結果を返します。<code>~</code> は両辺が配列なら配列を連結し、それ以外では文字列表現を連結します。テーブルには次の特殊キーを置いて動作を拡張できます。</p><div class="table-wrap" role="region" aria-label="演算子と優先順位の一覧表" tabindex="0"><table><thead><tr><th scope="col">キー</th><th scope="col">用途</th></tr></thead><tbody><tr><td><code>opUnary-</code>, <code>opUnary!</code></td><td>単項演算。第1引数は自分自身</td></tr><tr><td><code>opBinary+</code>, <code>opBinary-</code>, <code>opBinary*</code>, <code>opBinary/</code>, <code>opBinary%</code>, <code>opBinary~</code></td><td>二項演算。自分自身と右辺を受け取る</td></tr><tr><td><code>__index</code>, <code>__newindex</code></td><td>未定義キーの取得・設定</td></tr><tr><td><code>__call</code></td><td>テーブルの関数呼び出し</td></tr><tr><td><code>__len</code></td><td><code>length</code> / <code>len</code></td></tr></tbody></table></div><p>メタテーブルは <code>setmetatable(table, meta)</code> で設定し、<code>getmetatable(table)</code> で取得します。<code>rawget</code> / <code>rawset</code> はメタ処理を経由しません。</p><p>D から reflect した class / struct に具体的な引数型の <code>opIndex</code> / <code>opCall</code> がある場合、<code>obj[index]</code> / <code>obj(args...)</code> で呼び出せます。<code>obj[row, column]</code> や <code>obj[]</code> も <code>opIndex</code> に引数をそのまま渡します。通常の配列・連想配列・テーブルの添字は1つです。<code>bindType</code> で公開した型の static 演算子は <code>Name[index]</code> / <code>Name(args...)</code> で利用でき、static <code>opCall</code> がある型のコンストラクタは <code>Name.new(...)</code> で呼びます。詳しくは<a href="#host-1">埋め込み API</a>を参照してください。</p></section>
+text ~= total;</code></pre></figure><p><code>target op= expr</code> は左辺の現在値と右辺を通常の二項演算（<code>opBinary</code> / <code>opBinaryRight</code> を含む）で計算し、結果を同じ場所へ代入します。左辺のコンテナ・添字と現在値を取得してから右辺を評価し、コンテナや添字の式は一度だけ評価します。変数、プロパティ、配列・連想配列・テーブルの要素に使えます。左辺と右辺はそれぞれ1つで、スライスへの代入はできません。通常の文のほか、<code>for</code> の初期化・更新節と <code>:&gt;</code> ラムダでも使用できます。<code>/=</code> の結果は通常の <code>/</code> と同じく浮動小数です。事前型検査を有効にした場合、演算結果の型を代入先の型と照合します。</p><p><code>&amp;&amp;</code> と <code>||</code> は短絡評価します。<code>/</code> は浮動小数の結果を返します。<code>~</code> は左辺が配列なら、配列の右辺を連結し、非配列の右辺を1要素として末尾へ追加した新しい配列を返します。
+配列要素を1つ追加する場合は <code>[elementArray]</code> のように包んでください。左辺が配列でなければ従来どおり文字列表現を連結します。
+既存の演算子オーバーロードは引き続き優先します。テーブルには次の特殊キーを置いて動作を拡張できます。</p><div class="table-wrap" role="region" aria-label="演算子と優先順位の一覧表" tabindex="0"><table><thead><tr><th scope="col">キー</th><th scope="col">用途</th></tr></thead><tbody><tr><td><code>opUnary-</code>, <code>opUnary!</code></td><td>単項演算。第1引数は自分自身</td></tr><tr><td><code>opBinary+</code>, <code>opBinary-</code>, <code>opBinary*</code>, <code>opBinary/</code>, <code>opBinary%</code>, <code>opBinary~</code></td><td>二項演算。自分自身と右辺を受け取る</td></tr><tr><td><code>__index</code>, <code>__newindex</code></td><td>未定義キーの取得・設定</td></tr><tr><td><code>__call</code></td><td>テーブルの関数呼び出し</td></tr><tr><td><code>__len</code></td><td><code>length</code> / <code>len</code></td></tr></tbody></table></div><p>メタテーブルは <code>setmetatable(table, meta)</code> で設定し、<code>getmetatable(table)</code> で取得します。<code>rawget</code> / <code>rawset</code> はメタ処理を経由しません。</p><p>D から reflect した class / struct に具体的な引数型の <code>opIndex</code> / <code>opCall</code> がある場合、<code>obj[index]</code> / <code>obj(args...)</code> で呼び出せます。<code>obj[row, column]</code> や <code>obj[]</code> も <code>opIndex</code> に引数をそのまま渡します。通常の配列・連想配列・テーブルの添字は1つです。<code>bindType</code> で公開した型の static 演算子は <code>Name[index]</code> / <code>Name(args...)</code> で利用でき、static <code>opCall</code> がある型のコンストラクタは <code>Name.new(...)</code> で呼びます。詳しくは<a href="#host-1">埋め込み API</a>を参照してください。</p></section>
 <section class="chapter" id="language-8" data-group="言語仕様" aria-labelledby="language-8-title"><div class="chapter-meta"><span>CHAPTER 09 / 言語仕様</span><a href="language-reference-ja.md">原稿 ↗</a></div><h2 id="language-8-title">文字列補間<a class="anchor" href="#language-8" aria-label="この章へのリンク">#</a></h2><figure class="code-block"><figcaption><span>Dua</span><button type="button" class="copy" aria-label="コードをコピー">コピー</button></figcaption><pre tabindex="0"><code class="language-D"><span class="kw">auto</span> name = <span class="str">&quot;Dua&quot;</span>;
 <span class="kw">auto</span> level = <span class="num">7</span>;
 <span class="kw">auto</span> text = i<span class="str">&quot;Hello $(name), Lv.$(level)&quot;</span>;
@@ -414,8 +423,25 @@ assert(counter.value == <span class="num">7</span>); <span class="comment">// cl
 通常のテーブル、型名や型チェーンだけを設定したテーブルはクラス引数に変換できません。
 <code>{ ...instance }</code> によるテーブルコピーにも D オブジェクトの参照は引き継がれません。</p><p>クラス引数のオーバーロードは、実オブジェクトの型との完全一致を基底型への変換より優先します。
 D の null クラス参照は Dua の <code>null</code> になり、Dua の <code>null</code> は D の null クラス参照へ戻ります。
-<code>null</code> はクラスの型情報を持たないため、クラス引数だけが異なる複数の候補では曖昧エラーになります。
-このホスト境界の null 変換は、スクリプトの <code>cast(Type)</code> や Optional 型の既存規則を変更しません。</p><h3 id="host-6-s2">6.2 bindType<a class="anchor" href="#host-6-s2" aria-label="この項目へのリンク">#</a></h3><figure class="code-block"><figcaption><span>D · ホスト側</span><button type="button" class="copy" aria-label="コードをコピー">コピー</button></figcaption><pre tabindex="0"><code class="language-d"><span class="kw">struct</span> Player {
+<code>null</code> はクラスの型情報を持たないため、クラス引数だけが異なる複数の候補では曖昧エラーになります。</p><p>D から公開した class 型は、Dua の型付き宣言・関数引数・戻り値でも <code>null</code> を受け取れます。
+<code>bindType!T</code> の公開名と D の型名、<code>bindAuto</code> の型、<code>bindFunc</code> のクラス引数・戻り値型を
+エンジンごとに登録します。null の <code>bindAuto</code> も対象です。</p><figure class="code-block"><figcaption><span>Dua</span><button type="button" class="copy" aria-label="コードをコピー">コピー</button></figcaption><pre tabindex="0"><code class="language-D">Counter value = <span class="kw">null</span>;
+value = Counter();
+value = <span class="kw">null</span>;
+<span class="kw">auto</span> deferred = <span class="kw">null</span>;
+deferred = Counter();</code></pre></figure><p><code>RunOptions.typeCheck</code> の有効・無効にかかわらず利用できます。<code>cast(Counter) null</code> も
+<code>null</code> を返しますが、<code>null is Counter</code> は偽です。class の初期化式は省略できません。
+D の struct、数値型、Dua の table/struct 型や未登録の型は、この規則では nullable になりません。
+公開名が <code>int</code> などの組込み型名と衝突しても、その型のnull規則は変わりません。
+実行時は同名のDua table/struct/alias型定義を優先し、不適合なnullを拒否します。
+<code>check</code> は検査開始時の型レジストリに基づいて判定します。同一ソース内に公開クラスと
+同名の型宣言（未使用関数や到達不能部分も含む）、またはその内部レジストリ名への参照が
+あれば、その型名に関する互換性判定だけを実行時へ委ねます。組込み型や他の型の診断は維持します。
+関数呼出し・評価順・例外経路による型定義の副作用は事前解析しません。ホスト処理やimport等による
+動的な型変更も完全には検出しないため、<code>check</code> 成功は実行時の型エラーがない保証ではありません。
+<code>RunOptions.typeCheck</code> の有効・無効にかかわらず、実行時の型検証は行われます。
+<code>Counter</code> 自体は型の公開テーブルであり、実体は <code>Counter()</code> / <code>Counter.new()</code> で生成します。
+型の公開テーブルやそのコピーを D の class 引数・フィールドへ渡すと変換エラーになります。</p><h3 id="host-6-s2">6.2 bindType<a class="anchor" href="#host-6-s2" aria-label="この項目へのリンク">#</a></h3><figure class="code-block"><figcaption><span>D · ホスト側</span><button type="button" class="copy" aria-label="コードをコピー">コピー</button></figcaption><pre tabindex="0"><code class="language-d"><span class="kw">struct</span> Player {
     <span class="kw">string</span> name;
     <span class="kw">int</span> hp;
 }

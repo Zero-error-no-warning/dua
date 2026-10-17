@@ -875,6 +875,8 @@ struct Value
     bool booleanValue;
     string stringValue;
     Value[] arrayValue;
+    // Explicit script array annotations survive aliases, slices and concatenation.
+    package(dua) string arrayElementType;
     private TableStorage tableStorage;
     private ReflectedClassStorage nativeClass;
     private Object functionReceiver;
@@ -1082,12 +1084,13 @@ struct Value
 
     // The caller relinquishes an unexposed scratch array. Copying elements at
     // the same language boundary preserves reflected-copy effects and order.
-    package(dua) static Value fromOwnedArray(Value[] values)
+    package(dua) static Value fromOwnedArray(Value[] values, string elementType = "")
     {
         foreach (ref value; values) value = value.valueCopy();
         Value result;
         result.kind = ValueKind.array;
         result.arrayValue = values;
+        result.arrayElementType = elementType;
         return result;
     }
 

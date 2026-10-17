@@ -1,5 +1,22 @@
 # Dua language reference
 
+## Array assignment and appending
+
+`items[$ - 1] = value` uses the target length just like index reads and compound
+assignment. Nested indexes temporarily use their own target length. Ordinary
+assignment evaluates RHS, container, then index once each; compound assignment
+resolves the container and index before evaluating RHS. The target's `$` context
+does not extend into RHS. Negative/out-of-range indexes and `$` outside an index
+raise runtime errors.
+
+With an array on the left, `items ~ value` appends one non-array value to a new
+array, and `items ~= value` assigns that result. An array RHS is concatenated as
+before; wrap it in `[value]` to append it as one nested element. String concatenation
+with a non-array left operand and operator overload precedence are unchanged.
+Explicit array element types are retained by aliases and slices; concatenation
+retains the left operand's annotation. Writes and concatenation validate elements. Integer ranges are checked at runtime;
+integer elements are not implicitly converted to floating-point elements.
+
 Dua supports native value aggregates alongside its existing reference tables:
 
 ```dua
