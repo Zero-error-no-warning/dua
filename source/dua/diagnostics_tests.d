@@ -21,7 +21,7 @@ unittest
     assert(!syntax.ok && syntax.diagnostic.line==1 && syntax.diagnostic.column>0);
     auto lexer=engine.runSafe("auto value=\"unfinished",options);
     assert(!lexer.ok && lexer.diagnostic.line==1 && lexer.diagnostic.column>0);
-    auto unknown=scriptDiagnostic(new Exception("fake at 99:88 [expression @ C:/fake.dua:8:9]"));
+    Dua.ScriptDiagnostic unknown=Dua.scriptDiagnostic(new Exception("fake at 99:88 [expression @ C:/fake.dua:8:9]"));
     assert(!unknown.sourceName.length && unknown.line==0 && unknown.column==0);
     options.typeCheck=true;
     auto typed=engine.runSafe("int count=\"bad\";",options);
@@ -35,6 +35,12 @@ unittest
     auto trailing=engine.runSafe(trailingInterpolation,options);
     assert(!trailing.ok && trailing.diagnostic.line==2);
     assert(trailing.diagnostic.column==trailingInterpolation[1..$].indexOf("2)")+1);
+    foreach(invalid;["export { auto x=1; }","foreach(a,b; 1..2) {}", "void f(){instance int n;}",
+        "export instance {}", "instance void f(){}", "auto a=1;auto b=2;a,b += 3;",
+        "auto a=1;a += 2,3;", "1,2;", "struct S{...Base}", "1 += 2;"]){
+        auto validation=engine.runSafe(invalid,options);
+        assert(!validation.ok && validation.diagnostic.line>0 && validation.diagnostic.column>0,invalid);
+    }
     auto inner=new Dua.ScriptEngine;
     RunOptions innerOptions;innerOptions.sourceName="inner.dua";
     engine.bindNative("wrapped",(scope const(Value)[] args){
