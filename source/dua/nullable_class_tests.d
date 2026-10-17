@@ -276,12 +276,37 @@ unittest
         auto unusedFunction = createEngine().runSafe(
             "void later() { " ~ declaration ~ " } NativeItem value = null; return value == null;", options);
         assert(unusedFunction.ok && unusedFunction.value.truthy(), unusedFunction.errorMessage);
-        foreach (prefix; ["if (false)", "while (false)", "for (auto i = 0; i < 0; i += 1)"])
+        foreach (prefix; ["if (false)", "while (false)", "for (auto i = 0; i < 0; i += 1)",
+            "foreach (i; [])", "foreach (i; 0 .. 0)"])
         {
             auto skipped = createEngine().runSafe(prefix ~ " { " ~ declaration
                 ~ " } NativeItem value = null; return value == null;", options);
             assert(skipped.ok && skipped.value.truthy(), skipped.errorMessage);
         }
+        foreach (flow; [
+            "try { " ~ declaration ~ " } catch (err) {}",
+            "try { " ~ declaration ~ " error(\"stop\"); } catch (err) {}",
+            "if (true) { " ~ declaration ~ " }",
+            "if (false) {} else { " ~ declaration ~ " }",
+            "while (true) { " ~ declaration ~ " break; }",
+            "for (; true;) { " ~ declaration ~ " break; }",
+            "foreach (i; [1]) { " ~ declaration ~ " break; }",
+            "switch (1) { case 1: " ~ declaration ~ " break; }"
+        ])
+        {
+            auto rejectedSource = flow ~ " NativeItem value = null;";
+            assert(createEngine().check(rejectedSource).length != 0, rejectedSource);
+            foreach (checked; [false, true])
+            {
+                RunOptions flowOptions;
+                flowOptions.typeCheck = checked;
+                auto rejected = createEngine().runSafe(rejectedSource, flowOptions);
+                assert(!rejected.ok, rejectedSource);
+            }
+        }
+        auto skippedCase = createEngine().runSafe("switch (1) { case 2: " ~ declaration
+            ~ " break; default: break; } NativeItem value = null; return value == null;", options);
+        assert(skippedCase.ok && skippedCase.value.truthy(), skippedCase.errorMessage);
     }
     // bindTypeの公開名と同名tableの組合せも、宣言した実行の内外で拒否します。
     foreach (priorRun; [false, true])

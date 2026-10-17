@@ -4,7 +4,7 @@ import dua.ast;
 import dua.execution : CheckDiagnostic;
 import dua.lexer : lex;
 import dua.parser : parse;
-import dua.value : ValueKind;
+import dua.value : ValueKind, valuesEqual;
 import dua.type_syntax;
 import std.algorithm : canFind;
 import std.format : format;
@@ -26,6 +26,43 @@ private final class NullableClassTypes
         result.names = names.dup;
         return result;
     }
+    void intersect(NullableClassTypes path)
+    {
+        // 到達し得る経路で同名型を定義したら、後続ではnullableなクラスと断定しません。
+        foreach (name; names.keys)
+            if ((name in path.names) is null) names.remove(name);
+    }
+}
+
+private bool knownCondition(Expression expression, out bool value, Statement init = null)
+{
+    if (expression is null) return false;
+    if (expression.kind == Expression.Kind.literal)
+    {
+        value = (cast(LiteralExpression) expression).value.truthy();
+        return true;
+    }
+    // for(auto i=0; i<0; ...)の初回条件だけは、初期化された整数で判定できます。
+    if (init is null || init.kind != Statement.Kind.variableDecl || init.names.length != 1
+        || init.expressions.length != 1 || init.expressions[0].kind != Expression.Kind.literal
+        || expression.kind != Expression.Kind.binary) return false;
+    auto binary = cast(BinaryExpression) expression;
+    if (binary.left.kind != Expression.Kind.variable || binary.right.kind != Expression.Kind.literal
+        || (cast(VariableExpression) binary.left).name != init.names[0]) return false;
+    auto left = (cast(LiteralExpression) init.expressions[0]).value;
+    auto right = (cast(LiteralExpression) binary.right).value;
+    if (left.kind != ValueKind.integer || right.kind != ValueKind.integer) return false;
+    switch (binary.operatorSymbol)
+    {
+        case "<": value = left.integerValue < right.integerValue; break;
+        case "<=": value = left.integerValue <= right.integerValue; break;
+        case ">": value = left.integerValue > right.integerValue; break;
+        case ">=": value = left.integerValue >= right.integerValue; break;
+        case "==": value = left.integerValue == right.integerValue; break;
+        case "!=": value = left.integerValue != right.integerValue; break;
+        default: return false;
+    }
+    return true;
 }
 
 /// Checks a source unit with the host class names registered by its engine.
@@ -154,11 +191,15 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                 checkStatements(statement.body, loopVariables, functions, diagnostics, expectedReturnType, loopClasses);
                 if (statement.incrementStatement !is null)
                     checkStatements([statement.incrementStatement], loopVariables, functions, diagnostics, expectedReturnType, loopClasses);
+                bool firstCondition;
+                if (!knownCondition(statement.condition, firstCondition, statement.init) || firstCondition)
+                    classTypes.intersect(loopClasses);
                 break;
             case Statement.Kind.if_, Statement.Kind.while_,
-                 Statement.Kind.foreach_, Statement.Kind.switch_:
+                 Statement.Kind.foreach_:
                 if (statement.condition !is null)
                     inferExpressionType(statement.condition, variables, functions, diagnostics, classTypes);
+                auto bodyClasses = classTypes.copy();
                 foreach (child; statement.body)
                 {
                     auto nestedVariables = variables.dup;
@@ -182,20 +223,62 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                                 nestedVariables[statement.iteratorSecondName] = element;
                         }
                     }
-                    checkStatements([child], nestedVariables, functions, diagnostics, expectedReturnType, classTypes.copy());
+                    checkStatements([child], nestedVariables, functions, diagnostics, expectedReturnType, bodyClasses);
                 }
+                auto elseClasses = classTypes.copy();
                 if (statement.elseBranch !is null)
                 {
                     auto nestedVariables = variables.dup;
-                    checkStatements([statement.elseBranch], nestedVariables, functions, diagnostics, expectedReturnType, classTypes.copy());
+                    checkStatements([statement.elseBranch], nestedVariables, functions, diagnostics, expectedReturnType, elseClasses);
+                }
+                bool condition;
+                auto known = knownCondition(statement.condition, condition);
+                bool emptyIteration;
+                if (statement.kind == Statement.Kind.foreach_)
+                {
+                    if (statement.iterable.kind == Expression.Kind.array && statement.rangeEnd is null)
+                        emptyIteration = (cast(ArrayExpression) statement.iterable).elements.length == 0;
+                    else if (statement.rangeEnd !is null && statement.iterable.kind == Expression.Kind.literal
+                        && statement.rangeEnd.kind == Expression.Kind.literal)
+                    {
+                        auto start = (cast(LiteralExpression) statement.iterable).value;
+                        auto end = (cast(LiteralExpression) statement.rangeEnd).value;
+                        emptyIteration = start.kind == ValueKind.integer && end.kind == ValueKind.integer
+                            && start.integerValue >= end.integerValue;
+                    }
+                }
+                if ((!known || condition) && !emptyIteration) classTypes.intersect(bodyClasses);
+                if (statement.kind == Statement.Kind.if_ && (!known || !condition))
+                    classTypes.intersect(elseClasses);
+                break;
+            case Statement.Kind.switch_:
+                inferExpressionType(statement.expression, variables, functions, diagnostics, classTypes);
+                auto incomingClasses = classTypes.copy();
+                auto knownSwitch = statement.expression.kind == Expression.Kind.literal;
+                foreach (arm; statement.switchCases)
+                    if (!arm.isDefault && arm.pattern.kind != Expression.Kind.literal) knownSwitch = false;
+                bool selected;
+                foreach (arm; statement.switchCases)
+                {
+                    auto armClasses = incomingClasses.copy();
+                    auto armVariables = variables.dup;
+                    checkStatements(arm.body, armVariables, functions, diagnostics, expectedReturnType, armClasses);
+                    auto reachable = !knownSwitch || (!selected && (arm.isDefault || valuesEqual(
+                        (cast(LiteralExpression) statement.expression).value,
+                        (cast(LiteralExpression) arm.pattern).value)));
+                    if (reachable) { classTypes.intersect(armClasses); selected = true; }
                 }
                 break;
             case Statement.Kind.try_:
                 auto tryVariables = variables.dup;
-                checkStatements(statement.body, tryVariables, functions, diagnostics, expectedReturnType, classTypes.copy());
+                auto tryClasses = classTypes.copy();
+                checkStatements(statement.body, tryVariables, functions, diagnostics, expectedReturnType, tryClasses);
                 auto catchVariables = variables.dup;
                 catchVariables[statement.name] = "table";
-                checkStatements(statement.elseBranch.body, catchVariables, functions, diagnostics, expectedReturnType, classTypes.copy());
+                auto catchClasses = tryClasses.copy();
+                checkStatements(statement.elseBranch.body, catchVariables, functions, diagnostics, expectedReturnType, catchClasses);
+                classTypes.intersect(tryClasses);
+                classTypes.intersect(catchClasses);
                 break;
             case Statement.Kind.expression:
                 inferExpressionType(statement.expression, variables, functions, diagnostics, classTypes);
