@@ -13,7 +13,8 @@
   "main": "./extension.js",
   "activationEvents": [
     "onLanguage:dua",
-    "workspaceContains:.dua-diagnostics/*.json"
+    "workspaceContains:.dua-diagnostics/*.json",
+    "onStartupFinished"
   ],
   "scripts": {
     "build:checker": "node scripts/build-checker.js",

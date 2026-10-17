@@ -81,3 +81,8 @@ test('extension debounces checks, drops stale responses, clears closed files and
   for (const subscription of context.subscriptions) subscription.dispose();
   delete require.cache[file];
 });
+
+test('startup activation installs the inbox watcher before the first external scene run', () => {
+  const manifest = require('../package.json');
+  assert.ok(manifest.activationEvents.includes('onStartupFinished'));
+});

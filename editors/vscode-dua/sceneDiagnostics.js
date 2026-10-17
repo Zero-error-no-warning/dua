@@ -25,14 +25,29 @@ function position(source, line, column) {
   return bytes === column - 1 ? { line: line - 1, character } : null;
 }
 
+async function canonicalOpenSources(openSources) {
+  const resolved = await Promise.all([...openSources].map(async ([file, source]) => {
+    try { return [key(await fs.realpath(file)), source]; } catch { return null; }
+  }));
+  const sources = new Map();
+  for (const view of resolved) if (view) {
+    const [id, source] = view;
+    // Two open aliases with different buffers cannot share a proven location.
+    if (!sources.has(id)) sources.set(id, source);
+    else if (sources.get(id) !== source) sources.set(id, null);
+  }
+  return sources;
+}
+
 // Only JSON and source text are read. No script evaluation or subprocesses.
-async function materialize(data, root, openSources = new Map()) {
+async function materialize(data, root, openSources = new Map(), resolvedOpenSources) {
   if (!data || data.schemaVersion !== 1 || data.producer !== 'ZsD'
     || !validScope(data.scopeId) || typeof data.runId !== 'string'
     || typeof data.sceneId !== 'string' || !Array.isArray(data.diagnostics) || data.diagnostics.length > 256)
     throw new Error('Invalid scene diagnostic snapshot');
-  const entries = [], output = [], seen = new Set(), sources = new Map();
+  const entries = [], output = [], seen = new Set(), realSeen = new Set(), sources = new Map();
   const realRoot = await fs.realpath(root);
+  const openByReal = resolvedOpenSources || await canonicalOpenSources(openSources);
   for (const item of data.diagnostics) {
     if (!item || typeof item.message !== 'string' || !item.message || item.message.length > 16384) continue;
     const message = `[${data.sceneId} / ${data.runId}] ${item.message}`;
@@ -43,9 +58,10 @@ async function materialize(data, root, openSources = new Map()) {
     try {
       const realFile = await fs.realpath(file);
       if (!resolveFile(realRoot, realFile)) { output.push(message); continue; }
-      const id = key(file);
+      const id = key(realFile), realIdentity = JSON.stringify([id, item.line, item.column, item.message]);
+      if (realSeen.has(realIdentity)) continue; realSeen.add(realIdentity);
       if (!sources.has(id)) {
-        if (openSources.has(id)) sources.set(id, openSources.get(id));
+        if (openByReal.has(id)) sources.set(id, openByReal.get(id));
         else {
           const stat = await fs.stat(realFile);
           if (stat.size > 1024 * 1024) throw new Error('Source exceeds diagnostic size limit');
@@ -53,10 +69,11 @@ async function materialize(data, root, openSources = new Map()) {
         }
       }
       const source = sources.get(id);
-      if (hash(source) !== item.sourceHash.toLowerCase()) { output.push(`${message} (source changed; rerun the scene)`); continue; }
+      if (typeof source !== 'string' || Buffer.byteLength(source, 'utf8') > 1024 * 1024
+        || hash(source) !== item.sourceHash.toLowerCase()) { output.push(`${message} (source changed; rerun the scene)`); continue; }
       const start = position(source, item.line, item.column);
       if (!start) { output.push(message); continue; }
-      entries.push({ file, start, message: item.message, severity: ['error', 'warning', 'information', 'hint'].includes(item.severity) ? item.severity : 'error',
+      entries.push({ file: realFile, start, message: item.message, severity: ['error', 'warning', 'information', 'hint'].includes(item.severity) ? item.severity : 'error',
         scopeId: data.scopeId, runId: data.runId, sceneId: data.sceneId });
     } catch { output.push(message); }
   }
@@ -92,6 +109,7 @@ function activateSceneDiagnostics(vscode, context, output) {
   async function refresh() {
     const current = ++generation, next = new Map();
     const open = new Map(vscode.workspace.textDocuments.filter(d => d.uri.scheme === 'file').map(d => [key(d.uri.fsPath), d.getText()]));
+    const openByReal = await canonicalOpenSources(open);
     for (const folder of vscode.workspace.workspaceFolders || []) {
       if (folder.uri.scheme !== 'file') continue;
       const root = folder.uri.fsPath, directory = path.join(root, '.dua-diagnostics');
@@ -111,7 +129,7 @@ function activateSceneDiagnostics(vscode, context, output) {
             const data = JSON.parse(await fs.readFile(realFile, 'utf8'));
             if (!validScope(data?.scopeId) || name !== `${data.scopeId}.json`)
               throw new Error('Scene diagnostic filename does not match its scope');
-            const result = await materialize(data, root, open);
+            const result = await materialize(data, root, open, openByReal);
             result.output.forEach(log);
             next.set(key(filename), result);
           } catch { log(`Ignored malformed or unavailable diagnostic file: ${name}`); }
@@ -125,9 +143,9 @@ function activateSceneDiagnostics(vscode, context, output) {
   function sourceChanged(event) {
     const uri = event?.document?.uri || event?.uri || event;
     if (uri?.scheme === 'file') {
-      const id = key(uri.fsPath);
-      for (const snapshot of snapshots.values()) snapshot.entries = snapshot.entries.filter(e => key(e.file) !== id);
-      collection.delete(uri);
+      // Resolving junctions is async. Clear our collection now, then rebuild by
+      // canonical identity; otherwise another alias can retain an old squiggle.
+      snapshots.clear(); collection.clear();
     }
     schedule();
   }

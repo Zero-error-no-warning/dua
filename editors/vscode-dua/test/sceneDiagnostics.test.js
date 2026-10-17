@@ -202,3 +202,57 @@ test('source and inbox directory junctions outside the workspace are never read 
     assert.equal(editor.values.size, 0);
   } finally { fs.readFile = originalRead; fs.readdir = originalReaddir; editor?.dispose(); }
 }));
+
+test('canonical source identity detects dirty junction aliases in either direction', () => fixture(async ({ root, source, data, item }) => {
+  const actual = path.join(root, 'actual'), linked = path.join(root, 'linked');
+  await fs.mkdir(actual); const directFile = path.join(actual, 'actor.dua'); await fs.writeFile(directFile, source);
+  await fs.symlink(actual, linked, process.platform === 'win32' ? 'junction' : 'dir');
+  const aliasFile = path.join(linked, 'actor.dua'), canonical = await fs.realpath(directFile);
+  for (const [diagnosticFile, openFile] of [['linked/actor.dua', directFile], ['actual/actor.dua', aliasFile]]) {
+    const snapshot = { ...data, diagnostics: [{ ...item, file: diagnosticFile }] };
+    const dirty = new Map([[fileKey(openFile), '\n' + source]]);
+    const invalid = await materialize(snapshot, root, dirty);
+    assert.equal(invalid.entries.length, 0, `${diagnosticFile} must use the alias's dirty buffer`);
+    assert.equal(invalid.output.length, 1);
+    const matching = await materialize(snapshot, root, new Map([[fileKey(openFile), source]]));
+    assert.equal(matching.entries.length, 1);
+    assert.equal(fileKey(matching.entries[0].file), fileKey(canonical), 'publish only the canonical URI');
+  }
+  const conflicting = new Map([[fileKey(directFile), source], [fileKey(aliasFile), '\n' + source]]);
+  assert.equal((await materialize({ ...data, diagnostics: [{ ...item, file: 'actual/actor.dua' }] }, root, conflicting)).entries.length, 0);
+  const deduplicated = await materialize({ ...data, diagnostics: [
+    { ...item, file: 'actual/actor.dua' }, { ...item, file: 'linked/actor.dua' }
+  ] }, root);
+  assert.equal(deduplicated.entries.length, 1, 'aliases must not duplicate one physical error');
+}));
+
+test('junction and direct document edits both immediately clear old runtime URIs before canonical revalidation', () => fixture(async ({ root, source, file, data, item }) => {
+  const actual = path.join(root, 'actual'), linked = path.join(root, 'linked');
+  await fs.mkdir(actual); const directFile = path.join(actual, 'actor.dua'); await fs.writeFile(directFile, source);
+  await fs.symlink(actual, linked, process.platform === 'win32' ? 'junction' : 'dir');
+  const aliasFile = path.join(linked, 'actor.dua'), canonical = await fs.realpath(directFile);
+  await writeInbox(root, { ...data, diagnostics: [{ ...item, file: 'linked/actor.dua' }] });
+  await writeInbox(root, { ...data, scopeId: 'scene-b' });
+  const editor = mockEditor(root);
+  try {
+    await until(() => editor.values.has(fileKey(canonical)) && editor.values.has(fileKey(file)), 'initial canonical diagnostics');
+    assert.equal(editor.values.has(fileKey(aliasFile)), false);
+    for (const documentFile of [aliasFile, directFile]) {
+      const document = { uri: editor.uri(documentFile), text: '\n' + source, getText() { return this.text; } };
+      editor.documents.push(document); editor.opens.fire(document);
+      assert.equal(editor.values.size, 0, 'opening an alias clears runtime diagnostics before resolving the path');
+      await editor.settle();
+      assert.equal(editor.values.has(fileKey(canonical)), false);
+      assert.equal(editor.values.has(fileKey(aliasFile)), false);
+      assert.equal(editor.values.has(fileKey(file)), true, 'other runtime scopes return after revalidation');
+      document.text = source; editor.changes.fire({ document }); await editor.settle();
+      assert.equal(editor.values.has(fileKey(canonical)), true);
+      document.text = '\n' + source; editor.changes.fire({ document });
+      assert.equal(editor.values.size, 0, 'editing either URI clears every old runtime alias immediately');
+      await editor.settle(); assert.equal(editor.values.has(fileKey(canonical)), false);
+      editor.documents.splice(editor.documents.indexOf(document), 1); editor.closes.fire(document); await editor.settle();
+      assert.equal(editor.values.has(fileKey(canonical)), true);
+      assert.deepEqual([...editor.unrelated], [['other', 'keep']], 'other extensions never clear');
+    }
+  } finally { editor.dispose(); }
+}));
