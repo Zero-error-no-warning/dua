@@ -43,6 +43,9 @@ mixin template AutoBindingAPI()
 {
     void bindAuto(T)(string name, auto ref T value)
     {
+        // 型情報は値がnullでも登録します。bindだけを提供するfacadeにも対応します。
+        static if (__traits(compiles, registerHostType!T()))
+            registerHostType!T();
         static if (is(T == Value))
             bind(name, value);
         else static if (isAggregateType!T)
@@ -70,11 +73,17 @@ mixin template FunctionBindingAPI()
                 __traits(getOverloads, __traits(parent, FUN), __traits(identifier, FUN)))
             {
                 static if (__traits(compiles, makeStaticReflectedCallable!overload(name)))
+                {
+                    static if (__traits(compiles, registerHostType!(typeof(&overload))()))
+                        registerHostType!(typeof(&overload))();
                     overloads ~= makeStaticReflectedCallable!overload(name);
+                }
             }
         }
         else static if (__traits(compiles, makeAliasReflectedCallable!FUN(name)))
         {
+            static if (__traits(compiles, registerHostType!(typeof(FUN))()))
+                registerHostType!(typeof(FUN))();
             overloads ~= makeAliasReflectedCallable!FUN(name);
         }
         else
@@ -93,6 +102,8 @@ mixin template FunctionBindingAPI()
     void bindFunc(C)(string name, auto ref C callable)
         if (dua.binding.isHostCallable!C)
     {
+        static if (__traits(compiles, registerHostType!C()))
+            registerHostType!C();
         bind(name, Value.fromFunction(makeReflectedCallable(name, callable)));
     }
 }
