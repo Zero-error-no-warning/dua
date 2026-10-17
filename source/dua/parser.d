@@ -1,5 +1,6 @@
 module dua.parser;
 
+import dua.execution : locatedException, scriptDiagnostic;
 import dua.ast;
 import dua.lexer : Token, TokenKind, lex;
 import dua.value : Value;
@@ -148,15 +149,19 @@ private struct Parser
     {
         auto statements = appender!(Statement[])();
         bool hasInstanceDeclarations;
+        Statement firstInstanceDeclaration;
         while (!check(TokenKind.eof))
         {
             auto statement = parseStatement();
             hasInstanceDeclarations |= statement.isInstance || statement.isInstanceBlock;
+            if(firstInstanceDeclaration is null && (statement.isInstance || statement.isInstanceBlock))
+                firstInstanceDeclaration=statement;
             if (statement.isInstanceBlock) statements.put(statement.body);
             else statements.put(statement);
         }
         auto program = new Program(statements.data);
         program.hasInstanceDeclarations = hasInstanceDeclarations;
+        program.firstInstanceDeclaration = firstInstanceDeclaration;
         return program;
     }
 
@@ -174,11 +179,11 @@ private struct Parser
         {
             bool exported = match(TokenKind.keywordExport);
             auto start = consume(TokenKind.keywordInstance, "Expected instance");
-            enforce(statementDepth == 1,
-                format("instance is only allowed at module top level at %s:%s", start.line, start.column));
+            requireLocated(statementDepth == 1,
+                format("instance is only allowed at module top level at %s:%s", start.line, start.column), start.line, start.column);
             if (match(TokenKind.leftBrace))
             {
-                enforce(!exported, "export instance block is not supported");
+                requireLocated(!exported, "export instance block is not supported", start.line, start.column);
                 auto block = locatedStatement(Statement.Kind.block, start);
                 block.isInstanceBlock = true;
                 block.body = parseBlockTail();
@@ -188,8 +193,8 @@ private struct Parser
             auto declaration = parseStatementCore();
             markInstance(declaration);
             declaration.isExported |= exported;
-            enforce(!declaration.isExported || declaration.kind == Statement.Kind.variableDecl,
-                format("instance import cannot have an export modifier at %s:%s", start.line, start.column));
+            requireLocated(!declaration.isExported || declaration.kind == Statement.Kind.variableDecl,
+                format("instance import cannot have an export modifier at %s:%s", start.line, start.column), start.line, start.column);
             return declaration;
         }
         // `table` remains an ordinary identifier outside declaration context
@@ -243,7 +248,7 @@ private struct Parser
 
         if (match(TokenKind.leftBrace))
         {
-            enforce(!exportPrefix, "export block is not supported");
+            requireLocated(!exportPrefix, "export block is not supported", previous().line, previous().column);
             auto statement = locatedStatement(Statement.Kind.block, previous());
             statement.body = parseBlockTail();
             return statement;
@@ -440,8 +445,8 @@ private struct Parser
             statement.iterable = parseExpression();
             if (match(TokenKind.dotDot))
             {
-                enforce(statement.iteratorSecondName.length == 0,
-                    "Range foreach expects a single iterator variable");
+                requireLocated(statement.iteratorSecondName.length == 0,
+                    "Range foreach expects a single iterator variable", previous().line, previous().column);
                 statement.rangeEnd = parseExpression();
             }
             consume(TokenKind.rightParen, "Expected ')' after foreach clauses");
@@ -474,7 +479,7 @@ private struct Parser
                     continue;
                 }
                 auto token = peek();
-                enforce(false, format("Expected case/default in switch at %s:%s", token.line, token.column));
+                throw locatedException(format("Expected case/default in switch at %s:%s", token.line, token.column), token.line, token.column);
             }
 
             consume(TokenKind.rightBrace, "Expected '}' after switch body");
@@ -504,15 +509,15 @@ private struct Parser
             statement.targets = targets.data;
             statement.target = statement.targets[0];
             statement.expressions = parseExpressionList();
-            enforce(!statement.assignmentOperator.length || statement.expressions.length == 1,
-                "Compound assignment requires a single right-hand expression");
+            requireLocated(!statement.assignmentOperator.length || statement.expressions.length == 1,
+                "Compound assignment requires a single right-hand expression", statement.line, statement.column);
             statement.expression = statement.expressions[0];
             consume(TokenKind.semicolon, "Expected ';' after assignment");
             return statement;
         }
 
         auto statement = locatedStatement(Statement.Kind.expression, Token(TokenKind.eof, "", target.line, target.column));
-        enforce(targets.data.length == 1, "Comma-separated expressions require assignment");
+        requireLocated(targets.data.length == 1, "Comma-separated expressions require assignment", target.line, target.column);
         statement.expression = target;
         consume(TokenKind.semicolon, "Expected ';' after expression");
         return statement;
@@ -531,7 +536,7 @@ private struct Parser
         {
             if (match(TokenKind.ellipsis))
             {
-                enforce(allowBases, "Struct declarations do not support table spread bases");
+                requireLocated(allowBases, "Struct declarations do not support table spread bases", previous().line, previous().column);
                 bases.put(consume(TokenKind.identifier, "Expected base table type after '...'").lexeme);
             }
             else
@@ -637,7 +642,7 @@ private struct Parser
         }
 
         auto token = peek();
-        enforce(false, format("Expected table key at %s:%s", token.line, token.column));
+        throw locatedException(format("Expected table key at %s:%s", token.line, token.column), token.line, token.column);
         assert(0);
     }
 
@@ -992,7 +997,7 @@ private struct Parser
         }
 
         auto token = peek();
-        enforce(false, format("Unexpected token %s at %s:%s", token.kind, token.line, token.column));
+        throw locatedException(format("Unexpected token %s at %s:%s", token.kind, token.line, token.column), token.line, token.column);
         assert(0);
     }
 
@@ -1024,7 +1029,7 @@ private struct Parser
 
                 auto end = findInterpolationEnd(stringToken.lexeme, cursor + 2, prefixToken);
                 auto embedded = stringToken.lexeme[cursor + 2 .. end];
-                auto embeddedExpressions = parseInterpolationExpressionSequence(embedded, prefixToken);
+                auto embeddedExpressions = parseInterpolationExpressionSequence(embedded, prefixToken, stringToken.line, stringToken.column + cursor + 3);
                 foreach (expression; embeddedExpressions)
                 {
                     // Convert each value before concatenation, including a lone
@@ -1072,13 +1077,25 @@ private struct Parser
         return literal;
     }
 
-    Expression[] parseInterpolationExpressionSequence(string source, Token contextToken)
+    Expression[] parseInterpolationExpressionSequence(string source, Token contextToken, size_t baseLine, size_t baseColumn)
     {
-        auto embeddedTokens = lex(source);
+        Token[] embeddedTokens;
+        try{embeddedTokens=lex(source);}
+        catch(Exception error){
+            auto diagnostic=scriptDiagnostic(error);
+            if(diagnostic.line)throw locatedException(error.msg,baseLine+diagnostic.line-1,
+                diagnostic.line==1 ? baseColumn+diagnostic.column-1 : diagnostic.column);
+            throw error;
+        }
+        foreach(ref token;embeddedTokens){if(token.line==1)token.column+=baseColumn-1;token.line+=baseLine-1;}
         auto embeddedParser = Parser(embeddedTokens, 0);
         auto expressions = embeddedParser.parseExpressionList();
-        enforce(embeddedParser.check(TokenKind.eof),
-            format("Unexpected token in interpolation expression at %s:%s", contextToken.line, contextToken.column));
+        if (!embeddedParser.check(TokenKind.eof))
+        {
+            auto unexpected = embeddedParser.peek();
+            throw locatedException(format("Unexpected token in interpolation expression at %s:%s",
+                unexpected.line, unexpected.column), unexpected.line, unexpected.column);
+        }
         return expressions;
     }
 
@@ -1137,7 +1154,7 @@ private struct Parser
             ++cursor;
         }
 
-        enforce(false, format("Unterminated interpolation sequence at %s:%s", token.line, token.column));
+        throw locatedException(format("Unterminated interpolation sequence at %s:%s", token.line, token.column), token.line, token.column);
         assert(0);
     }
 
@@ -1356,21 +1373,21 @@ private struct Parser
 
     void markInstance(Statement statement)
     {
-        enforce(!statement.isInstance && (statement.kind == Statement.Kind.variableDecl || statement.kind == Statement.Kind.import_),
+        requireLocated(!statement.isInstance && (statement.kind == Statement.Kind.variableDecl || statement.kind == Statement.Kind.import_),
             format("instance supports only variable and import declarations at %s:%s",
-                statement.line, statement.column));
+                statement.line, statement.column), statement.line, statement.column);
         statement.isInstance = true;
     }
 
     void setAssignmentOperator(Statement statement, Token token, Expression[] targets)
     {
         if (token.kind != TokenKind.compoundAssign) return;
-        enforce(targets.length == 1,
-            format("Compound assignment requires a single target at %s:%s", token.line, token.column));
+        requireLocated(targets.length == 1,
+            format("Compound assignment requires a single target at %s:%s", token.line, token.column), token.line, token.column);
         auto target = targets[0];
-        enforce(target.kind == Expression.Kind.variable || target.kind == Expression.Kind.get
+        requireLocated(target.kind == Expression.Kind.variable || target.kind == Expression.Kind.get
             || (target.kind == Expression.Kind.index && !(cast(IndexExpression) target).isSlice),
-            format("Invalid compound assignment target at %s:%s", target.line, target.column));
+            format("Invalid compound assignment target at %s:%s", target.line, target.column), target.line, target.column);
         statement.assignmentOperator = token.lexeme[0 .. $ - 1];
     }
 
@@ -1443,7 +1460,7 @@ private struct Parser
             return advance();
         }
         auto token = peek();
-        enforce(false, format("%s at %s:%s", message, token.line, token.column));
+        throw locatedException(format("%s at %s:%s", message, token.line, token.column), token.line, token.column);
         assert(0);
     }
 
@@ -1527,7 +1544,12 @@ private struct Parser
             return advance();
         }
         auto token = peek();
-        enforce(false, format("%s at %s:%s", message, token.line, token.column));
+        throw locatedException(format("%s at %s:%s", message, token.line, token.column), token.line, token.column);
         assert(0);
     }
+}
+
+// パーサが既に持つ位置を構造化例外に残し、メッセージからの推測を避けます。
+private void requireLocated(bool condition,string message,size_t line,size_t column){
+    if(!condition)throw locatedException(message,line,column);
 }

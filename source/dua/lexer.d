@@ -1,4 +1,5 @@
 module dua.lexer;
+import dua.execution : locatedException;
 
 import std.array : appender;
 import std.ascii : isAlpha, isAlphaNum, isDigit;
@@ -164,7 +165,7 @@ Token[] lex(string source)
                 ++index;
                 ++column;
             }
-            enforce(nesting == 0, format("Unterminated block comment at %s:%s", startLine, startColumn));
+            if(nesting != 0)throw locatedException(format("Unterminated block comment at %s:%s", startLine, startColumn),startLine,startColumn);
             continue;
         }
         if (isAlpha(current) || current == '_')
@@ -207,11 +208,11 @@ Token[] lex(string source)
             auto start = index;
             while (index < source.length && source[index] != '"')
             {
-                enforce(source[index] != '\n', format("Unterminated string at %s:%s", line, startColumn));
+                if(source[index] == '\n')throw locatedException(format("Unterminated string at %s:%s", line, startColumn),line,startColumn);
                 ++index;
                 ++column;
             }
-            enforce(index < source.length, format("Unterminated string at %s:%s", line, startColumn));
+            if(index >= source.length)throw locatedException(format("Unterminated string at %s:%s", line, startColumn),line,startColumn);
             auto text = source[start .. index];
             ++index;
             ++column;
@@ -378,7 +379,7 @@ Token[] lex(string source)
                 break;
         }
 
-        enforce(consumed, format("Unexpected character '%s' at %s:%s", current.to!string, line, column));
+        if(!consumed)throw locatedException(format("Unexpected character '%s' at %s:%s", current.to!string, line, column),line,column);
         // Extend only the arithmetic, concatenation, bitwise and shift tokens.
         switch (kind)
         {

@@ -75,6 +75,8 @@ struct EvaluatorContext
 {
     package string moduleName;
     package string sourceName;
+    package string sourceText;
+    package bool hasSourceText;
     package EvaluationStack!string callStack;
     package string[] lastErrorStack;
     package EvaluationStack!long indexLengthStack;
@@ -473,9 +475,9 @@ mixin template EvaluatorImplementation()
 
     private ExecutionResult executeStatement(Statement statement, Environment environment)
     {
-        consumeStep();
         try
         {
+            consumeStep();
             ExecutionResult result;
             enforce(!statement.isInstance || environment.initializingModule,
                 "instance is only allowed in a source module's top-level declarations");
@@ -843,7 +845,7 @@ mixin template EvaluatorImplementation()
         catch (Exception error)
         {
             auto location = statementLocation(statement);
-            throw withSourceContext(error, evaluatorContext.sourceName, location, "statement");
+            throw withSourceContext(error, evaluatorContext.sourceName, location, "statement", statement is null ? 0 : statement.line, statement is null ? 0 : statement.column);
         }
     }
 
@@ -1006,15 +1008,15 @@ mixin template EvaluatorImplementation()
         catch (Exception error)
         {
             auto location = expressionLocation(target);
-            throw withSourceContext(error, evaluatorContext.sourceName, location, "assignment");
+            throw withSourceContext(error, evaluatorContext.sourceName, location, "assignment", target is null ? 0 : target.line, target is null ? 0 : target.column);
         }
     }
 
     private Value evaluate(Expression expression, Environment environment)
     {
-        consumeStep();
         try
         {
+            consumeStep();
             final switch (expression.kind)
             {
                 case Expression.Kind.literal:
@@ -1238,7 +1240,7 @@ mixin template EvaluatorImplementation()
         catch (Exception error)
         {
             auto location = expressionLocation(expression);
-            throw withSourceContext(error, evaluatorContext.sourceName, location, "expression");
+            throw withSourceContext(error, evaluatorContext.sourceName, location, "expression", expression is null ? 0 : expression.line, expression is null ? 0 : expression.column);
         }
     }
 
@@ -1398,17 +1400,25 @@ mixin template EvaluatorImplementation()
     }
 
     private Exception withSourceContext(Exception error, string sourceName,
-        string location = "", string context = "source")
+        string location = "", string context = "source", size_t line = 0, size_t column = 0)
     {
         auto contextual = cast(SourceException) error;
         if (contextual !is null && contextual.hasSourceContext)
             return error;
-        if (contextual is null)
+        if (contextual is null){
             contextual = new SourceException(error.msg, error);
+            auto nested=scriptDiagnostic(error);
+            if(nested.sourceName.length){contextual.diagnostic=nested;contextual.hasSourceContext=true;return contextual;}
+            if(nested.line)contextual.diagnostic=nested;
+        }
+        if(!contextual.diagnostic.sourceName.length)contextual.diagnostic.sourceName=sourceName;
+        if(!contextual.diagnostic.line){contextual.diagnostic.line=line;contextual.diagnostic.column=column;}
         auto origin = sourceName.length > 0 ? sourceName : "<global>";
         if (location.length > 0) origin ~= ":" ~ location;
         contextual.msg = format("[%s @ %s] %s", context, origin, error.msg);
         contextual.hasSourceContext = true;
+        if(evaluatorContext.hasSourceText && contextual.diagnostic.sourceName==evaluatorContext.sourceName)
+            withDiagnosticSource(contextual,evaluatorContext.sourceName,evaluatorContext.sourceText);
         return contextual;
     }
 
