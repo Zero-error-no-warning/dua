@@ -3,13 +3,17 @@ module dua.type_effects;
 // null適合に関係する型定義だけを抽象実行します。ホスト関数は実行しません。
 import dua.ast;
 import dua.value : ValueKind, valuesEqual;
+import dua.type_syntax : isBuiltinTypeName, splitContainerType;
 import std.algorithm : canFind;
 import std.exception : enforce;
+import std.meta : AliasSeq;
 
-private class Symbol { Scope owner; Function declaration; this(Scope owner) { this.owner = owner; } }
+private class Symbol { Scope owner; Function declaration; string type; this(Scope owner) { this.owner = owner; } }
 private class Scope
 {
     Scope parent;
+    bool functionScope;
+    string returnType;
     Symbol[string] symbols;
     Symbol declare(string name)
     {
@@ -67,6 +71,8 @@ private class Function
     AstNode node;
     Scope closure, environment;
     string[] parameters;
+    string[] parameterTypes;
+    bool variadic;
     Statement[] body;
     State defaultState;
     bool[string] normalRemovals, throwRemovals;
@@ -159,10 +165,48 @@ package(dua) final class TypeEffects
         if (auto found = node in functions) return *found;
         auto fn = new Function; fn.node = node; fn.closure = closure;
         functions[node] = fn; functionOrder ~= fn;
-        if (auto statement = cast(Statement) node) { fn.parameters = statement.parameters; fn.body = statement.body; }
-        else { auto expression = cast(FunctionExpression) node; fn.parameters = expression.parameters; fn.body = expression.body; }
+        string returnType;
+        if (auto statement = cast(Statement) node)
+        { fn.parameters = statement.parameters; fn.parameterTypes = statement.parameterTypes; fn.variadic = statement.variadic; fn.body = statement.body; returnType = statement.returnType; }
+        else
+        { auto expression = cast(FunctionExpression) node; fn.parameters = expression.parameters; fn.parameterTypes = expression.parameterTypes; fn.variadic = expression.variadic; fn.body = expression.body; returnType = expression.returnType; }
         fn.environment = scopeFor(node, closure, fn.body, fn.parameters);
+        fn.environment.functionScope = true; fn.environment.returnType = returnType;
         return fn;
+    }
+    // 値を実行せず、リテラルから安全と分かる検証だけを例外経路から除きます。
+    private static bool validationCanThrow(string type, Expression value, State state)
+    {
+        if (!type.length || type == "any" || type == "auto") return false;
+        if (value !is null && value.kind != Expression.Kind.literal) return true;
+        auto literal = value is null ? null : cast(LiteralExpression) value;
+        auto kind = literal is null ? ValueKind.null_ : literal.value.kind;
+        if (kind == ValueKind.null_)
+            return type != "null" && type != "void" && (isBuiltinTypeName(type) || type !in state.nullable);
+        switch (type)
+        {
+            static foreach (T; AliasSeq!(byte, ubyte, short, ushort, uint))
+                case T.stringof: return kind != ValueKind.integer || literal.value.integerValue < T.min || literal.value.integerValue > T.max;
+            case "ulong": return kind != ValueKind.integer || literal.value.integerValue < 0;
+            case "int", "long": return kind != ValueKind.integer;
+            case "double", "float", "real": return kind != ValueKind.floating;
+            case "bool": return kind != ValueKind.boolean;
+            case "string": return kind != ValueKind.string_;
+            default: return true;
+        }
+    }
+    private static bool binaryCanThrow(BinaryExpression binary)
+    {
+        if (binary.operatorSymbol == "&&" || binary.operatorSymbol == "||") return false;
+        if (binary.operatorSymbol == "is" && binary.right.kind == Expression.Kind.variable
+            && isBuiltinTypeName((cast(VariableExpression) binary.right).name)) return false;
+        if (binary.left.kind != Expression.Kind.literal || binary.right.kind != Expression.Kind.literal) return true;
+        if (["==", "!=", "~"].canFind(binary.operatorSymbol)) return false;
+        auto a = (cast(LiteralExpression) binary.left).value, b = (cast(LiteralExpression) binary.right).value;
+        auto numeric = (a.kind == ValueKind.integer || a.kind == ValueKind.floating)
+            && (b.kind == ValueKind.integer || b.kind == ValueKind.floating);
+        if (binary.operatorSymbol == "%") return !numeric || b.toInt() == 0;
+        return !numeric;
     }
     private static bool literalCondition(Expression expression, out bool value)
     {
@@ -201,6 +245,8 @@ package(dua) final class TypeEffects
         foreach (index, name; fn.parameters)
             state.bindings[fn.environment.declare(name)] = index < arguments.length ? arguments[index] : Targets.init;
         auto result = statements(fn.body, fn.environment, state, mode);
+        if (result.normal !is null && validationCanThrow(fn.environment.returnType, null, result.normal))
+            result.thrown = join(result.thrown, result.normal);
         auto normal = join(join(result.normal, result.returned), join(result.broke, result.continued));
         foreach (name; caller.nullable.byKey)
         {
@@ -229,6 +275,7 @@ package(dua) final class TypeEffects
             case Expression.Kind.variable:
                 auto symbol = environment.find((cast(VariableExpression) node).name);
                 if (symbol !is null) result.value = state.bindings.get(symbol, Targets.init);
+                if (symbol is null || symbol !in state.bindings) result.thrown = state.copy();
                 break;
             case Expression.Kind.function_:
                 auto fn = functionFor(node, environment); fn.defaultState = state.copy();
@@ -261,6 +308,12 @@ package(dua) final class TypeEffects
                 result.thrown = join(result.thrown, targets.unknown ? input : null);
                 foreach (fn; targets.known)
                 {
+                    auto required = fn.variadic && fn.parameters.length ? fn.parameters.length - 1 : fn.parameters.length;
+                    bool validation = fn.variadic ? arguments.length < required : arguments.length != required;
+                    foreach (index; 0 .. required)
+                        if (index < call.arguments.length && index < fn.parameterTypes.length)
+                            validation |= validationCanThrow(fn.parameterTypes[index], call.arguments[index], input);
+                    if (validation) result.thrown = join(result.thrown, input);
                     auto invoked = invoke(fn, input, arguments, mode);
                     result.normal = join(result.normal, invoked.normal);
                     result.thrown = join(result.thrown, invoked.thrown);
@@ -282,6 +335,7 @@ package(dua) final class TypeEffects
                     else expression(binary.right, environment, result.normal.copy(), Mode.dead);
                 }
                 else if (binary.operatorSymbol != "is") evaluateChild(binary.right);
+                if (binaryCanThrow(binary)) result.thrown = join(result.thrown, result.normal);
                 result.value = Targets.init; break;
             case Expression.Kind.ternary:
                 auto ternary = cast(TernaryExpression) node;
@@ -293,23 +347,49 @@ package(dua) final class TypeEffects
                 result.normal = known ? (condition ? a.normal : b.normal) : join(a.normal, b.normal);
                 result.thrown = join(result.thrown, known ? (condition ? a.thrown : b.thrown) : join(a.thrown, b.thrown));
                 result.value = known ? (condition ? a.value : b.value) : unite(a.value, b.value); break;
-            case Expression.Kind.unary: evaluateChild((cast(UnaryExpression) node).operand); result.value = Targets.init; break;
-            case Expression.Kind.cast_: evaluateChild((cast(CastExpression) node).operand); break;
+            case Expression.Kind.unary:
+                auto unary = cast(UnaryExpression) node;
+                evaluateChild(unary.operand);
+                if ((unary.operatorSymbol != "!" && unary.operatorSymbol != "-")
+                    || unary.operand is null || unary.operand.kind != Expression.Kind.literal
+                    || (unary.operatorSymbol != "!" && (cast(LiteralExpression) unary.operand).value.kind != ValueKind.integer
+                        && (cast(LiteralExpression) unary.operand).value.kind != ValueKind.floating))
+                    result.thrown = join(result.thrown, result.normal);
+                result.value = Targets.init; break;
+            case Expression.Kind.cast_:
+                auto conversion = cast(CastExpression) node;
+                evaluateChild(conversion.operand);
+                if (result.normal !is null && validationCanThrow(conversion.targetType, conversion.operand, result.normal))
+                    result.thrown = join(result.thrown, result.normal);
+                break;
             case Expression.Kind.array:
-                foreach (child; (cast(ArrayExpression) node).elements) evaluateChild(child);
+                auto array = cast(ArrayExpression) node;
+                foreach (index, child; array.elements)
+                {
+                    evaluateChild(child);
+                    if (index < array.elementSpreads.length && array.elementSpreads[index])
+                        result.thrown = join(result.thrown, result.normal);
+                }
                 result.value = Targets.init; break;
             case Expression.Kind.associativeArray:
                 auto array = cast(AssociativeArrayExpression) node;
                 foreach (index, key; array.keys) { evaluateChild(key); evaluateChild(array.values[index]); }
                 result.value = Targets.init; break;
             case Expression.Kind.table:
-                foreach (entry; (cast(TableExpression) node).entries) { evaluateChild(entry.keyExpression); evaluateChild(entry.value); }
+                foreach (entry; (cast(TableExpression) node).entries)
+                {
+                    evaluateChild(entry.keyExpression); evaluateChild(entry.value);
+                    if (entry.isSpread) result.thrown = join(result.thrown, result.normal);
+                }
                 result.value = Targets.init; break;
-            case Expression.Kind.get: evaluateChild((cast(GetExpression) node).target); result.value = Targets.init; break;
+            case Expression.Kind.get:
+                evaluateChild((cast(GetExpression) node).target);
+                result.thrown = join(result.thrown, result.normal); result.value = Targets.init; break;
             case Expression.Kind.index:
                 auto index = cast(IndexExpression) node; evaluateChild(index.target);
                 foreach (child; index.indices) evaluateChild(child);
-                evaluateChild(index.sliceStart); evaluateChild(index.sliceEnd); result.value = Targets.init; break;
+                evaluateChild(index.sliceStart); evaluateChild(index.sliceEnd);
+                result.thrown = join(result.thrown, result.normal); result.value = Targets.init; break;
         }
         record(after, node, result.normal, mode);
         return result;
@@ -352,9 +432,28 @@ package(dua) final class TypeEffects
                     result.normal = value.normal; result.thrown = join(result.thrown, value.thrown); values ~= value.value;
                 }
                 if (result.normal !is null) foreach (index, name; node.names)
-                    result.normal.bindings[environment.declare(name)] = index < values.length ? values[index] : Targets.init;
+                {
+                    auto symbol = environment.declare(name); symbol.type = node.declaredType;
+                    if (symbol in result.normal.bindings || validationCanThrow(node.declaredType,
+                        index < node.expressions.length ? node.expressions[index] : null, result.normal))
+                        result.thrown = join(result.thrown, result.normal);
+                    result.normal.bindings[symbol] = index < values.length ? values[index] : Targets.init;
+                }
                 break;
             case Statement.Kind.assign:
+                if (node.assignmentOperator.length)
+                {
+                    // compound targetは一度だけ、右辺より先に解決されます。
+                    evaluate(node.target);
+                    evaluate(node.expression);
+                    result.thrown = join(result.thrown, result.normal);
+                    if (result.normal !is null && node.target.kind == Expression.Kind.variable)
+                    {
+                        auto symbol = environment.find((cast(VariableExpression) node.target).name);
+                        if (symbol !is null) result.normal.bindings[symbol] = Targets.init;
+                    }
+                    break;
+                }
                 Targets[] values;
                 foreach (expr; node.expressions)
                 {
@@ -367,7 +466,11 @@ package(dua) final class TypeEffects
                     if (target.kind == Expression.Kind.variable)
                     {
                         auto name = (cast(VariableExpression) target).name;
-                        auto symbol = environment.find(name); if (symbol is null) symbol = environment.declare(name);
+                        auto symbol = environment.find(name);
+                        string element, key;
+                        if (symbol is null || symbol !in result.normal.bindings || splitContainerType(symbol.type, element, key))
+                            result.thrown = join(result.thrown, result.normal);
+                        if (symbol is null) symbol = environment.declare(name);
                         result.normal.bindings[symbol] = index < values.length ? values[index] : Targets.init;
                     }
                     else evaluate(target);
@@ -376,11 +479,20 @@ package(dua) final class TypeEffects
             case Statement.Kind.expression: evaluate(node.expression); break;
             case Statement.Kind.return_:
                 foreach (expr; node.expressions) evaluate(expr);
+                for (auto owner = environment; owner !is null; owner = owner.parent)
+                    if (owner.functionScope)
+                    {
+                        if (result.normal !is null && (node.expressions.length > 1 || validationCanThrow(owner.returnType,
+                            node.expressions.length ? node.expressions[0] : null, result.normal)))
+                            result.thrown = join(result.thrown, result.normal);
+                        break;
+                    }
                 result.returned = result.normal; result.normal = null; break;
             case Statement.Kind.break_: result.broke = state; result.normal = null; break;
             case Statement.Kind.continue_: result.continued = state; result.normal = null; break;
             case Statement.Kind.functionDecl:
                 auto fn = functionFor(node, environment);
+                if (environment.declare(node.name) in state.bindings) result.thrown = state.copy();
                 state.bindings[environment.declare(node.name)] = Targets([fn], false); fn.defaultState = state.copy(); break;
             case Statement.Kind.block:
                 result = statements(node.body, scopeFor(node, environment, node.body), state, mode); break;
@@ -401,33 +513,44 @@ package(dua) final class TypeEffects
             case Statement.Kind.switch_:
                 evaluate(node.expression);
                 if (result.normal is null) break;
-                auto input = result.normal; auto priorThrow = result.thrown;
-                auto known = node.expression.kind == Expression.Kind.literal;
-                foreach (arm; node.switchCases)
-                    if (!arm.isDefault && arm.pattern.kind != Expression.Kind.literal) known = false;
-                bool selected, hasDefault;
-                result = Flow.init;
+                auto remaining = result.normal;
+                auto priorThrow = result.thrown; result = Flow.init;
                 foreach (arm; node.switchCases)
                 {
-                    hasDefault |= arm.isDefault;
-                    auto reachable = !known || (!selected && (arm.isDefault || valuesEqual(
-                        (cast(LiteralExpression) node.expression).value, (cast(LiteralExpression) arm.pattern).value)));
-                    auto branch = statements(arm.body, scopeFor(arm, environment, arm.body), input.copy(), reachable ? mode : Mode.dead);
-                    if (reachable)
+                    if (remaining is null)
                     {
-                        branch.normal = join(branch.normal, branch.broke); branch.broke = null;
-                        result.absorb(branch); selected = true;
+                        expression(arm.pattern, environment, state.copy(), Mode.dead);
+                        statements(arm.body, scopeFor(arm, environment, arm.body), state.copy(), Mode.dead);
+                        continue;
                     }
+                    if (!arm.isDefault)
+                    {
+                        auto pattern = expression(arm.pattern, environment, remaining, mode);
+                        remaining = pattern.normal; result.thrown = join(result.thrown, pattern.thrown);
+                        if (remaining is null) continue;
+                    }
+                    auto known = arm.isDefault || (node.expression.kind == Expression.Kind.literal
+                        && arm.pattern.kind == Expression.Kind.literal);
+                    auto matches = arm.isDefault || (!known ? true : valuesEqual(
+                        (cast(LiteralExpression) node.expression).value, (cast(LiteralExpression) arm.pattern).value));
+                    auto branch = statements(arm.body, scopeFor(arm, environment, arm.body), remaining.copy(),
+                        matches ? mode : Mode.dead);
+                    if (!matches) continue;
+                    branch.normal = join(branch.normal, branch.broke); branch.broke = null;
+                    result.absorb(branch);
+                    if (known) remaining = null;
                 }
-                if ((known && !selected) || (!known && !hasDefault)) result.normal = join(result.normal, input);
+                result.normal = join(result.normal, remaining);
                 result.thrown = join(result.thrown, priorThrow); break;
             case Statement.Kind.try_:
                 auto tried = statements(node.body, scopeFor(node, environment, node.body), state, mode);
-                // 型検証なども例外になり得るため、実行済みの接頭部分をcatchへ合流します。
-                auto caughtInput = join(state, tried.thrown);
+                auto caughtInput = tried.thrown;
                 auto caught = statements(node.elseBranch.body,
-                    scopeFor(node.elseBranch, environment, node.elseBranch.body, [node.name]), caughtInput, mode);
-                result = tried; result.thrown = null; result.absorb(caught); break;
+                    scopeFor(node.elseBranch, environment, node.elseBranch.body, [node.name]),
+                    caughtInput is null ? state.copy() : caughtInput, caughtInput is null ? Mode.dead : mode);
+                result = tried; result.thrown = null;
+                if (caughtInput !is null) result.absorb(caught);
+                break;
             case Statement.Kind.tableDecl, Statement.Kind.structDecl:
                 result.thrown = state.copy(); state.nullable.remove(node.name);
                 if (node.kind == Statement.Kind.structDecl) state.bindings[environment.declare(node.name)] = Targets.init;
@@ -440,7 +563,9 @@ package(dua) final class TypeEffects
                 result.thrown = state.copy(); if (!nullable) state.nullable.remove(node.name); break;
             case Statement.Kind.import_: state.bindings[environment.declare(node.aliasName)] = Targets.init; result.thrown = state.copy(); break;
             case Statement.Kind.export_: break;
-            case Statement.Kind.yield_: foreach (expr; node.expressions) evaluate(expr); break;
+            case Statement.Kind.yield_:
+                foreach (expr; node.expressions) evaluate(expr);
+                result.thrown = join(result.thrown, result.normal); break;
         }
         record(after, node, result.normal, mode);
         return result;
@@ -458,6 +583,14 @@ package(dua) final class TypeEffects
             auto collection = expression(node.iterable, environment, state, mode); state = collection.normal;
             result.thrown = join(result.thrown, collection.thrown);
             if (node.rangeEnd !is null) { auto end = expression(node.rangeEnd, environment, state, mode); state = end.normal; result.thrown = join(result.thrown, end.thrown); }
+            if (state !is null)
+            {
+                auto validation = node.rangeEnd !is null
+                    ? validationCanThrow("int", node.iterable, state) || validationCanThrow("int", node.rangeEnd, state)
+                    : node.iterable.kind != Expression.Kind.array && node.iterable.kind != Expression.Kind.associativeArray
+                        && node.iterable.kind != Expression.Kind.table;
+                if (validation) result.thrown = join(result.thrown, state);
+            }
         }
         if (state is null) return result;
         auto count = iterationCount(node);

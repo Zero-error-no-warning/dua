@@ -95,6 +95,40 @@ unittest
             ~ "auto f = install; any swap() { f = noop; return null; } f(swap());" ~ valid);
         rejected("void install(any ignored) { " ~ declaration ~ " } void noop(any ignored) {} "
             ~ "auto f = noop; any swap() { f = install; return null; } f(swap());" ~ invalid);
+        auto expose = "any expose() { " ~ declaration ~ " return { x = 0 }; } ";
+        rejected(expose ~ "int consume(EffectItem value) { return 1; } expose().x += consume(null);");
+        accepted(expose ~ "int consume(EffectItem value) { return 1; } expose().x = consume(null); return true;");
+        rejected("any expose() { " ~ declaration ~ " return [0]; } int consume(EffectItem value) { return 1; } expose()[0] += consume(null);");
+        rejected("int pattern() { " ~ declaration ~ " return 1; } switch (1) { case pattern(): break; }" ~ invalid);
+        rejected("int pattern() { " ~ declaration ~ " return 2; } switch (1) { case pattern(): break; default: break; }" ~ invalid);
+        rejected("int pattern() { " ~ declaration ~ " return 2; } switch (1) { case pattern(): break; case 1: EffectItem inner = null; break; }");
+        rejected("int pattern() { " ~ declaration ~ " return 1; } switch (1) { case pattern(): EffectItem inner = null; break; }");
+        accepted(install ~ "switch (1) { case 1: break; case install(): break; }" ~ valid);
+        accepted("try {} catch (err) { " ~ declaration ~ " }" ~ valid);
+        accepted("try { 1; } catch (err) { " ~ declaration ~ " }" ~ valid);
+        accepted("try { auto number = 1; } catch (err) { " ~ declaration ~ " }" ~ valid);
+        accepted("void empty() {} try { empty(); } catch (err) { " ~ declaration ~ " }" ~ valid);
+        accepted("try { int number = 1; 1 + 2; } catch (err) { " ~ declaration ~ " }" ~ valid);
+        accepted("try { cast(int) 1; null is int; } catch (err) { " ~ declaration ~ " }" ~ valid);
+        accepted("void early() { try { return; } catch (err) { " ~ declaration ~ " } } early();" ~ valid);
+        rejected("try { error(\"stop\"); } catch (err) { " ~ declaration ~ " }" ~ invalid);
+        foreach (operation; [
+            "missing;", "auto value = (1).missing;", "auto value = [1][3];",
+            "auto value = cast(int) \"bad\";", "auto value = -\"bad\";",
+            "auto value = \"bad\" + 1;", "int value = null;",
+            "void use(int value) {} use(null);", "int use() { return \"bad\"; } use();",
+            "auto value = [...1];", "auto value = { ...1 };",
+            "auto value = 1; auto value = 2;", "void use() {} use(1);",
+            "foreach (i; 1) {}", "auto moduleValue = 1; auto value = new moduleValue;"
+        ])
+        {
+            auto source = "try { " ~ operation ~ " } catch (err) { " ~ declaration ~ " } EffectItem after = null;";
+            auto diagnostics = effectEngine().check(source);
+            bool afterDiagnostic;
+            foreach (diagnostic; diagnostics) afterDiagnostic |= diagnostic.message.canFind("'after'");
+            assert(afterDiagnostic, source);
+            rejected(source);
+        }
     }
 }
 
