@@ -1086,8 +1086,12 @@ private struct Parser
         foreach(ref token;embeddedTokens){if(token.line==1)token.column+=baseColumn-1;token.line+=baseLine-1;}
         auto embeddedParser = Parser(embeddedTokens, 0);
         auto expressions = embeddedParser.parseExpressionList();
-        enforce(embeddedParser.check(TokenKind.eof),
-            format("Unexpected token in interpolation expression at %s:%s", contextToken.line, contextToken.column));
+        if (!embeddedParser.check(TokenKind.eof))
+        {
+            auto unexpected = embeddedParser.peek();
+            throw locatedException(format("Unexpected token in interpolation expression at %s:%s",
+                unexpected.line, unexpected.column), unexpected.line, unexpected.column);
+        }
         return expressions;
     }
 

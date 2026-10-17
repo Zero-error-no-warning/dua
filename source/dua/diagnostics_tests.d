@@ -31,6 +31,10 @@ unittest
     auto interpolated=engine.runSafe(interpolation,options);
     assert(!interpolated.ok && interpolated.diagnostic.line==3);
     assert(interpolated.diagnostic.column==interpolation[interpolation.lastIndexOf('\n')+1..$].indexOf("missing")+1);
+    auto trailingInterpolation="\nreturn i\"日本語$(1 2)\";";
+    auto trailing=engine.runSafe(trailingInterpolation,options);
+    assert(!trailing.ok && trailing.diagnostic.line==2);
+    assert(trailing.diagnostic.column==trailingInterpolation[1..$].indexOf("2)")+1);
     auto inner=new Dua.ScriptEngine;
     RunOptions innerOptions;innerOptions.sourceName="inner.dua";
     engine.bindNative("wrapped",(scope const(Value)[] args){
