@@ -475,9 +475,9 @@ mixin template EvaluatorImplementation()
 
     private ExecutionResult executeStatement(Statement statement, Environment environment)
     {
-        consumeStep();
         try
         {
+            consumeStep();
             ExecutionResult result;
             enforce(!statement.isInstance || environment.initializingModule,
                 "instance is only allowed in a source module's top-level declarations");
@@ -1014,9 +1014,9 @@ mixin template EvaluatorImplementation()
 
     private Value evaluate(Expression expression, Environment environment)
     {
-        consumeStep();
         try
         {
+            consumeStep();
             final switch (expression.kind)
             {
                 case Expression.Kind.literal:
