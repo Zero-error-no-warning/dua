@@ -13,12 +13,12 @@ Duaスクリプト（`.dua`）向けのVS Code拡張です。
 
 ## インストール（Windows x64）
 
-`dua-language-win32-x64-0.2.0.vsix` を用意し、VS Codeのコマンドパレットで **Extensions: Install from VSIX...** を実行して選択します。必要に応じて **Developer: Reload Window** を実行してください。
+`dua-language-win32-x64-0.3.1.vsix` を用意し、VS Codeのコマンドパレットで **Extensions: Install from VSIX...** を実行して選択します。必要に応じて **Developer: Reload Window** を実行してください。
 
 コマンドからインストールする場合は、リポジトリのルートで次を実行します。
 
 ```powershell
-code --install-extension .\editors\vscode-dua\dua-language-win32-x64-0.2.0.vsix
+code --install-extension .\editors\vscode-dua\dua-language-win32-x64-0.3.1.vsix
 ```
 
 Windows x64用VSIXには診断ツールを含むため、利用時にDコンパイラーやNode.jsを別途インストールする必要はありません。`.dua` を開けばDuaとして認識され、`Ctrl+Space` で補完候補を表示できます。ワークスペースが信頼済みの場合、診断は自動で有効になります。

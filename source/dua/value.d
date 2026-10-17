@@ -2886,7 +2886,7 @@ private T convertFromValue(T)(const(Value) value)
 {
     static if (is(T == Value))
     {
-        return value;
+        return value.valueCopy();
     }
     else static if (isSomeString!T)
     {
