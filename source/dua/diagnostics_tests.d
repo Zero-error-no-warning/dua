@@ -41,6 +41,17 @@ unittest
         auto validation=engine.runSafe(invalid,options);
         assert(!validation.ok && validation.diagnostic.line>0 && validation.diagnostic.column>0,invalid);
     }
+    auto instanceSource="\ninstance int n=1;";
+    auto instanceRun=engine.runSafe(instanceSource,options),instanceLoad=engine.loadSafe(instanceSource,options);
+    assert(!instanceRun.ok && instanceRun.diagnostic.line==2 && instanceRun.diagnostic.column==10);
+    assert(!instanceLoad.ok && instanceLoad.diagnostic.line==2 && instanceLoad.diagnostic.column==10);
+    auto limitOptions=options;limitOptions.limits.maxSteps=2;
+    auto stepLimit=engine.runSafe("1;\n2;",limitOptions);
+    assert(!stepLimit.ok && stepLimit.errorKind==RunErrorKind.stepLimit);
+    assert(stepLimit.diagnostic.line==2 && stepLimit.diagnostic.column==1);
+    limitOptions.limits.maxSteps=1;
+    auto expressionLimit=engine.runSafe("1;",limitOptions);
+    assert(!expressionLimit.ok && expressionLimit.diagnostic.line==1 && expressionLimit.diagnostic.column==1);
     auto inner=new Dua.ScriptEngine;
     RunOptions innerOptions;innerOptions.sourceName="inner.dua";
     engine.bindNative("wrapped",(scope const(Value)[] args){
