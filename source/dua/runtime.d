@@ -21,7 +21,7 @@ import std.exception : enforce;
 import std.file : exists, readText, remove, write;
 import std.format : format;
 import std.string : join, replace, startsWith;
-import std.traits : BaseClassesTuple, isAggregateType, isNumeric;
+import std.traits : BaseClassesTuple, isAggregateType, isNumeric, Parameters, ReturnType;
 
 // Decide visibility before attempting conversion. Probing private renderer or
 // resource-management state with __traits(compiles) can instantiate unsupported
@@ -274,6 +274,9 @@ final class ModuleHandle
 
     void bind(string name, Value value)
     {
+        if (value.isClassReference)
+            foreach (type; value.typeChain)
+                engine.nativeClassTypes[type.toHostString()] = true;
         environment.define(name, value);
         if (visibility == ModuleVisibility.explicitExports)
             moduleValue.tableValue[name] = value.valueCopy();
@@ -281,6 +284,11 @@ final class ModuleHandle
 
     mixin AutoBindingAPI;
     mixin FunctionBindingAPI;
+
+    private void registerHostType(T)()
+    {
+        engine.registerHostType!T();
+    }
 
     void bindNative(string name, NativeFunction callback)
     {
@@ -800,6 +808,25 @@ final class ScriptEngine
     mixin CoroutineImplementation;
     private EvaluatorContext evaluatorContext;
     private ModuleHandle globalModule_;
+    private bool[string] nativeClassTypes;
+
+    private void registerHostType(T)()
+    {
+        static if (is(T == class))
+        {
+            nativeClassTypes[T.stringof] = true;
+            static foreach (Base; BaseClassesTuple!T)
+                nativeClassTypes[Base.stringof] = true;
+        }
+        else static if (isHostCallable!T)
+        {
+            static if (is(ReturnType!T == class))
+                registerHostType!(ReturnType!T)();
+            static foreach (Parameter; Parameters!T)
+                static if (is(Parameter == class))
+                    registerHostType!Parameter();
+        }
+    }
 
     this()
     {
@@ -848,6 +875,11 @@ final class ScriptEngine
     void bindType(T)(string name)
         if (isAggregateType!T)
     {
+        static if (is(T == class))
+        {
+            registerHostType!T();
+            nativeClassTypes[name] = true;
+        }
         Value[] typeChain;
         typeChain ~= Value.from(name);
         static if (is(T == class))
@@ -1192,7 +1224,7 @@ final class ScriptEngine
 
     CheckDiagnostic[] check(string source)
     {
-        return checkSource(source);
+        return checkSource(source, nativeClassTypes.keys);
     }
 
     Value call(string functionName, scope const(Value)[] args = [])
@@ -1439,6 +1471,10 @@ final class ScriptEngine
 
     private bool valueMatchesType(Value value, string typeName)
     {
+        // nullはホストの参照型だけで受け入れ、structや未登録型には広げません。
+        if (value.kind == ValueKind.null_ && (typeName in nativeClassTypes) !is null
+            && findTypeDefinition(typeName) is null)
+            return true;
         string elementType, keyType;
         if (splitContainerType(resolveContainerType(typeName), elementType, keyType))
         {
@@ -1511,6 +1547,10 @@ final class ScriptEngine
     private bool valueIsType(Value value, string typeName)
     {
         auto definition = findTypeDefinition(typeName);
+        // 代入可能であっても、null自体がクラスの実体になるわけではありません。
+        if (definition is null && value.kind == ValueKind.null_
+            && (typeName in nativeClassTypes) !is null)
+            return false;
         if (definition is null) return valueMatchesType(value, typeName);
         if (!definition.tableValue["isTable"].truthy())
         {

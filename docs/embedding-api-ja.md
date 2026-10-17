@@ -446,7 +446,24 @@ Reflection は D の型安全な境界変換に対応できるメンバーだけ
 クラス引数のオーバーロードは、実オブジェクトの型との完全一致を基底型への変換より優先します。
 D の null クラス参照は Dua の `null` になり、Dua の `null` は D の null クラス参照へ戻ります。
 `null` はクラスの型情報を持たないため、クラス引数だけが異なる複数の候補では曖昧エラーになります。
-このホスト境界の null 変換は、スクリプトの `cast(Type)` や Optional 型の既存規則を変更しません。
+
+D から公開した class 型は、Dua の型付き宣言・関数引数・戻り値でも `null` を受け取れます。
+`bindType!T` の公開名と D の型名、`bindAuto` の型、`bindFunc` のクラス引数・戻り値型を
+エンジンごとに登録します。null の `bindAuto` も対象です。
+
+```D
+Counter value = null;
+value = Counter();
+value = null;
+auto deferred = null;
+deferred = Counter();
+```
+
+`RunOptions.typeCheck` の有効・無効にかかわらず利用できます。`cast(Counter) null` も
+`null` を返しますが、`null is Counter` は偽です。class の初期化式は省略できません。
+D の struct、数値型、Dua の table/struct 型や未登録の型は、この規則では nullable になりません。
+`Counter` 自体は型の公開テーブルであり、実体は `Counter()` / `Counter.new()` で生成します。
+型の公開テーブルやそのコピーを D の class 引数・フィールドへ渡すと変換エラーになります。
 
 ### 6.2 bindType
 

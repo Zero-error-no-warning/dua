@@ -15,14 +15,15 @@ private struct StaticFunctionInfo
     string returnType;
 }
 
-/// Statically checks a source unit without depending on runtime engine state.
-package(dua) CheckDiagnostic[] checkSource(string source)
+/// Checks a source unit with the host class names registered by its engine.
+package(dua) CheckDiagnostic[] checkSource(string source, string[] nativeClassTypes = null)
 {
     CheckDiagnostic[] diagnostics;
     try
     {
         auto program = parse(lex(source));
         string[string] variableTypes;
+        foreach (name; nativeClassTypes) variableTypes["#class_" ~ name] = "class";
         StaticFunctionInfo[string] functions;
         checkStatements(program.statements, variableTypes, functions, diagnostics, "");
     }
@@ -64,11 +65,12 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                     auto declared = statement.declaredType.length > 0
                         ? resolveStaticType(statement.declaredType, variables) : actual;
                     if (statement.declaredType.length > 0 && statement.declaredType != "auto"
-                        && !staticTypesCompatible(actual, declared))
+                        && !staticTypesCompatible(actual, declared, variables))
                         addDiagnostic(diagnostics, statement,
                             format("Variable '%s' expects %s but expression has type %s",
                                 name, statement.declaredType, actual));
-                    variables[name] = declared == "auto" ? actual : declared;
+                    // nullから始めるauto変数には、後から実体を格納できます。
+                    variables[name] = declared == "auto" ? (actual == "null" ? "any" : actual) : declared;
                 }
                 break;
             case Statement.Kind.assign:
@@ -83,7 +85,7 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                     if (target.kind == Expression.Kind.variable)
                     {
                         auto expected = (cast(VariableExpression) target).name in variables;
-                        if (expected !is null && !staticTypesCompatible(actual, *expected))
+                        if (expected !is null && !staticTypesCompatible(actual, *expected, variables))
                             diagnostics ~= CheckDiagnostic(target.line, target.column,
                                 format("Assignment to '%s' expects %s but expression has type %s",
                                     (cast(VariableExpression) target).name, *expected, actual));
@@ -91,7 +93,7 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                     else if (target.kind == Expression.Kind.index)
                     {
                         auto expected = inferExpressionType(target, variables, functions, diagnostics);
-                        if (!staticTypesCompatible(actual, expected))
+                        if (!staticTypesCompatible(actual, expected, variables))
                             diagnostics ~= CheckDiagnostic(target.line, target.column,
                                 format("Indexed assignment expects %s but has type %s", expected, actual));
                     }
@@ -111,7 +113,7 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                     : inferExpressionType(statement.expressions[0], variables, functions, diagnostics);
                 if (expectedReturnType.length > 0)
                 {
-                    if (!staticTypesCompatible(actual, expectedReturnType))
+                    if (!staticTypesCompatible(actual, expectedReturnType, variables))
                         addDiagnostic(diagnostics, statement,
                             format("Return expects %s but expression has type %s",
                                 expectedReturnType, actual));
@@ -269,7 +271,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
                     {
                         auto actual = inferExpressionType(argument, variables, functions, diagnostics);
                         if (index < functionInfo.parameterTypes.length
-                            && !staticTypesCompatible(actual, functionInfo.parameterTypes[index]))
+                            && !staticTypesCompatible(actual, functionInfo.parameterTypes[index], variables))
                             diagnostics ~= CheckDiagnostic(argument.line, argument.column,
                                 format("Argument %s to '%s' expects %s but has type %s",
                                     index + 1, (cast(VariableExpression) (cast(CallExpression) expression).callee).name,
@@ -293,7 +295,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
                 }
                 auto actual = inferExpressionType(indexExpression.index, variables, functions, diagnostics);
                 auto expected = key.length ? key : "int";
-                if (!staticTypesCompatible(actual, expected))
+                if (!staticTypesCompatible(actual, expected, variables))
                     diagnostics ~= CheckDiagnostic(expression.line, expression.column,
                         format("Index expects %s but has type %s", expected, actual));
                 return element;
@@ -322,8 +324,9 @@ private string resolveStaticType(string name, ref string[string] variables, size
     return name;
 }
 
-private bool staticTypesCompatible(string actual, string expected)
+private bool staticTypesCompatible(string actual, string expected, ref string[string] variables)
 {
+    if (actual == "null" && ("#class_" ~ expected in variables) !is null) return true;
     if (actual == "any" || expected == "any" || expected == "auto") return true;
     string element, key;
     if (splitContainerType(expected, element, key))
