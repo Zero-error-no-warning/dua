@@ -1,3 +1,7 @@
+## 0.4.2
+
+- Refresh the bundled checker to accept trailing commas in array literals while rejecting missing elements.
+
 ## 0.4.1
 
 - Refresh the bundled checker with string literal aliases and union constraints from Dua PR #59.

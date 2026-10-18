@@ -6,6 +6,23 @@ const fs = require('node:fs');
 const { checkSource } = require('../checker');
 const executable = path.resolve(__dirname, '../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check');
 
+test('checker accepts array trailing commas and rejects missing elements', async () => {
+  const types = 'alias ItemType = "weapon" | "armor"; '
+    + 'table Modifier { string name; ItemType targetType; } '
+    + 'table ItemInfo { uint id; string itemID; uint count; string name; Modifier[] modifier; } ';
+  const source = types + 'ItemInfo[] inventory = [\n'
+    + '{ id = 1, itemID = "knife_001", count = 1, name = "Knife", modifier = [] },\n];';
+  assert.deepEqual(await checkSource(executable, source).promise, []);
+  for (const literal of ['[]', '[1]', '[1,]', '[1, 2,]', '[[], [1,],]']) {
+    assert.deepEqual(await checkSource(executable, 'auto a = ' + literal + ';').promise, [], literal);
+  }
+  for (const literal of ['[,]', '[1,,]', '[1,,2]']) {
+    const errors = await checkSource(executable, 'auto a = ' + literal + ';').promise;
+    assert.equal(errors.length, 1, literal);
+    assert.match(errors[0].message, /Unexpected token comma/);
+  }
+});
+
 test('checker reports real syntax and type errors, and accepts modules and host bindings', async () => {
   const typeErrors = await checkSource(executable, 'int count = "wrong";').promise;
   assert.equal(typeErrors.length, 1);
