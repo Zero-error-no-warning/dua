@@ -22,6 +22,17 @@ test('excludes comments, strings, and fake declarations from completion', () => 
   assert.ok(completions('auto s = "unfinished\nauto ', 26).length > 0);
 });
 
+test('string literal type aliases preserve declaration completion and literal masking', () => {
+  const source = 'alias Fruit = "Apple" | "日本😀" | "int pretend = 3;";\nFruit fruit = "Apple";\nFruit[] basket = [];\n';
+  const names = documentNames(source);
+  for (const name of ['Fruit', 'fruit', 'basket']) assert.ok(names.has(name), name);
+  assert.ok(!names.has('pretend'));
+  const labels = completions(source, source.length).map(item => item.label);
+  for (const name of ['Fruit', 'fruit', 'basket']) assert.ok(labels.includes(name), name);
+  const prefix = 'alias Fruit = "Apple" | "日本';
+  assert.deepEqual(completions(prefix, prefix.length), []);
+});
+
 test('converts diagnostic byte columns, CRLF, EOF and parser locations', () => {
   const source = 'auto s = "日本😀"; auto bad = ;\r\n';
   const column = Buffer.byteLength(source.slice(0, source.indexOf(';', source.indexOf('bad')))) + 1;

@@ -38,6 +38,26 @@ initializer table.
 
 Named table declarations use `table T { ... }` and have reference semantics.
 `alias T = U` and `alias T = A | B` are reserved for pure aliases and unions.
+
+String literal aliases constrain values: `alias Fruit = "Apple" | "Orange";` accepts only those strings.
+Single candidates (`alias Apple = "Apple";`), aliases, mixed unions (`Fruit | int | null`), duplicate
+candidates, and array element types (`Fruit[]`) are supported. Initialization, reassignment, function
+arguments/results, and typed array elements are checked at runtime; obvious incompatible literals
+are also diagnosed statically. Dynamic `string` and `any` values are validated at runtime.
+Ordinary inferred or annotated strings remain unrestricted. Literal types use the same string lexer
+as expressions: Unicode and empty strings are allowed, backslashes remain literal, and escape
+sequences are not introduced. Numeric/bool literal types are not supported.
+
+An `auto copy = fruit` scalar binding does not inherit the original binding's literal constraint;
+`copy = "Banana"` remains valid. An array `auto copy = values` shares the array and its element constraints.
+Array unions validate the whole array against any alternative, without fixing the first matching branch:
+`Fruit[] | string[]` permits changing `"Apple"` to `"Banana"`, while `Fruit[] | int[]` rejects mixed arrays.
+Nested/shared array mutations are checked together and invalid writes leave the previous contents intact.
+Slices and concatenation create independent outer arrays; shared inner arrays retain both constraints.
+Detached inner arrays retain their own candidate types, including through later slices and concatenation.
+For `T rest...`, each remaining argument is checked as `T` and the body receives `T[]`.
+Associative-array unions retain the existing annotation-based matching: initialize a `Fruit[string]`
+value before passing it to `Fruit[string] | null`; unannotated AA literals are not implicitly converted.
 At the embedding boundary, `bindType` exposes D structs as Dua value types and
 D classes as reference types.
 

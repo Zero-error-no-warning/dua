@@ -25,6 +25,8 @@ import std.string : join, replace, startsWith;
 import std.traits : BaseClassesTuple, isAggregateType, isNumeric, Parameters, ReturnType;
 import std.meta : staticIndexOf;
 
+private struct UnionArrayIdentity { Value* pointer; size_t length; }
+
 // Decide visibility before attempting conversion. Probing private renderer or
 // resource-management state with __traits(compiles) can instantiate unsupported
 // native types and trigger DMD frontend bugs even though the probe should fail.
@@ -716,6 +718,7 @@ final class ScriptCallable : CallableValue
     private bool hasSourceText;
     private string moduleName;
     private ScopeLayout scopeLayout;
+    private size_t declarationLine, declarationColumn;
 
     this(string name, ScriptEngine engine, Environment closure, string[] parameters, bool variadic,
         Statement[] body, string[] parameterTypes = null, string returnType = "")
@@ -724,7 +727,8 @@ final class ScriptCallable : CallableValue
     }
 
     package(dua) this(string name, ScriptEngine engine, Environment closure, string[] parameters,
-        bool variadic, Statement[] body, string[] parameterTypes, string returnType, ScopeLayout scopeLayout)
+        bool variadic, Statement[] body, string[] parameterTypes, string returnType, ScopeLayout scopeLayout,
+        size_t declarationLine = 0, size_t declarationColumn = 0)
     {
         super(name);
         this.engine = engine;
@@ -734,6 +738,8 @@ final class ScriptCallable : CallableValue
         this.body = body.dup;
         this.parameterTypes = parameterTypes.dup;
         this.returnType = returnType;
+        this.declarationLine = declarationLine;
+        this.declarationColumn = declarationColumn;
         this.sourceName = engine.evaluatorContext.sourceName;
         this.sourceText = engine.evaluatorContext.sourceText;
         this.hasSourceText = engine.evaluatorContext.hasSourceText;
@@ -756,7 +762,9 @@ final class ScriptCallable : CallableValue
         try
             return invokeBody(args);
         catch (Exception error)
-            throw engine.withSourceContext(error, sourceName);
+            throw engine.withSourceContext(error, sourceName,
+                declarationLine ? format("%s:%s", declarationLine, declarationColumn) : "",
+                "function", declarationLine, declarationColumn);
     }
 
     private Value invokeBody(Value[] args)
@@ -783,7 +791,14 @@ final class ScriptCallable : CallableValue
         {
             if (variadic && index + 1 == parameters.length)
             {
-                environment.define(parameter, Value.from(args[index .. $].dup));
+                auto rest = Value.from(args[index .. $].dup);
+                if (index < parameterTypes.length && engine.hasLiteralConstraint(parameterTypes[index]))
+                {
+                    auto restType = parameterTypes[index] ~ "[]";
+                    rest = engine.prepareContainerValue(rest, restType);
+                    environment.define(parameter, rest, engine.containerValidator(restType));
+                }
+                else environment.define(parameter, rest);
                 break;
             }
             if (index < parameterTypes.length)
@@ -794,8 +809,9 @@ final class ScriptCallable : CallableValue
                         debugName, parameter, parameterTypes[index], args[index].kind));
             }
             string elementType, keyType;
-            if (index < parameterTypes.length && splitContainerType(
-                engine.resolveContainerType(parameterTypes[index]), elementType, keyType))
+            if (index < parameterTypes.length && (splitContainerType(
+                engine.resolveContainerType(parameterTypes[index]), elementType, keyType)
+                || engine.hasLiteralConstraint(parameterTypes[index])))
                 environment.define(parameter, args[index], engine.containerValidator(parameterTypes[index]));
             else
                 environment.define(parameter, args[index]);
@@ -1552,7 +1568,19 @@ final class ScriptEngine
     {
         typeName = resolveContainerType(typeName);
         string elementType, keyType;
-        if (!splitContainerType(typeName, elementType, keyType)) return value;
+        if (!splitContainerType(typeName, elementType, keyType))
+        {
+            if (value.kind == ValueKind.array && hasLiteralConstraint(typeName))
+            {
+                if (value.arrayUnionType == typeName)
+                {
+                    enforce(valueMatchesType(value, typeName), "Array expected " ~ typeName);
+                    return value;
+                }
+                return prepareUnionArray(copyUnionArray(value), typeName);
+            }
+            return value;
+        }
         if (keyType.length == 0)
         {
             enforce(value.kind == ValueKind.array, "Expected array for " ~ typeName);
@@ -1588,6 +1616,102 @@ final class ScriptEngine
         return result;
     }
 
+    // 型注釈の準備では既存の配列注釈と同様に値をコピーし、元の未検査aliasを残しません。
+    private Value copyUnionArray(Value value, bool keepValidated = false)
+    {
+        Value[UnionArrayIdentity] copies;
+        return copyUnionArray(value, copies, keepValidated);
+    }
+
+    private Value copyUnionArray(Value value, ref Value[UnionArrayIdentity] copies, bool keepValidated)
+    {
+        if (value.kind != ValueKind.array) return value;
+        if (keepValidated && value.arrayValidation !is null) return value;
+        auto identity = UnionArrayIdentity(value.arrayValue.ptr, value.arrayValue.length);
+        if (auto copied = identity in copies) return *copied;
+        Value result; result.kind = ValueKind.array;
+        result.arrayValue.length = value.arrayValue.length;
+        // 子を辿る前に登録し、共有参照・循環参照を同じコピーへ結びます。
+        copies[identity] = result;
+        foreach (index, element; value.arrayValue)
+            result.arrayValue[index] = copyUnionArray(element, copies, keepValidated).valueCopy();
+        return result;
+    }
+
+    private Value prepareUnionArray(Value value, string typeName)
+    {
+        value.arrayUnionType = typeName;
+        return prepareUnionArray(value, [typeName]);
+    }
+
+    private bool matchesUnionArrayTypes(Value value, string[] types)
+    {
+        foreach (typeName; types) if (valueMatchesType(value, typeName)) return true;
+        return false;
+    }
+
+    // 各分岐の要素型を集め、最初に一致した分岐へ固定しません。
+    private string[] unionArrayElementTypes(string[] types, size_t depth = 0)
+    {
+        if (depth >= 64) return ["any"];
+        string[] result;
+        foreach (typeName; types)
+        {
+            auto resolved = resolveContainerType(typeName);
+            if (resolved == "any" || resolved == "auto" || resolved == "array") return ["any"];
+            string element, key;
+            if (splitContainerType(resolved, element, key) && !key.length) result ~= element;
+            else if (auto definition = findTypeDefinition(resolved))
+            {
+                if (!definition.tableValue["isTable"].truthy())
+                {
+                    string[] alternatives;
+                    foreach (candidate; definition.tableValue["alternatives"].arrayValue)
+                        alternatives ~= candidate.toHostString();
+                    result ~= unionArrayElementTypes(alternatives, depth + 1);
+                }
+            }
+        }
+        return result;
+    }
+
+    private Value prepareUnionArray(Value value, string[] types)
+    {
+        if (types.canFind("any") || types.canFind("auto")) return value;
+        enforce(matchesUnionArrayTypes(value, types), "Array expected " ~ types.join(" | "));
+        if (value.arrayValidation is null) value.arrayValidation = new ArrayValidation;
+        auto key = types.join("\0");
+        if (value.arrayValidation.hasConstraint(key)) return value;
+        auto root = value;
+        void delegate() check = () { enforce(matchesUnionArrayTypes(root, types), "Array expected " ~ types.join(" | ")); };
+        void delegate() refresh;
+        refresh = () {
+            bool[ArrayValidation] visited;
+            attachUnionArrayValidation(root, check, refresh, types, visited);
+        };
+        // 切り離された内配列にも自身の制約と更新役を残します。
+        root.arrayValidation.addConstraint(key, types, check, refresh);
+        refresh();
+        return root;
+    }
+
+    private void attachUnionArrayValidation(ref Value value, void delegate() check,
+        void delegate() refresh, string[] types, ref bool[ArrayValidation] visited)
+    {
+        if (value.kind != ValueKind.array) return;
+        if (value.arrayValidation is null) value.arrayValidation = new ArrayValidation;
+        if (value.arrayValidation in visited) return;
+        visited[value.arrayValidation] = true;
+        value.arrayValidation.add(check, refresh);
+        auto elementTypes = unionArrayElementTypes(types);
+        foreach (ref element; value.arrayValue)
+        {
+            if (element.kind != ValueKind.array) continue;
+            element = prepareUnionArray(element, elementTypes);
+            attachUnionArrayValidation(element, check, refresh, elementTypes, visited);
+        }
+    }
+
     private bool typeAllowsNull(string typeName, size_t depth = 0)
     {
         if (depth >= 64) return false;
@@ -1604,8 +1728,24 @@ final class ScriptEngine
         return false;
     }
 
+    private bool hasLiteralConstraint(string typeName, size_t depth = 0)
+    {
+        if (depth >= 64) return false;
+        if (isStringLiteralType(typeName)) return true;
+        string element, key;
+        if (splitContainerType(typeName, element, key))
+            return hasLiteralConstraint(element, depth + 1) || (key.length && hasLiteralConstraint(key, depth + 1));
+        auto definition = findTypeDefinition(typeName);
+        if (definition is null || definition.tableValue["isTable"].truthy()) return false;
+        foreach (alternative; definition.tableValue["alternatives"].arrayValue)
+            if (hasLiteralConstraint(alternative.toHostString(), depth + 1)) return true;
+        return false;
+    }
+
     private bool valueMatchesType(Value value, string typeName)
     {
+        if (isStringLiteralType(typeName))
+            return value.kind == ValueKind.string_ && stringLiteralType(value.stringValue) == typeName;
         if (value.kind == ValueKind.null_) return typeAllowsNull(typeName);
         string elementType, keyType;
         if (splitContainerType(resolveContainerType(typeName), elementType, keyType))

@@ -28,6 +28,15 @@ test('host completion respects strings, comments, reassignment and block scope',
   assert.equal(tokens(String.raw`"escaped \\"; // "`).state, 'comment');
 });
 
+test('string literal type aliases leave host completion and token boundaries intact', () => {
+  const prefix = 'alias Fruit = "Apple" | "日本😀" | "actor.move({;"; Fruit fruit = "Apple";\n';
+  assert.deepEqual(labels(prefix + 'auto actor = makeActor("a"); actor.'), ['move', 'position']);
+  assert.deepEqual(labels('alias Fruit = "Apple" | "actor.'), []);
+  const parsed = tokens('alias Fruit = "Apple" | "日本😀";');
+  assert.equal(parsed.state, 'code');
+  assert.deepEqual(parsed.tokens.filter(token => token.kind === 'string').map(token => token.value), ['Apple', '日本😀']);
+});
+
 test('catalog loading tolerates absent, malformed and unsupported files', () => {
   const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dua-catalog-'));

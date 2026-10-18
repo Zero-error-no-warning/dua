@@ -501,7 +501,8 @@ mixin template EvaluatorImplementation()
                         }
                         auto declaredType = statement.declaredType;
                         string elementType, keyType;
-                        if (splitContainerType(resolveContainerType(declaredType), elementType, keyType))
+                        if (splitContainerType(resolveContainerType(declaredType), elementType, keyType)
+                            || hasLiteralConstraint(declaredType))
                             declarationEnvironment.define(name, value, containerValidator(declaredType));
                         else
                             declarationEnvironment.define(name, value);
@@ -597,7 +598,7 @@ mixin template EvaluatorImplementation()
                 case Statement.Kind.functionDecl:
                     auto callable = Value.fromFunction(new ScriptCallable(statement.name, this, environment,
                         statement.parameters, statement.variadic, statement.body,
-                        statement.parameterTypes, statement.returnType, layoutFor(statement)));
+                        statement.parameterTypes, statement.returnType, layoutFor(statement), statement.line, statement.column));
                     environment.define(statement.name, callable);
                     result.lastValue = callable;
                     if (statement.isExported)
@@ -986,7 +987,17 @@ mixin template EvaluatorImplementation()
                             enforce(valueMatchesType(value, container.arrayElementType),
                                 "Array element expected " ~ container.arrayElementType);
                         }
-                        container.arrayValue[position] = value.valueCopy();
+                        if (container.arrayValidation !is null)
+                        {
+                            // 候補の配列全体を検査してから確定し、失敗時は共有配列も復元します。
+                            if (value.kind == ValueKind.array) value = copyUnionArray(value, true);
+                            auto previous = container.arrayValue[position];
+                            container.arrayValue[position] = value.valueCopy();
+                            try container.arrayValidation.validate();
+                            catch (Exception error) { container.arrayValue[position] = previous; throw error; }
+                            container.arrayValidation.refresh();
+                        }
+                        else container.arrayValue[position] = value.valueCopy();
                         return;
                     }
                     if (container.isFieldAggregate)
@@ -1164,7 +1175,8 @@ mixin template EvaluatorImplementation()
                     auto functionExpression = cast(FunctionExpression) expression;
                     return Value.fromFunction(new ScriptCallable("anonymous", this, environment,
                         functionExpression.parameters, functionExpression.variadic, functionExpression.body,
-                        functionExpression.parameterTypes, functionExpression.returnType, layoutFor(functionExpression)));
+                        functionExpression.parameterTypes, functionExpression.returnType, layoutFor(functionExpression),
+                        functionExpression.line, functionExpression.column));
                 case Expression.Kind.get:
                     auto get = cast(GetExpression) expression;
                     auto container = evaluate(get.target, environment);
@@ -1231,7 +1243,11 @@ mixin template EvaluatorImplementation()
                         {
                             sliced = container.arrayValue[lowerBound .. upperBound].dup;
                         }
-                        return Value.fromOwnedArray(sliced, container.arrayElementType);
+                        auto result = Value.fromOwnedArray(sliced, container.arrayElementType);
+                        if (container.arrayValidation !is null)
+                            foreach (types; container.arrayValidation.localTypes)
+                                result = prepareUnionArray(result, types);
+                        return result;
                     }
                     auto indices = evaluateExpressionList(indexed.indices, environment);
                     return readIndex(container, indices, callSite(indexed));
@@ -1338,7 +1354,8 @@ mixin template EvaluatorImplementation()
     {
         enforce(depth < 64, "Cyclic or excessively nested cast type alias");
         string elementType, keyType;
-        if (splitContainerType(resolveContainerType(targetType), elementType, keyType))
+        if (splitContainerType(resolveContainerType(targetType), elementType, keyType)
+            || (value.kind == ValueKind.array && hasLiteralConstraint(targetType)))
             return prepareContainerValue(value, targetType);
         // A pure alias uses the same conversion as its target. Union casts
         // only check membership, since choosing a conversion would be ambiguous.
@@ -1440,6 +1457,16 @@ mixin template EvaluatorImplementation()
                     combined.length = left.arrayValue.length + added.length;
                     combined[0 .. left.arrayValue.length] = left.arrayValue;
                     combined[left.arrayValue.length .. $] = added;
+                    if (left.arrayValidation !is null && left.arrayValidation.localTypes.length)
+                    {
+                        // 追加リスト全体でmemoを共有し、既存の検査済み内配列へのaliasも保持します。
+                        auto prepared = copyUnionArray(Value.fromOwnedArray(added.dup), true);
+                        combined[left.arrayValue.length .. $] = prepared.arrayValue;
+                        auto result = Value.fromOwnedArray(combined);
+                        foreach (types; left.arrayValidation.localTypes)
+                            result = prepareUnionArray(result, types);
+                        return result;
+                    }
                     if (left.arrayElementType.length)
                         foreach (ref element; combined)
                         {
@@ -1737,6 +1764,12 @@ mixin template EvaluatorImplementation()
 
     private Value delegate(Value) containerValidator(string declaredType)
     {
+        if (hasLiteralConstraint(declaredType))
+            return (Value next) {
+                auto prepared = prepareContainerValue(next, declaredType);
+                enforce(valueMatchesType(prepared, declaredType), "Assignment expected " ~ declaredType);
+                return prepared;
+            };
         return (Value next) => prepareContainerValue(next, declaredType);
     }
 

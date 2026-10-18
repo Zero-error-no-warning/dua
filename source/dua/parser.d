@@ -4,6 +4,7 @@ import dua.execution : locatedException, scriptDiagnostic;
 import dua.ast;
 import dua.lexer : Token, TokenKind, lex;
 import dua.value : Value;
+import dua.type_syntax : stringLiteralType;
 import std.algorithm.searching : canFind;
 import std.array : appender;
 import std.conv : to;
@@ -1275,7 +1276,11 @@ private struct Parser
     string parseTypeName()
     {
         string result;
-        if (match(TokenKind.keywordNull))
+        if (match(TokenKind.string_))
+        {
+            result = stringLiteralType(previous().lexeme);
+        }
+        else if (match(TokenKind.keywordNull))
         {
             result = "null";
         }

@@ -26,3 +26,14 @@ test('checker reports real syntax and type errors, and accepts modules and host 
 test('missing checker is rejected without crashing on closed stdin', async () => {
   await assert.rejects(checkSource(path.join(__dirname, 'missing-checker'), 'auto x = 1;').promise, /ENOENT/);
 });
+
+test('checker accepts string literal aliases through the editor diagnostics protocol', async () => {
+  const source = 'alias Fruit = "Apple" | "日本😀";\n'
+    + 'alias Single = "Apple";\n'
+    + 'alias Mixed = Fruit | int;\n'
+    + 'Fruit choose(Fruit value) { return value; }\n'
+    + 'Fruit fruit = choose("Apple"); fruit = "日本😀";\n'
+    + 'Fruit[] basket = ["Apple", "日本😀"];\n'
+    + 'Single single = "Apple"; Mixed mixed = 1;\n';
+  assert.deepEqual(await checkSource(executable, source).promise, []);
+});

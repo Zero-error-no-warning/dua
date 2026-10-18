@@ -252,6 +252,23 @@ if (hero is Named) {
 - table 型内の `...BaseType;` は基底型のフィールドと型チェーンを取り込みます。struct 宣言内の型 spread は未対応です。
 - 基底型同士または派生型との同名フィールドは、同じ型でもエラーです。
 - `A | B` は Union、`T | null` は Optional 型として使えます。
+- `alias Fruit = "Apple" | "Orange";` は、その文字列だけを受け取る型です。単一候補の
+  `alias Apple = "Apple";`、別名の組合せ、`alias Value = Fruit | int | null;`、`Fruit[]` も使えます。
+  重複候補は意味を変えません。変数の初期化・再代入、関数の引数・戻り値、型付き配列の要素を実行時に検査します。
+  明らかな不適合リテラルは事前検査でも診断します。動的な `string` / `any` の値は実行時に検査します。
+  通常の `auto text = "Apple";` や `string text` は候補を制限しません。
+  `Fruit fruit = "Apple"; auto copy = fruit;` の `copy` にも元変数の注釈は引き継がず、
+  `copy = "Banana";` は可能です。配列の `auto copy = values;` は既存仕様どおり同じ配列を参照し、要素の制約を維持します。
+  `alias Items = Fruit[] | string[];` は配列全体がどれかの分岐に合えば受理します。
+  最初に一致した分岐へ固定せず、`Items values = ["Apple"]; values[0] = "Banana";` も可能です。
+  `Fruit[] | int[]` の文字列と整数が混在する配列は拒否します。入れ子・共有配列の要素変更も全体で検査し、
+  不適合な書込みは元の値を保持します。slice・連結は独立した外配列ですが、共有する内配列には両方の制約が残ります。
+  親の要素を置き換えて内配列を切り離しても、その内配列自身の候補型とslice・連結先の制約は維持します。
+  `T rest...` の残り引数はそれぞれ `T` として検査し、関数内では `T[]` として扱います。
+  連想配列を含むUnionは従来どおり連想配列の型情報を照合します。例えば `Fruit[string] | null` へ渡す
+  値は、まず `Fruit[string] typed = ["key":"Apple"];` と型付きで作成してください。未注釈のAAリテラルは自動変換しません。
+  リテラル型の文字列は通常の文字列と同じ字句規則です。日本語・空文字・記号を使用でき、
+  バックスラッシュはそのままの文字です。エスケープ構文、数値・bool のリテラル型は未対応です。
 - `value is Type` は名前付き型とその基底型を判定します。
 - `typeinfo(value)` / `typeof(value)` は `{ kind, chain, aliasThisChain }` を返します。`chain` は名前付き型の型チェーン、`aliasThisChain` は D reflection の alias this に関する情報です。
 - 事前型検査は保守的です。`any`、動的プロパティ、ネイティブ関数の結果などは実行時検査に残ります。
