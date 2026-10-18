@@ -1351,7 +1351,8 @@ mixin template EvaluatorImplementation()
     {
         enforce(depth < 64, "Cyclic or excessively nested cast type alias");
         string elementType, keyType;
-        if (splitContainerType(resolveContainerType(targetType), elementType, keyType))
+        if (splitContainerType(resolveContainerType(targetType), elementType, keyType)
+            || (value.kind == ValueKind.array && hasLiteralConstraint(targetType)))
             return prepareContainerValue(value, targetType);
         // A pure alias uses the same conversion as its target. Union casts
         // only check membership, since choosing a conversion would be ambiguous.

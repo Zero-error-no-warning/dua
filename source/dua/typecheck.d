@@ -373,7 +373,8 @@ private string resolveStaticType(string name, ref string[string] variables, size
     return name;
 }
 
-private bool staticTypesCompatible(string actual, string expected, ref string[string] variables, size_t depth = 0)
+private bool staticTypesCompatible(string actual, string expected, ref string[string] variables,
+    size_t depth = 0, bool unionMember = false)
 {
     if (depth >= 64) return true;
     actual = resolveStaticType(actual, variables);
@@ -383,13 +384,13 @@ private bool staticTypesCompatible(string actual, string expected, ref string[st
     if (auto alternatives = "#union_" ~ actual in variables)
     {
         foreach (member; parseJSON(*alternatives).array)
-            if (!staticTypesCompatible(member.str, expected, variables, depth + 1)) return false;
+            if (!staticTypesCompatible(member.str, expected, variables, depth + 1, true)) return false;
         return true;
     }
     if (auto alternatives = "#union_" ~ expected in variables)
     {
         foreach (member; parseJSON(*alternatives).array)
-            if (staticTypesCompatible(actual, member.str, variables, depth + 1)) return true;
+            if (staticTypesCompatible(actual, member.str, variables, depth + 1, true)) return true;
         return false;
     }
     if (isStringLiteralType(expected))
@@ -405,6 +406,9 @@ private bool staticTypesCompatible(string actual, string expected, ref string[st
         return actual == expected || actual == (key.length ? "associativeArray" : "array")
             || (key.length && actual == "array");
     if (canFind(expected, " delegate(")) return actual == "function";
+    // Unionを具体化しても、tableの構造互換やホストの継承関係は実行時の検査へ残します。
+    if (unionMember && !isBuiltinTypeName(expected) && !isBuiltinTypeName(actual)
+        && !splitContainerType(actual, element, key) && !canFind(actual, " delegate(")) return true;
     if (!["int", "double", "bool", "string", "null", "void", "array", "table"].canFind(expected))
         return actual == "table" || actual == expected;
     return actual == expected || (expected == "void" && actual == "null");

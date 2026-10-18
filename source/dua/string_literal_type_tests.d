@@ -4,6 +4,7 @@ version (unittest):
 import dua;
 import std.algorithm : canFind;
 private class LiteralItem { int value = 7; }
+private class DerivedLiteralItem : LiteralItem { int extra = 1; }
 
 private void accepts(string source)
 {
@@ -32,6 +33,39 @@ private void rejects(string source, bool staticallyKnown = true)
         assert(!result.ok, source);
         assert(result.diagnostic.line > 0 && result.diagnostic.column > 0, result.errorMessage);
         assert(result.diagnostic.sourceName == "fruit.dua", result.errorMessage);
+    }
+}
+
+unittest
+{
+    enum prefix = `alias Fruit = "Apple" | "Orange"; alias Mixed = Fruit[] | int[]; `;
+    rejects(prefix ~ `auto value = cast(Mixed) ["Apple", "Orange"]; value[0] = 1;`, false);
+    rejects(prefix ~ `alias Grid = Fruit[][] | int[][]; auto value = cast(Grid) [["Apple", "Orange"]]; value[0][0] = 1;`, false);
+    accepts(prefix ~ `auto value = cast(Mixed) ["Apple"]; value[0] = 1; return value[0] == 1;`);
+    accepts(prefix ~ `alias Broad = Fruit[] | string[]; auto value = cast(Broad) ["Apple"]; value[0] = "Banana"; return value[0] == "Banana";`);
+}
+
+unittest
+{
+    foreach (unionType; ["Item | null", `"Apple" | Item`])
+    {
+        accepts(`table Item { int id; } table Specific { ...Item; string name; }
+            Specific derived = {id=1, name="x"}; alias Target = ` ~ unionType ~ `;
+            Target value = derived; int read(Target item) { return item.id; }
+            return value.id == 1 && read(derived) == 1;`);
+    }
+    foreach (unionType; ["LiteralItem | null", `"Apple" | LiteralItem`])
+    foreach (checked; [false, true])
+    {
+        auto engine = new ScriptEngine;
+        engine.bindType!LiteralItem("LiteralItem");
+        engine.bindType!DerivedLiteralItem("DerivedLiteralItem");
+        auto source = `DerivedLiteralItem derived = DerivedLiteralItem(); alias Target = ` ~ unionType ~ `;
+            Target value = derived; bool read(Target item) { return item != null; }
+            return value != null && read(derived);`;
+        assert(engine.check(source).length == 0);
+        RunOptions options; options.typeCheck = checked;
+        assert(engine.run(source, options).truthy());
     }
 }
 
