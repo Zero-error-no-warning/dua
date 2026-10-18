@@ -8,6 +8,8 @@ module dua.binding;
  * environments, modules, or evaluator state.
  */
 import dua.value;
+public import dua.attributes;
+import std.exception : enforce;
 import std.traits : isAggregateType, isCallable;
 
 alias NativeFunction = Value delegate(scope const(Value)[] args);
@@ -67,6 +69,15 @@ mixin template FunctionBindingAPI()
 {
     void bindFunc(alias FUN)(string name)
     {
+        // Reject the whole explicit registration before creating metadata or bindings.
+        static if (__traits(compiles, __traits(getOverloads, __traits(parent, FUN), __traits(identifier, FUN))))
+        {
+            static foreach (declaration; __traits(getOverloads, __traits(parent, FUN), __traits(identifier, FUN)))
+                static if (isNoBind!declaration)
+                    enforce(false, "@NoBind overload cannot be registered: " ~ name);
+        }
+        else static if (isNoBind!FUN)
+            enforce(false, "@NoBind declaration cannot be registered: " ~ name);
         ReflectedCallable[] overloads;
         static if (__traits(compiles,
             __traits(getOverloads, __traits(parent, FUN), __traits(identifier, FUN))))
@@ -108,6 +119,9 @@ mixin template FunctionBindingAPI()
     void bindFunc(C)(string name, auto ref C callable)
         if (dua.binding.isHostCallable!C)
     {
+        static if (isAggregateType!C)
+            static if (hasNoBindOverload!(C, "opCall"))
+                enforce(false, "@NoBind opCall cannot be registered: " ~ name);
         static if (__traits(compiles, registerHostType!C()))
             registerHostType!C();
         static if (__traits(compiles, recordCompletionFunction!C(name)))

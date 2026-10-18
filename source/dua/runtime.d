@@ -1,6 +1,7 @@
 module dua.runtime;
 
 import dua.ast;
+import dua.attributes;
 public import dua.binding;
 import dua.coroutine;
 import dua.evaluator;
@@ -37,8 +38,8 @@ private template isPublicTypeMember(T, string memberName)
     {
         enum isPublicTypeMember = () {
             static foreach (overload; __traits(getOverloads, T, memberName))
-                static if (__traits(getVisibility, overload) == "public"
-                    || __traits(getVisibility, overload) == "export")
+                static if (!isNoBind!overload && (__traits(getVisibility, overload) == "public"
+                    || __traits(getVisibility, overload) == "export"))
                     return true;
             return false;
         }();
@@ -1015,7 +1016,7 @@ final class ScriptEngine
                 format("%s.new has no constructor taking %s arguments", name, userArgs.length));
             static if (is(T == class))
             {
-                static if (__traits(compiles, new T()))
+                static if (__traits(compiles, new T()) && !hasNoBindOverload!(T, "__ctor"))
                 {
                     auto instance = new T();
                     auto reflected = Value.reflect(instance);
@@ -1082,7 +1083,7 @@ final class ScriptEngine
                     }
                     typeTable[memberName] = Value.from(enumTable);
                 }
-                else static if (__traits(compiles,
+                else static if (!hasNoBindOverload!(T, memberName) && __traits(compiles,
                     Value.fromAuto(__traits(getMember, T, memberName))))
                 {
                     typeTable[memberName] = Value.fromAuto(

@@ -1,4 +1,5 @@
 module dua.value;
+import dua.attributes;
 
 import std.algorithm : map;
 import std.array : array;
@@ -540,7 +541,7 @@ private ReflectedLayout reflectedLayout(T)()
 // Class descriptors and invokers are registered once per qualified D type/thread.
 // The only per-return data is the original D reference in Value.
 private ReflectedCallable makeClassCallable(alias declaration, Root, string expression = "receiver")(
-    string debugName)
+    string debugName) if (!isNoBind!declaration)
 {
     static if (__traits(isStaticFunction, declaration))
         return makeStaticReflectedCallable!declaration(debugName);
@@ -674,7 +675,7 @@ private void registerClassAliases(Root, Current, string expression = "receiver",
             enum next = raw;
             alias Target = Unqual!Member;
         }
-        static if (staticIndexOf!(Target, Seen) < 0)
+        static if (staticIndexOf!(Target, Seen) < 0 && !hasNoBindOverload!(Current, name))
         {
             layout.aliasThisTargets ~= Value.fromFunction(new ReflectedCallable(
                 Root.stringof ~ ".alias this -> " ~ Target.stringof, 0,
@@ -729,7 +730,7 @@ private TableStorage reflectedClassLayout(T)()
     registerClassAliases!(T, T, "receiver", T)(layout);
     layout.typeChain = ReflectedTypeMetadata!T.chain();
     layout.classPrototype = true;
-    static if (__traits(compiles, format("%s", T.init)))
+    static if (!hasNoBindOverload!(T, "toString") && __traits(compiles, format("%s", T.init)))
         layout.classStringifier = function string(const(Object) instance) {
             auto receiver = cast(T) instance;
             return format("%s", receiver);
@@ -1650,10 +1651,10 @@ struct Value
             auto owner = reflectedTarget;
             result.tableStorage.nativeOwner = owner;
             result.tableStorage.copier = () => Value.reflect(owner.value);
-            static if (__traits(hasMember, T, "toString")
+            static if (!hasNoBindOverload!(T, "toString") && __traits(hasMember, T, "toString")
                 && __traits(compiles, format("%s", owner.value)))
                 result.tableStorage.stringifier = () => format("%s", owner.value);
-            static if (__traits(compiles, owner.value == owner.value))
+            static if (!hasNoBindOverload!(T, "opEquals") && __traits(compiles, owner.value == owner.value))
                 result.tableStorage.keyEquals = (Value other) {
                     auto otherOwner = cast(ReflectedStructStorage!T) other.tableStorage.nativeOwner;
                     return otherOwner !is null && owner.value == otherOwner.value;
@@ -1663,7 +1664,7 @@ struct Value
         {
             result.nativeClass = ReflectedClassStorage(
                 reflectedTarget, is(T : Object), is(T : immutable(Object)));
-            static if (__traits(hasMember, T, "toString")
+            static if (!hasNoBindOverload!(T, "toString") && __traits(hasMember, T, "toString")
                 && __traits(compiles, format("%s", reflectedTarget)))
                 result.tableStorage.stringifier = () => format("%s", reflectedTarget);
         }
@@ -1711,10 +1712,10 @@ struct Value
         result.tableStorage.aliasThisTargets = aliasTargets;
         result.tableStorage.nativeOwner = owner;
         result.tableStorage.copier = () => Value.reflect(owner.value);
-        static if (__traits(hasMember, T, "toString")
+        static if (!hasNoBindOverload!(T, "toString") && __traits(hasMember, T, "toString")
             && __traits(compiles, format("%s", owner.value)))
             result.tableStorage.stringifier = () => format("%s", owner.value);
-        static if (__traits(compiles, owner.value == owner.value))
+        static if (!hasNoBindOverload!(T, "opEquals") && __traits(compiles, owner.value == owner.value))
             result.tableStorage.keyEquals = (Value other) {
                 auto otherOwner = cast(ReflectedStructStorage!T) other.tableStorage.nativeOwner;
                 return otherOwner !is null && owner.value == otherOwner.value;
@@ -1900,7 +1901,7 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
         }
         // D rejects direct alias-this cycles, but this guard also handles
         // mutually recursive types and keeps reflection compilation bounded.
-        static if (staticIndexOf!(Next, Seen) < 0)
+        static if (staticIndexOf!(Next, Seen) < 0 && !hasNoBindOverload!(Current, aliasName))
         {
             // Keep the actual alias-this value available to host conversions.
             // Reflected members alone are insufficient when an outer method
@@ -1964,10 +1965,10 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
                     auto slot = methodName ~ operatorSymbol;
                     if (slot !in converted)
                     {
-                        static if (__traits(compiles, mixin("&" ~ nextExpression ~ "."
+                        static if (!hasNoBindOverload!(Next, methodName) && (__traits(compiles, mixin("&" ~ nextExpression ~ "."
                             ~ methodName ~ "!(\"" ~ operatorSymbol ~ "\")"))
                             || __traits(compiles, mixin(nextExpression ~ "." ~ methodName
-                                ~ "!(\"" ~ operatorSymbol ~ "\", long)(long.init)")))
+                                ~ "!(\"" ~ operatorSymbol ~ "\", long)(long.init)"))))
                             converted[slot] = Value.fromFunction(makeLazyAliasBinary!(Root, Next,
                                 nextExpression, methodName, operatorSymbol)(slot, root, lifetimeOwner));
                     }
@@ -2175,7 +2176,7 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
 }
 
 private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string debugName,
-    auto ref T value, Object lifetimeOwner = null)
+    auto ref T value, Object lifetimeOwner = null) if (!isNoBind!overload)
 {
     static if (__traits(isStaticFunction, overload))
     {
@@ -2190,17 +2191,16 @@ private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string d
             alias Delegate = ReturnType!Function delegate(Parameters!Function...);
         else
             alias Delegate = ReturnType!Function delegate(Parameters!Function);
-        Delegate callable = &__traits(getMember, value, __traits(identifier, overload));
+        Delegate callable = &__traits(child, value, overload);
         return makeReflectedCallableWithDefaults!overload(debugName, callable, lifetimeOwner);
     }
 }
 
 private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string expression)(
-    string debugName, auto ref Root root, Object lifetimeOwner = null)
+    string debugName, auto ref Root root, Object lifetimeOwner = null) if (!isNoBind!overload)
 {
     alias Function = typeof(overload);
     alias Params = Parameters!Function;
-    alias MutableParams = staticMap!(Unqual, Params);
     enum minimum = reflectedMinimumArity!overload;
     static if (is(Root == struct))
         auto receiver = &root;
@@ -2212,40 +2212,11 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
         else
             auto actualRoot = receiver;
         enum actualExpression = "actualRoot" ~ expression[4 .. $];
-        static if (hasLocationDefaults!overload())
-        {
-            if (caller.line != 0)
-            {
-                // Resolve alias-this at invocation time; use the same declaration
-                // metadata and argument conversion as ordinary reflected methods.
-                auto bound = makeBoundReflectedCallable!overload(debugName,
-                    mixin(actualExpression), lifetimeOwner);
-                return bound.invokeWithContext(args, caller);
-            }
-        }
-        auto converted = Tuple!MutableParams();
-        static foreach (index, Param; Params){{
-            if (index < args.length)
-            converted[index] = convertFromValue!(Unqual!Param)(args[index]);
-        }}
-        static if (is(ReturnType!Function == void))
-        {
-            static foreach (count; minimum .. Params.length + 1){{
-                if (args.length == count)
-                    __traits(getMember, mixin(actualExpression),
-                        __traits(identifier, overload))(converted[0 .. count]);
-            }}
-            return Value.nullValue();
-        }
-        else
-        {
-            static foreach (count; minimum .. Params.length + 1){{
-                if (args.length == count)
-                    return convertToValue(__traits(getMember, mixin(actualExpression),
-                        __traits(identifier, overload))(converted[0 .. count]));
-            }}
-            assert(0);
-        }
+        // Resolve the live alias target, then invoke the selected declaration.
+        // Calling its name with fewer arguments could select a hidden overload.
+        auto bound = makeBoundReflectedCallable!overload(debugName,
+            mixin(actualExpression), lifetimeOwner);
+        return bound.invokeWithContext(args, caller);
     };
     return new ReflectedCallable(debugName, minimum, null, lifetimeOwner,
         (scope const(Value)[] args) {
@@ -2265,7 +2236,7 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
 
 private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
     string methodName, string operatorSymbol)(string debugName, auto ref Root root,
-        Object lifetimeOwner = null)
+        Object lifetimeOwner = null) if (!hasNoBindOverload!(Target, methodName))
 {
     static if (is(Root == struct))
         auto receiver = &root;
@@ -2354,6 +2325,7 @@ private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
 
 private ReflectedCallable makeLazyAliasEquality(Root, Target, string expression)(
     string debugName, auto ref Root root, Object lifetimeOwner = null)
+    if (!hasNoBindOverload!(Target, "opEquals"))
 {
     static if (is(Root == struct))
         auto receiver = &root;
@@ -2372,19 +2344,20 @@ private ReflectedCallable makeLazyAliasEquality(Root, Target, string expression)
     }, lifetimeOwner);
 }
 
-ReflectedCallable makeStaticReflectedCallable(alias overload)(string debugName)
+ReflectedCallable makeStaticReflectedCallable(alias overload)(string debugName) if (!isNoBind!overload)
 {
     auto callable = &overload;
     return makeReflectedCallableWithDefaults!overload(debugName, callable);
 }
 
-ReflectedCallable makeAliasReflectedCallable(alias callable)(string debugName)
+ReflectedCallable makeAliasReflectedCallable(alias callable)(string debugName) if (!isNoBind!callable)
 {
     auto storedCallable = callable;
     return makeReflectedCallableWithDefaults!callable(debugName, storedCallable);
 }
 
 ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugName)
+    if (!hasNoBindOverload!(T, "__ctor"))
 {
     alias Params = Parameters!constructor;
     alias MutableParams = staticMap!(Unqual, Params);
@@ -2442,10 +2415,13 @@ private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string o
 
     void registerCandidate(alias declaration)()
     {
-        auto callable = &__traits(child, value, declaration);
-        static if (Parameters!(typeof(callable)).length == 1
-            && __traits(compiles, makeReflectedCallable(debugName, callable, lifetimeOwner)))
-            candidates ~= makeReflectedCallable(debugName, callable, lifetimeOwner);
+        static if (!isNoBind!declaration)
+        {
+            auto callable = &__traits(child, value, declaration);
+            static if (Parameters!(typeof(callable)).length == 1
+                && __traits(compiles, makeReflectedCallable(debugName, callable, lifetimeOwner)))
+                candidates ~= makeReflectedCallable(debugName, callable, lifetimeOwner);
+        }
     }
 
     // Instantiate each declaration separately: taking the address of the
@@ -2491,6 +2467,7 @@ private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string o
 
 private ReflectedCallable makeBoundUnaryOperator(T, string operatorSymbol)(
     string debugName, auto ref T value, Object lifetimeOwner = null)
+    if (!hasNoBindOverload!(T, "opUnary"))
 {
     auto callable = mixin("&value.opUnary!(\"" ~ operatorSymbol ~ "\")");
     auto bound = makeReflectedCallable(debugName, callable, lifetimeOwner);
@@ -2500,7 +2477,7 @@ private ReflectedCallable makeBoundUnaryOperator(T, string operatorSymbol)(
 }
 
 private ReflectedCallable makeBoundEqualityOperator(T)(string debugName, auto ref T value,
-    Object lifetimeOwner = null)
+    Object lifetimeOwner = null) if (!hasNoBindOverload!(T, "opEquals"))
 {
     auto callable = &value.opEquals;
     auto bound = makeReflectedCallable(debugName, callable, lifetimeOwner);
@@ -2593,7 +2570,7 @@ auto describeHostCompletionType(T)()
     }}
     static foreach (name; __traits(allMembers, T))
     {{
-        static if (name.length && name[0] != '_'
+        static if (name.length && name[0] != '_' && !hasNoBindOverload!(T, name)
             && __traits(compiles, __traits(getVisibility, __traits(getMember, T, name)))
             && (__traits(getVisibility, __traits(getMember, T, name)) == "public"
                 || __traits(getVisibility, __traits(getMember, T, name)) == "export"))
