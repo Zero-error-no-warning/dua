@@ -120,8 +120,8 @@ mixin template FunctionBindingAPI()
         if (dua.binding.isHostCallable!C)
     {
         static if (isAggregateType!C)
-            static if (hasNoBindOverload!(C, "opCall"))
-                enforce(false, "@NoBind opCall cannot be registered: " ~ name);
+            static if (hasNoBindCallablePath!C)
+                enforce(false, "@NoBind callable path cannot be registered: " ~ name);
         static if (__traits(compiles, registerHostType!C()))
             registerHostType!C();
         static if (__traits(compiles, recordCompletionFunction!C(name)))
