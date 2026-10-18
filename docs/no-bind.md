@@ -27,7 +27,10 @@ conservatively suppresses the corresponding name if any overload is marked.
 Explicit `bindFunc!declaration` rejects the entire selected overload set with an
 exception at registration if any member has `@NoBind`; it creates neither a
 partial binding nor completion metadata. Callable aggregates passed to runtime
-`bindFunc` are likewise rejected if their `opCall` set contains a marked member.
+`bindFunc` are likewise rejected if their `opCall` set contains a marked member,
+or callability traverses a marked alias-this accessor (including nested wrappers).
+This inspection never invokes the accessor. An aggregate's own/inherited `opCall`
+does not traverse an unrelated alias-this accessor and remains available.
 
 D erases declaration UDAs when a function is converted to a function pointer or
 delegate. The runtime `bindFunc(name, pointerOrDelegate)` form cannot recover that

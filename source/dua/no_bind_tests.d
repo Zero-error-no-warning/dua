@@ -81,6 +81,109 @@ private struct HiddenCallable
     @NoBind int opCall(int n) { ++hiddenCalls; return n; }
 }
 
+private struct AliasCallableTarget { int opCall(int n) { return n + 10; } }
+private struct HiddenCallableAccessor
+{
+    AliasCallableTarget target;
+    @NoBind ref AliasCallableTarget accessor() { ++hiddenCalls; return target; }
+    alias accessor this;
+}
+private struct NestedHiddenCallable
+{
+    HiddenCallableAccessor inner;
+    alias inner this;
+}
+private struct NestedAccessorCallable
+{
+    HiddenCallableAccessor inner;
+    ref HiddenCallableAccessor accessor() { ++hiddenCalls; return inner; }
+    alias accessor this;
+}
+private class HiddenClassCallable
+{
+    AliasCallableTarget target;
+    @NoBind ref AliasCallableTarget accessor() { ++hiddenCalls; return target; }
+    alias accessor this;
+}
+private class InheritedHiddenClassCallable : HiddenClassCallable {}
+private class VisibleAliasOverride : HiddenClassCallable
+{
+    AliasCallableTarget other;
+    ref AliasCallableTarget visibleAccessor() { return other; }
+    alias visibleAccessor this;
+}
+private class InheritedVisibleAliasOverride : VisibleAliasOverride {}
+private struct HiddenPropertyCallable
+{
+    AliasCallableTarget target;
+    @NoBind @property ref AliasCallableTarget accessor() { ++hiddenCalls; return target; }
+    alias accessor this;
+}
+private struct VisibleCallableAccessor
+{
+    AliasCallableTarget target;
+    ref AliasCallableTarget accessor() { return target; }
+    alias accessor this;
+}
+private struct VisibleCallableField
+{
+    AliasCallableTarget target;
+    alias target this;
+}
+private struct DirectCallableWithHiddenAlias
+{
+    AliasCallableTarget target;
+    @NoBind ref AliasCallableTarget accessor() { ++hiddenCalls; return target; }
+    alias accessor this;
+    int opCall(int n) { return n + 20; }
+}
+private class VisibleClassCallable
+{
+    int opCall(int n) { return n + 30; }
+}
+private class InheritedVisibleCallable : VisibleClassCallable {}
+
+unittest
+{
+    foreach (metadata; [false, true])
+    {
+        hiddenCalls = 0;
+        auto engine = new ScriptEngine();
+        if (metadata) engine.enableCompletionMetadata(true);
+        assertThrown!Exception(engine.bindFunc("hidden", HiddenCallableAccessor.init));
+        assertThrown!Exception(engine.bindFunc("nested", NestedHiddenCallable.init));
+        assertThrown!Exception(engine.bindFunc("nestedAccessor", NestedAccessorCallable.init));
+        assertThrown!Exception(engine.bindFunc("classHidden", new HiddenClassCallable()));
+        assertThrown!Exception(engine.bindFunc("inheritedHidden", new InheritedHiddenClassCallable()));
+        assertThrown!Exception(engine.bindFunc("propertyHidden", HiddenPropertyCallable.init));
+        auto moduleHandle = engine.newModule("host");
+        assertThrown!Exception(moduleHandle.bindFunc("moduleHidden", HiddenCallableAccessor.init));
+        assert(hiddenCalls == 0);
+        foreach (name; ["hidden", "nested", "nestedAccessor", "classHidden", "inheritedHidden", "propertyHidden"])
+        {
+            assertThrown!Exception(engine.run("return " ~ name ~ "(2);"));
+            if (metadata)
+                assert(name !in engine.completionRegistry.toJson()["symbols"].object);
+        }
+        if (metadata)
+        {
+            assert("HiddenCallableAccessor" !in engine.completionRegistry.toJson()["types"].object);
+            assert("host.moduleHidden" !in engine.completionRegistry.toJson()["symbols"].object);
+        }
+        engine.bindFunc("visibleAccessor", VisibleCallableAccessor.init);
+        engine.bindFunc("visibleField", VisibleCallableField.init);
+        engine.bindFunc("direct", DirectCallableWithHiddenAlias.init);
+        engine.bindFunc("inheritedVisible", new InheritedVisibleCallable());
+        engine.bindFunc("shadowedAlias", new InheritedVisibleAliasOverride());
+        assert(engine.run("return visibleAccessor(2);").toInt() == 12);
+        assert(engine.run("return visibleField(2);").toInt() == 12);
+        assert(engine.run("return direct(2);").toInt() == 22);
+        assert(engine.run("return inheritedVisible(2);").toInt() == 32);
+        assert(engine.run("return shadowedAlias(2);").toInt() == 12);
+        assert(hiddenCalls == 0);
+    }
+}
+
 unittest
 {
     hiddenCalls = 0;
