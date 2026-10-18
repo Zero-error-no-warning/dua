@@ -37,3 +37,12 @@ test('checker accepts string literal aliases through the editor diagnostics prot
     + 'Single single = "Apple"; Mixed mixed = 1;\n';
   assert.deepEqual(await checkSource(executable, source).promise, []);
 });
+
+test('checker diagnoses invalid values for string literal unions', async () => {
+  const source = 'alias Fruit = "Apple" | "Orange";\nFruit fruit = "Banana";';
+  const diagnostics = await checkSource(executable, source).promise;
+  assert.equal(diagnostics.length, 1);
+  assert.match(diagnostics[0].message, /expects Fruit/);
+  assert.equal(diagnostics[0].line, 2);
+  assert.ok(diagnostics[0].column > 0);
+});
