@@ -1,3 +1,8 @@
+## 0.4.1
+
+- Refresh the bundled checker with string literal aliases and union constraints from Dua PR #59.
+- Accept declarations such as `alias Fruit = "Apple" | "Orange";` and diagnose incompatible literal values.
+
 ## 0.4.0
 
 - Receive structured ZsD scene runtime/load errors through an asynchronous JSON inbox.

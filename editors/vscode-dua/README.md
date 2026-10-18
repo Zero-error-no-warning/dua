@@ -13,12 +13,12 @@ Duaスクリプト（`.dua`）向けのVS Code拡張です。
 
 ## インストール（Windows x64）
 
-`dua-language-win32-x64-0.4.0.vsix` を用意し、VS Codeのコマンドパレットで **Extensions: Install from VSIX...** を実行して選択します。必要に応じて **Developer: Reload Window** を実行してください。
+`dua-language-win32-x64-0.4.1.vsix` を用意し、VS Codeのコマンドパレットで **Extensions: Install from VSIX...** を実行して選択します。必要に応じて **Developer: Reload Window** を実行してください。
 
 コマンドからインストールする場合は、リポジトリのルートで次を実行します。
 
 ```powershell
-code --install-extension .\editors\vscode-dua\dua-language-win32-x64-0.4.0.vsix
+code --install-extension .\editors\vscode-dua\dua-language-win32-x64-0.4.1.vsix
 ```
 
 Windows x64用VSIXには診断ツールを含むため、利用時にDコンパイラーやNode.jsを別途インストールする必要はありません。`.dua` を開けばDuaとして認識され、`Ctrl+Space` で補完候補を表示できます。ワークスペースが信頼済みの場合、診断は自動で有効になります。
@@ -33,6 +33,10 @@ int add(int left, int right) {
 auto values = iota(5);
 auto total = add(10, 20);
 int wrong = "text"; // intとstringの不一致を表示
+
+alias Fruit = "Apple" | "Orange";
+Fruit fruit = "Apple";
+Fruit invalid = "Banana"; // 候補にない値を診断
 ```
 
 `math.` の後に補完を開くと `abs` / `floor` / `min` / `max` を表示します。`func`、`for`、`foreach`、`struct`、`try`、`import`、`instanceimport`、`lambda`、`istr` はスニペットの入力候補です。
