@@ -6,6 +6,23 @@ import std.algorithm : canFind;
 private class LiteralItem { int value = 7; }
 private class DerivedLiteralItem : LiteralItem { int extra = 1; }
 
+unittest
+{
+    enum prefix = `alias Fruit="Apple"|"Orange"; alias Grid=Fruit[][]|int[][];
+        Grid values=[["Apple","Orange"]]; auto row=values[0]; values[0]=[1,2]; `;
+    rejects(prefix ~ `row[0]=1;`, false);
+    rejects(prefix ~ `auto sliced=row[0..$]; sliced[0]=1;`, false);
+    rejects(prefix ~ `auto joined=row ~ ["Apple"]; joined[0]=1;`, false);
+    accepts(prefix ~ `row[0]="Orange"; return row[1]=="Orange" && values[0][0]==1;`);
+    accepts(`alias Fruit="Apple"|"Orange"; alias Grid=Fruit[][]|int[][];
+        Grid values=[["Apple"]]; auto row=values[0]; values[0]=["Orange"];
+        row[0]=1; return row[0]==1 && values[0][0]=="Orange";`);
+    rejects(`alias Fruit="Apple"|"Orange"; alias Cube=Fruit[][][]|int[][][];
+        Cube values=[[["Apple","Orange"]]]; auto plane=values[0]; values[0]=[[1,2]];
+        plane[0]=["Orange","Apple"]; auto row=plane[0]; plane[0]=["Apple"];
+        row[0]=1;`, false);
+}
+
 private void accepts(string source)
 {
     auto diagnostics = (new ScriptEngine).check(source);

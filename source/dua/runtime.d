@@ -1640,30 +1640,76 @@ final class ScriptEngine
 
     private Value prepareUnionArray(Value value, string typeName)
     {
-        enforce(valueMatchesType(value, typeName), "Array expected " ~ typeName);
         value.arrayUnionType = typeName;
-        value.arrayValidation = new ArrayValidation;
+        return prepareUnionArray(value, [typeName]);
+    }
+
+    private bool matchesUnionArrayTypes(Value value, string[] types)
+    {
+        foreach (typeName; types) if (valueMatchesType(value, typeName)) return true;
+        return false;
+    }
+
+    // 各分岐の要素型を集め、最初に一致した分岐へ固定しません。
+    private string[] unionArrayElementTypes(string[] types, size_t depth = 0)
+    {
+        if (depth >= 64) return ["any"];
+        string[] result;
+        foreach (typeName; types)
+        {
+            auto resolved = resolveContainerType(typeName);
+            if (resolved == "any" || resolved == "auto" || resolved == "array") return ["any"];
+            string element, key;
+            if (splitContainerType(resolved, element, key) && !key.length) result ~= element;
+            else if (auto definition = findTypeDefinition(resolved))
+            {
+                if (!definition.tableValue["isTable"].truthy())
+                {
+                    string[] alternatives;
+                    foreach (candidate; definition.tableValue["alternatives"].arrayValue)
+                        alternatives ~= candidate.toHostString();
+                    result ~= unionArrayElementTypes(alternatives, depth + 1);
+                }
+            }
+        }
+        return result;
+    }
+
+    private Value prepareUnionArray(Value value, string[] types)
+    {
+        if (types.canFind("any") || types.canFind("auto")) return value;
+        enforce(matchesUnionArrayTypes(value, types), "Array expected " ~ types.join(" | "));
+        if (value.arrayValidation is null) value.arrayValidation = new ArrayValidation;
+        auto key = types.join("\0");
+        if (value.arrayValidation.hasConstraint(key)) return value;
         auto root = value;
-        void delegate() check = () { enforce(valueMatchesType(root, typeName), "Array expected " ~ typeName); };
+        void delegate() check = () { enforce(matchesUnionArrayTypes(root, types), "Array expected " ~ types.join(" | ")); };
         void delegate() refresh;
         refresh = () {
             bool[ArrayValidation] visited;
-            attachUnionArrayValidation(root, check, refresh, visited);
+            attachUnionArrayValidation(root, check, refresh, types, visited);
         };
+        // 切り離された内配列にも自身の制約と更新役を残します。
+        root.arrayValidation.addConstraint(key, types, check, refresh);
         refresh();
         return root;
     }
 
     private void attachUnionArrayValidation(ref Value value, void delegate() check,
-        void delegate() refresh, ref bool[ArrayValidation] visited)
+        void delegate() refresh, string[] types, ref bool[ArrayValidation] visited)
     {
         if (value.kind != ValueKind.array) return;
         if (value.arrayValidation is null) value.arrayValidation = new ArrayValidation;
         if (value.arrayValidation in visited) return;
         visited[value.arrayValidation] = true;
         value.arrayValidation.add(check, refresh);
+        auto elementTypes = unionArrayElementTypes(types);
         foreach (ref element; value.arrayValue)
-            attachUnionArrayValidation(element, check, refresh, visited);
+        {
+            if (element.kind != ValueKind.array) continue;
+            element = prepareUnionArray(element, elementTypes);
+            attachUnionArrayValidation(element, check, refresh, elementTypes, visited);
+        }
     }
 
     private bool typeAllowsNull(string typeName, size_t depth = 0)

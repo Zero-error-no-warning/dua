@@ -1244,7 +1244,10 @@ mixin template EvaluatorImplementation()
                             sliced = container.arrayValue[lowerBound .. upperBound].dup;
                         }
                         auto result = Value.fromOwnedArray(sliced, container.arrayElementType);
-                        return container.arrayUnionType.length ? prepareUnionArray(result, container.arrayUnionType) : result;
+                        if (container.arrayValidation !is null)
+                            foreach (types; container.arrayValidation.localTypes)
+                                result = prepareUnionArray(result, types);
+                        return result;
                     }
                     auto indices = evaluateExpressionList(indexed.indices, environment);
                     return readIndex(container, indices, callSite(indexed));
@@ -1454,12 +1457,15 @@ mixin template EvaluatorImplementation()
                     combined.length = left.arrayValue.length + added.length;
                     combined[0 .. left.arrayValue.length] = left.arrayValue;
                     combined[left.arrayValue.length .. $] = added;
-                    if (left.arrayUnionType.length)
+                    if (left.arrayValidation !is null && left.arrayValidation.localTypes.length)
                     {
                         // 追加リスト全体でmemoを共有し、既存の検査済み内配列へのaliasも保持します。
                         auto prepared = copyUnionArray(Value.fromOwnedArray(added.dup), true);
                         combined[left.arrayValue.length .. $] = prepared.arrayValue;
-                        return prepareUnionArray(Value.fromOwnedArray(combined), left.arrayUnionType);
+                        auto result = Value.fromOwnedArray(combined);
+                        foreach (types; left.arrayValidation.localTypes)
+                            result = prepareUnionArray(result, types);
+                        return result;
                     }
                     if (left.arrayElementType.length)
                         foreach (ref element; combined)

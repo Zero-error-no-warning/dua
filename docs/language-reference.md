@@ -54,6 +54,7 @@ Array unions validate the whole array against any alternative, without fixing th
 `Fruit[] | string[]` permits changing `"Apple"` to `"Banana"`, while `Fruit[] | int[]` rejects mixed arrays.
 Nested/shared array mutations are checked together and invalid writes leave the previous contents intact.
 Slices and concatenation create independent outer arrays; shared inner arrays retain both constraints.
+Detached inner arrays retain their own candidate types, including through later slices and concatenation.
 For `T rest...`, each remaining argument is checked as `T` and the body receives `T[]`.
 Associative-array unions retain the existing annotation-based matching: initialize a `Fruit[string]`
 value before passing it to `Fruit[string] | null`; unannotated AA literals are not implicitly converted.

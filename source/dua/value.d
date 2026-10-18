@@ -859,6 +859,14 @@ private final class AssociativeStorage
 package(dua) final class ArrayValidation
 {
     private void delegate()[] checks, refreshers;
+    private string[] constraintKeys;
+    string[][] localTypes;
+    bool hasConstraint(string key) { foreach (existing; constraintKeys) if (existing == key) return true; return false; }
+    void addConstraint(string key, string[] types, void delegate() check, void delegate() refresh)
+    {
+        constraintKeys ~= key; localTypes ~= types.dup;
+        add(check, refresh);
+    }
     void add(void delegate() check, void delegate() refresh)
     {
         foreach (existing; checks) if (existing == check) return;
