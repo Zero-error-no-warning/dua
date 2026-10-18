@@ -1,5 +1,6 @@
 module dua;
 
+public import dua.attributes;
 public import dua.runtime;
 public import dua.execution;
 public import dua.value;
@@ -13,6 +14,7 @@ public import dua.value;
 /// ---
 struct Dua
 {
+    alias NoBind = dua.attributes.NoBind;
     alias Value = dua.value.Value;
     alias ValueKind = dua.value.ValueKind;
     alias CallableValue = dua.value.CallableValue;
