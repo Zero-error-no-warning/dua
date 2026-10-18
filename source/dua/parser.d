@@ -1194,7 +1194,7 @@ private struct Parser
                     return locatedExpression(new AssociativeArrayExpression(keys, values), startToken);
                 }
             }
-            while (match(TokenKind.comma));
+            while (match(TokenKind.comma) && !check(TokenKind.rightBracket));
         }
         consume(TokenKind.rightBracket, "Expected ']' after array literal");
         return locatedExpression(new ArrayExpression(items.data, spreads.data), startToken);
