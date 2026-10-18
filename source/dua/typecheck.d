@@ -8,11 +8,13 @@ import dua.value : ValueKind;
 import dua.type_syntax;
 import std.algorithm : canFind;
 import std.format : format;
+import std.json : JSONValue, parseJSON;
 
 private struct StaticFunctionInfo
 {
     string[] parameterTypes;
     string returnType;
+    bool variadic;
 }
 
 /// Checks a source unit with the host class names registered by its engine.
@@ -58,7 +60,10 @@ private void checkStatements(Statement[] statements, ref string[string] variable
 {
     foreach (statement; statements)
         if (statement.kind == Statement.Kind.alias_)
-            variables["#type_" ~ statement.name] = statement.names.length == 1 ? statement.names[0] : "any";
+        {
+            if (statement.names.length == 1) variables["#type_" ~ statement.name] = statement.names[0];
+            else variables["#union_" ~ statement.name] = JSONValue(statement.names).toString();
+        }
     expectedReturnType = resolveStaticType(expectedReturnType, variables);
     foreach (statement; statements)
     {
@@ -67,7 +72,7 @@ private void checkStatements(Statement[] statements, ref string[string] variable
             string[] parameterTypes;
             foreach (type; statement.parameterTypes) parameterTypes ~= resolveStaticType(type, variables);
             functions[statement.name] = StaticFunctionInfo(
-                parameterTypes, resolveStaticType(statement.returnType, variables));
+                parameterTypes, resolveStaticType(statement.returnType, variables), statement.variadic);
         }
     }
     foreach (statement; statements)
@@ -88,7 +93,9 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                             format("Variable '%s' expects %s but expression has type %s",
                                 name, statement.declaredType, actual));
                     // nullから始めるauto変数には、後から実体を格納できます。
-                    variables[name] = declared == "auto" ? (actual == "null" ? "any" : actual) : declared;
+                    variables[name] = declared == "auto"
+                        ? (actual == "null" || ("#union_" ~ actual in variables) !is null ? "any"
+                            : isStringLiteralType(actual) ? "string" : actual) : declared;
                 }
                 break;
             case Statement.Kind.assign:
@@ -96,7 +103,11 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                 {
                     auto expression = index < statement.expressions.length ? statement.expressions[index] : null;
                     if (statement.assignmentOperator.length)
+                    {
                         expression = new BinaryExpression(target, statement.assignmentOperator, expression);
+                        expression.line = target.line;
+                        expression.column = target.column;
+                    }
                     auto actual = index < statement.expressions.length
                         ? inferExpressionType(expression, variables, functions, diagnostics)
                         : "any";
@@ -142,6 +153,8 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                 foreach (index, parameter; statement.parameters)
                     childVariables[parameter] = index < statement.parameterTypes.length
                         ? resolveStaticType(statement.parameterTypes[index], variables) : "any";
+                if (statement.variadic && statement.parameters.length && statement.parameterTypes.length)
+                    childVariables[statement.parameters[$ - 1]] = resolveStaticType(statement.parameterTypes[$ - 1], variables) ~ "[]";
                 checkStatements(statement.body, childVariables, functions, diagnostics,
                     statement.returnType);
                 break;
@@ -224,7 +237,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
                 case ValueKind.integer: return "int";
                 case ValueKind.floating: return "double";
                 case ValueKind.boolean: return "bool";
-                case ValueKind.string_: return "string";
+                case ValueKind.string_: return stringLiteralType((cast(LiteralExpression) expression).value.stringValue);
                 case ValueKind.null_: return "null";
                 case ValueKind.array: return "array";
                 case ValueKind.associativeArray: return "associativeArray";
@@ -265,6 +278,8 @@ private string inferExpressionType(Expression expression, ref string[string] var
             auto op = (cast(BinaryExpression) expression).operatorSymbol;
             if (op == "~")
             {
+                // Unionが配列か文字列かは動的値で決まるため、連結結果は実行時に検査します。
+                if (("#union_" ~ left in variables) !is null || ("#union_" ~ right in variables) !is null) return "any";
                 string element, key;
                 auto leftArray = left == "array" || (splitContainerType(left, element, key) && !key.length);
                 auto rightArray = right == "array" || (splitContainerType(right, element, key) && !key.length);
@@ -296,12 +311,14 @@ private string inferExpressionType(Expression expression, ref string[string] var
                     foreach (index, argument; (cast(CallExpression) expression).arguments)
                     {
                         auto actual = inferExpressionType(argument, variables, functions, diagnostics);
-                        if (index < functionInfo.parameterTypes.length
-                            && !staticTypesCompatible(actual, functionInfo.parameterTypes[index], variables))
+                        auto parameterIndex = functionInfo.variadic && functionInfo.parameterTypes.length
+                            && index >= functionInfo.parameterTypes.length - 1 ? functionInfo.parameterTypes.length - 1 : index;
+                        if (parameterIndex < functionInfo.parameterTypes.length
+                            && !staticTypesCompatible(actual, functionInfo.parameterTypes[parameterIndex], variables))
                             diagnostics ~= CheckDiagnostic(argument.line, argument.column,
                                 format("Argument %s to '%s' expects %s but has type %s",
                                     index + 1, (cast(VariableExpression) (cast(CallExpression) expression).callee).name,
-                                    functionInfo.parameterTypes[index], actual));
+                                    functionInfo.parameterTypes[parameterIndex], actual));
                     }
                     return functionInfo.returnType.length > 0 ? functionInfo.returnType : "any";
                 }
@@ -344,6 +361,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
 private string resolveStaticType(string name, ref string[string] variables, size_t depth = 0)
 {
     if (depth >= 64) return "any";
+    if (isStringLiteralType(name)) return name;
     if (isBuiltinTypeName(name)) return name;
     if (("#dynamic_type_" ~ name in variables) !is null) return "any";
     if (auto aliasType = "#type_" ~ name in variables)
@@ -355,11 +373,30 @@ private string resolveStaticType(string name, ref string[string] variables, size
     return name;
 }
 
-private bool staticTypesCompatible(string actual, string expected, ref string[string] variables)
+private bool staticTypesCompatible(string actual, string expected, ref string[string] variables, size_t depth = 0)
 {
+    if (depth >= 64) return true;
+    actual = resolveStaticType(actual, variables);
+    expected = resolveStaticType(expected, variables);
+    if (actual == "any" || expected == "any" || expected == "auto") return true;
+    // Unionの実体は型名のまま保持し、配列の要素型などへ展開して曖昧な文字列にしません。
+    if (auto alternatives = "#union_" ~ actual in variables)
+    {
+        foreach (member; parseJSON(*alternatives).array)
+            if (!staticTypesCompatible(member.str, expected, variables, depth + 1)) return false;
+        return true;
+    }
+    if (auto alternatives = "#union_" ~ expected in variables)
+    {
+        foreach (member; parseJSON(*alternatives).array)
+            if (staticTypesCompatible(actual, member.str, variables, depth + 1)) return true;
+        return false;
+    }
+    if (isStringLiteralType(expected))
+        return actual == expected || actual == "string"; // 動的なstringの値制約は実行時に確認します。
+    if (isStringLiteralType(actual)) actual = "string";
     if (actual == "null" && !isBuiltinTypeName(expected)
         && ("#class_" ~ expected in variables) !is null) return true;
-    if (actual == "any" || expected == "any" || expected == "auto") return true;
     if (["byte", "ubyte", "short", "ushort", "uint", "long", "ulong"].canFind(expected))
         return actual == "int";
     if (expected == "float" || expected == "real") return actual == "double";

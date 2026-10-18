@@ -855,6 +855,19 @@ private final class AssociativeStorage
     }
 }
 
+// 同じ配列を参照する値は、union全体の検査も共有します。
+package(dua) final class ArrayValidation
+{
+    private void delegate()[] checks, refreshers;
+    void add(void delegate() check, void delegate() refresh)
+    {
+        foreach (existing; checks) if (existing == check) return;
+        checks ~= check; refreshers ~= refresh;
+    }
+    void validate() { foreach (check; checks) check(); }
+    void refresh() { foreach (refresh; refreshers.dup) refresh(); }
+}
+
 struct Value
 {
     // Module identity belongs to the reference table, not its import spelling.
@@ -877,6 +890,8 @@ struct Value
     Value[] arrayValue;
     // Explicit script array annotations survive aliases, slices and concatenation.
     package(dua) string arrayElementType;
+    package(dua) string arrayUnionType;
+    package(dua) ArrayValidation arrayValidation;
     private TableStorage tableStorage;
     private ReflectedClassStorage nativeClass;
     private Object functionReceiver;

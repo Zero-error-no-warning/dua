@@ -28,5 +28,15 @@ test('TextMate correctly ends nested comments, nested interpolation, and incompl
   const unfinishedInterpolation = grammar.tokenizeLine('auto text = i"$(length(iota(');
   const afterInterpolation = grammar.tokenizeLine('auto after = 1;', unfinishedInterpolation.ruleStack);
   assert.ok(!scopesAt(afterInterpolation, 5).includes('meta.interpolation.dua'));
+  const literalAlias = 'alias Fruit = "Apple" | "日本😀" | string;';
+  const aliasTokens = grammar.tokenizeLine(literalAlias);
+  assert.ok(scopesAt(aliasTokens, 0).includes('storage.type.dua'));
+  for (const value of ['Apple', '日本😀']) {
+    assert.ok(scopesAt(aliasTokens, literalAlias.indexOf(value)).includes('string.quoted.double.dua'));
+  }
+  assert.ok(scopesAt(aliasTokens, literalAlias.indexOf('|')).includes('keyword.operator.dua'));
+  assert.ok(scopesAt(aliasTokens, literalAlias.indexOf('string')).includes('support.type.primitive.dua'));
+  const afterAlias = grammar.tokenizeLine('Fruit fruit = "Apple";', aliasTokens.ruleStack);
+  assert.ok(!scopesAt(afterAlias, 0).includes('string.quoted.double.dua'));
   registry.dispose();
 });
