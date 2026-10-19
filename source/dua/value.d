@@ -485,6 +485,87 @@ private ReflectedMemberBinding bindReflectedEquality(T)(Object receiver)
         T.stringof ~ ".opEquals", owner.value, owner)));
 }
 
+// aliasの到達先は呼出時に解決し、共有するのは型と名前だけにします。
+private ReflectedMemberBinding bindReflectedAliasMethod(Root, Target, string expression, string name)(Object receiver)
+{
+    auto owner = cast(ReflectedStructStorage!Root) receiver;
+    ReflectedCallable[] overloads;
+    static foreach (overload; __traits(getOverloads, Target, name))
+        static if (__traits(compiles, makeLazyAliasCallable!(overload, Root, expression)(name, owner.value, owner)))
+            overloads ~= makeLazyAliasCallable!(overload, Root, expression)(Root.stringof ~ "." ~ name, owner.value, owner);
+    return ReflectedMemberBinding(Value.fromFunction(overloads.length == 1 ? cast(CallableValue) overloads[0]
+        : new OverloadedReflectedCallable(Root.stringof ~ "." ~ name, overloads)));
+}
+
+private ReflectedMemberBinding bindReflectedAliasBinary(Root, Target, string expression, string method, string op)(Object receiver)
+{
+    auto owner = cast(ReflectedStructStorage!Root) receiver;
+    return ReflectedMemberBinding(Value.fromFunction(makeLazyAliasBinary!(Root, Target, expression, method, op)(
+        method ~ op, owner.value, owner)));
+}
+
+private ReflectedMemberBinding bindReflectedAliasEquality(Root, Target, string expression)(Object receiver)
+{
+    auto owner = cast(ReflectedStructStorage!Root) receiver;
+    return ReflectedMemberBinding(Value.fromFunction(makeLazyAliasEquality!(Root, Target, expression)(
+        Root.stringof ~ ".opEquals", owner.value, owner)));
+}
+
+private void registerStructAliasLayout(Root, Current, string expression, Seen...)(ReflectedLayout layout)
+{
+    static if (__traits(getAliasThis, Current).length)
+    {
+        enum aliasName = __traits(getAliasThis, Current)[0];
+        enum rawExpression = expression ~ "." ~ aliasName;
+        // 型検査のための実体を作らず、destructor等の副作用を避けます。
+        alias Member = typeof(mixin("(*cast(Root*) null)" ~ rawExpression[4 .. $]));
+        static if (isCallable!Member && !isAggregateType!Member)
+        {
+            enum nextExpression = rawExpression ~ "()";
+            alias Next = Unqual!(ReturnType!Member);
+        }
+        else
+        {
+            enum nextExpression = rawExpression;
+            alias Next = Unqual!Member;
+        }
+        static if (staticIndexOf!(Next, Seen) < 0 && !hasNoBindOverload!(Current, aliasName) && isAggregateType!Next)
+        {
+            enum inspectExpression = "(*cast(Root*) null)" ~ nextExpression[4 .. $];
+            static foreach (name; __traits(allMembers, Next))
+            {{
+                static if (name != "this" && name != "__ctor" && name != "Monitor" && name != "factory"
+                    && __traits(compiles, __traits(getOverloads, Next, name)))
+                {
+                    enum count = () {
+                        size_t total;
+                        static foreach (overload; __traits(getOverloads, Next, name))
+                            static if (__traits(compiles, makeLazyAliasCallable!(overload, Root, nextExpression)(name, *cast(Root*) null))) ++total;
+                        return total;
+                    }();
+                    static if (count > 0)
+                        if (name !in layout.members) layout.members[name] = ReflectedMemberPlan(size_t.max,
+                            &bindReflectedAliasMethod!(Root, Next, nextExpression, name));
+                }
+            }}
+            static foreach (op; ["+", "-", "*", "/", "%", "~", "&", "|", "^", "<<", ">>"])
+            {{
+                static foreach (method; ["opBinary", "opBinaryRight"])
+                {{
+                    static if (!hasNoBindOverload!(Next, method) && (__traits(compiles, mixin("&" ~ inspectExpression ~ "." ~ method ~ "!(\"" ~ op ~ "\")"))
+                        || __traits(compiles, mixin(inspectExpression ~ "." ~ method ~ "!(\"" ~ op ~ "\", long)(long.init)"))))
+                        if (method ~ op !in layout.members) layout.members[method ~ op] = ReflectedMemberPlan(size_t.max,
+                            &bindReflectedAliasBinary!(Root, Next, nextExpression, method, op));
+                }}
+            }}
+            static if (__traits(compiles, makeLazyAliasEquality!(Root, Next, nextExpression)(Root.stringof ~ ".opEquals", *cast(Root*) null)))
+                if ("__eq" !in layout.members) layout.members["__eq"] = ReflectedMemberPlan(size_t.max,
+                    &bindReflectedAliasEquality!(Root, Next, nextExpression));
+            registerStructAliasLayout!(Root, Next, nextExpression, Seen, Next)(layout);
+        }
+    }
+}
+
 private ReflectedLayout reflectedLayout(T)()
 {
     static ReflectedLayout cached;
@@ -533,6 +614,8 @@ private ReflectedLayout reflectedLayout(T)()
         static if (__traits(compiles, convertToValue(mixin("(*cast(T*) null)." ~ name))))
             result.members[name] = ReflectedMemberPlan(result.fieldCount++, &bindReflectedField!(T, name));
     }}
+    static if (__traits(getAliasThis, T).length && !isInstanceOf!(Tuple, T))
+        registerStructAliasLayout!(T, T, "root", T)(result);
     foreach (name; result.members.byKey) result.copyOrder ~= name;
     cached = result;
     return cached;
@@ -1447,7 +1530,7 @@ struct Value
             result.nativeClass = ReflectedClassStorage(value, is(T : Object), is(T : immutable(Object)));
             return result;
         }
-        else static if (is(T == struct) && !hasAggregateAliasThis!T)
+        else static if (is(T == struct))
             return reflectWithLayout(value);
         else
             return reflectEager(value);
@@ -1678,6 +1761,19 @@ struct Value
         data.layout = reflectedLayout!T();
         data.owner = owner;
         data.fields.length = data.layout.fieldCount;
+        auto storage = new TableStorage;
+        storage.reflected = data;
+        // alias経由の演算子アドレス取得はgetterを評価し得ます。
+        // 既存の反映順序（フィールドsnapshotより前）だけは遅延しません。
+        static if (hasAggregateAliasThis!T)
+        {
+            static foreach (op; ["-", "!"])
+                static if (__traits(compiles, makeBoundUnaryOperator!(T, op)(T.stringof ~ ".opUnary" ~ op, owner.value, owner)))
+                    data.bind("opUnary" ~ op, storage);
+            static if (staticIndexOf!("opEquals", __traits(allMembers, T)) >= 0
+                && __traits(compiles, makeBoundEqualityOperator(T.stringof ~ ".opEquals", owner.value, owner)))
+                data.bind("__eq", storage);
+        }
         size_t index;
         static foreach (name; FieldNameTuple!T)
         {{
@@ -1688,13 +1784,16 @@ struct Value
         auto aliasChain = ReflectedTypeMetadata!T.aliasChain;
         static if (__traits(getAliasThis, T).length && !isInstanceOf!(Tuple, T))
         {
-            // Scalar/array aliases add conversion targets, but no forwarded
-            // aggregate members. Keep their live receiver-bound conversions.
+            // 変換先は所有者ごとに保持し、転送メンバーは共有planから遅延生成します。
             Value[string] aliasMembers;
             addAliasThisReflection!(T, T, "root", AliasSeq!T)(aliasMembers,
-                aliasTargets, aliasChain, owner.value, owner);
+                aliasTargets, aliasChain, owner.value, owner, false);
             assert(aliasMembers.length == 0);
         }
+        // 転送先だけが持つopEqualsのgetter評価は、元のalias登録と同じ位置で行います。
+        static if (hasAggregateAliasThis!T)
+            if (auto equality = "__eq" in data.layout.members)
+                if (equality.field == size_t.max) data.bind("__eq", storage);
         // Preserve conversion/copy callbacks and their original hash order.
         // Only the creation of side-effect-free bound callables is deferred.
         foreach (name; data.layout.copyOrder)
@@ -1704,8 +1803,7 @@ struct Value
         }
         Value result;
         result.kind = ValueKind.struct_;
-        result.tableStorage = new TableStorage;
-        result.tableStorage.reflected = data;
+        result.tableStorage = storage;
         result.tableStorage.typeChain = ReflectedTypeMetadata!T.chain();
         ReflectedTypeMetadata!T.aliasChain = aliasChain;
         result.tableStorage.aliasThisChain = aliasChain;
@@ -1876,7 +1974,7 @@ struct Value
 
 private void addAliasThisReflection(Root, Current, string expression, Seen...)(
     ref Value[string] converted, ref Value[] aliasTargets, ref Value[] aliasChain,
-    auto ref Root root, Object lifetimeOwner = null)
+    auto ref Root root, Object lifetimeOwner = null, bool includeMembers = true)
 {
     // A string mixin is invisible to closure analysis.  Keep the receiver in a
     // normally referenced local so every escaping delegate captures it.
@@ -1932,6 +2030,8 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
 
             static if (isAggregateType!Next)
             {
+            if (includeMembers)
+            {
             static foreach (memberName; __traits(allMembers, Next))
             {{
                 static if (memberName != "this" && memberName != "__ctor"
@@ -1981,8 +2081,9 @@ private void addAliasThisReflection(Root, Current, string expression, Seen...)(
                     converted["__eq"] = Value.fromFunction(makeLazyAliasEquality!(Root, Next,
                         nextExpression)(Root.stringof ~ ".opEquals", root, lifetimeOwner));
             }
+            }
             addAliasThisReflection!(Root, Next, nextExpression, Seen, Next)(converted,
-                aliasTargets, aliasChain, root, lifetimeOwner);
+                aliasTargets, aliasChain, root, lifetimeOwner, includeMembers);
             }
         }
     }
@@ -2484,6 +2585,163 @@ private ReflectedCallable makeBoundEqualityOperator(T)(string debugName, auto re
     return new ReflectedCallable(debugName, 2, (Value[] args) {
         return bound.invoke(args[1 .. $]);
     });
+}
+
+private struct LayoutAliasTargetFixture
+{
+    int value;
+    int read(int extra = 2) { return value + extra; }
+    string read(string suffix) { return convTo!string(value) ~ suffix; }
+    void write(int next) { value = next; }
+    int opBinary(string op)(int rhs) if (op == "+") { return value + rhs; }
+    bool opEquals(const LayoutAliasTargetFixture other) const { return value == other.value; }
+    @NoBind int hidden() { return -1; }
+}
+
+private struct LayoutAliasProxyFixture
+{
+    LayoutAliasTargetFixture target;
+    int* reads;
+    ref LayoutAliasTargetFixture raw() { ++*reads; return target; }
+    alias raw this;
+    int own() { return 100; }
+}
+
+private struct LayoutAliasUnaryFixture
+{
+    int value;
+    int opUnary(string op)() if (op == "-" || op == "!") { return value; }
+}
+private struct LayoutAliasUnaryProxyFixture
+{
+    LayoutAliasUnaryFixture target;
+    int* reads;
+    ref LayoutAliasUnaryFixture raw() { ++*reads; return target; }
+    alias raw this;
+}
+private class LayoutAliasClassFixture
+{
+    override bool opEquals(Object other) { return this is other; }
+}
+private struct LayoutAliasClassProxyFixture
+{
+    LayoutAliasClassFixture target;
+    int* reads;
+    LayoutAliasClassFixture raw() { ++*reads; return target; }
+    alias raw this;
+}
+private struct LayoutAliasDisabledFixture
+{
+    LayoutAliasTargetFixture target;
+    @disable this();
+    this(int value) { target.value = value; }
+    alias target this;
+}
+private int layoutDestructs;
+private struct LayoutAliasDestructFixture
+{
+    LayoutAliasTargetFixture target;
+    alias target this;
+    @NoBind ref LayoutAliasDestructFixture opAssign(LayoutAliasDestructFixture other) { target = other.target; return this; }
+    ~this() { ++layoutDestructs; }
+}
+
+unittest
+{
+    int[] unaryReads, classReads, destructs;
+    foreach (eager; [true, false])
+    {
+        int count;
+        auto unary = LayoutAliasUnaryProxyFixture(LayoutAliasUnaryFixture(3), &count);
+        auto reflected = eager ? Value.reflectEager(unary) : Value.reflect(unary);
+        unaryReads ~= count;
+        assert(reflected.tableValue["opUnary-"].invoke([reflected]).toInt() == 3);
+        assert(count == unaryReads[$-1]); // 取得済みdelegateはgetterを再評価しません。
+        count = 0;
+        auto object = LayoutAliasClassProxyFixture(new LayoutAliasClassFixture, &count);
+        auto aliasClass = eager ? Value.reflectEager(object) : Value.reflect(object);
+        classReads ~= count;
+        auto keys = aliasClass.tableValue.byKey.array;
+        assert(count == classReads[$-1]);
+        auto source = LayoutAliasDestructFixture(LayoutAliasTargetFixture(4));
+        layoutDestructs = 0;
+        auto withDestructor = eager ? Value.reflectEager(source) : Value.reflect(source);
+        destructs ~= layoutDestructs;
+        assert(withDestructor.to!LayoutAliasDestructFixture().target.value == 4);
+    }
+    assert(unaryReads == [2, 2]);
+    assert(classReads == [1, 1]);
+    assert(destructs[0] == destructs[1]);
+    auto disabled = Value.reflect(LayoutAliasDisabledFixture(7));
+    assert(disabled.tableValue["read"].invoke([]).toInt() == 9);
+}
+
+private struct LayoutAliasMutatingMiddleFixture
+{
+    LayoutAliasTargetFixture target;
+    int* calls;
+    ref LayoutAliasTargetFixture raw() { ++*calls; ++target.value; return target; }
+    alias raw this;
+}
+private struct LayoutAliasMutatingOuterFixture
+{
+    LayoutAliasMutatingMiddleFixture middle;
+    int* calls;
+    ref LayoutAliasMutatingMiddleFixture raw() { *calls += 10; middle.target.value += 10; return middle; }
+    alias raw this;
+}
+unittest
+{
+    int[][] traces;
+    foreach (eager; [true, false])
+    {
+        int calls;
+        auto source = LayoutAliasMutatingOuterFixture(
+            LayoutAliasMutatingMiddleFixture(LayoutAliasTargetFixture(1), &calls), &calls);
+        auto value = eager ? Value.reflectEager(source) : Value.reflect(source);
+        int[] trace = [calls, value.to!LayoutAliasMutatingOuterFixture().middle.target.value];
+        auto copy = eager ? Value.reflectEager((cast(ReflectedStructStorage!LayoutAliasMutatingOuterFixture)
+            value.tableStorage.nativeOwner).value) : value.valueCopy();
+        trace ~= calls;
+        trace ~= copy.to!LayoutAliasMutatingOuterFixture().middle.target.value;
+        auto method = value.tableValue["read"];
+        trace ~= calls;
+        trace ~= cast(int) method.invoke([]).toInt();
+        trace ~= calls;
+        traces ~= trace;
+    }
+    assert(traces[0] == traces[1], format("nested eager %s layout %s", traces[0], traces[1]));
+}
+
+unittest
+{
+    // 元のeager経路と、公開table・copy・aliasの評価順を比較します。
+    import core.memory : GC;
+    string[] descriptions;
+    int[][] traces;
+    foreach (eager; [true, false])
+    {
+        int reads;
+        auto source = LayoutAliasProxyFixture(LayoutAliasTargetFixture(3), &reads);
+        auto value = eager ? Value.reflectEager(source) : Value.reflect(source);
+        int[] trace = [reads];
+        auto copy = eager ? Value.reflectEager((cast(ReflectedStructStorage!LayoutAliasProxyFixture)
+            value.tableStorage.nativeOwner).value) : value.valueCopy(); trace ~= reads;
+        auto method = value.tableValue["read"]; trace ~= reads;
+        descriptions ~= value.tableValue.byKey.array.join(",");
+        assert("hidden" !in value.tableValue);
+        assert(method.functionValue.invoke([]).toInt() == 5); trace ~= reads;
+        assert(method.functionValue.invoke([Value.from("!")]).toHostString() == "3!"); trace ~= reads;
+        value.propertySetter("target").functionValue.invoke([Value.reflect(LayoutAliasTargetFixture(9))]);
+        assert(method.functionValue.invoke([]).toInt() == 11); trace ~= reads;
+        trace ~= copy.to!LayoutAliasTargetFixture().value; trace ~= reads;
+        trace ~= value.to!LayoutAliasTargetFixture().value; trace ~= reads;
+        value = Value.nullValue(); GC.collect();
+        assert(method.functionValue.invoke([Value.from(4)]).toInt() == 13); trace ~= reads;
+        traces ~= trace;
+    }
+    assert(descriptions[0] == descriptions[1]);
+    assert(traces[0] == traces[1], format("eager %s layout %s", traces[0], traces[1]));
 }
 
 private string hostTypeName(T)()
