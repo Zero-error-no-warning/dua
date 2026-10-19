@@ -8,8 +8,9 @@ import std.exception : enforce;
 import std.format : format;
 import std.string : indexOf, join;
 import std.meta : AliasSeq, staticIndexOf, staticMap;
-import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, KeyType, OriginalType, ParameterDefaults, Parameters, ReturnType, Unqual, ValueType, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
+import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, fullyQualifiedName, hasUDA, KeyType, OriginalType, ParameterDefaults, Parameters, ReturnType, Unqual, ValueType, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
 import std.typecons : Tuple;
+import std.range.primitives : isForwardRange, isInfinite, hasLength;
 import std.math : isFinite;
 import dua.type_syntax;
 import dua.native_defaults;
@@ -2744,19 +2745,43 @@ unittest
     assert(traces[0] == traces[1], format("eager %s layout %s", traces[0], traces[1]));
 }
 
-private string hostTypeName(T)()
+// 既存のクラス・alias thisコンテナと、消費を共有するinput-only rangeは反映のまま残す。
+// isInfiniteがfalseでも停止は証明できないため、有限性はホストの契約とする。
+template isMaterializedHostRange(T)
+{
+    static if (is(T == struct) && !isSomeString!T
+        && !isDynamicArray!T && !isStaticArray!T && !isAssociativeArray!T)
+        enum isMaterializedHostRange = __traits(getAliasThis, T).length == 0
+            && isForwardRange!T && !isInfinite!T
+            && !hasNoBindOverload!(T,"empty") && !hasNoBindOverload!(T,"front")
+            && !hasNoBindOverload!(T,"popFront") && !hasNoBindOverload!(T,"save")
+            && !hasNoBindOverload!(T,"length");
+    else enum isMaterializedHostRange = false;
+}
+
+// hasLengthだけではlength自身の走査・副作用を除外できない。
+// iotaの算術lengthと、ホストが明示した契約だけを事前確保に使う。
+package(dua) template hasNonTraversingHostLength(T)
+{
+    enum hasNonTraversingHostLength = hasLength!T
+        && (fullyQualifiedName!T == "std.range.iota.Result" || hasUDA!(T, NonTraversingLength));
+}
+
+private string hostTypeName(T, bool input = false)()
 {
     static if (is(T == Value)) return "any";
     else static if (isSomeString!T) return "string";
     else static if (isAssociativeArray!T)
-        return hostTypeName!(ValueType!T) ~ "[" ~ hostTypeName!(KeyType!T) ~ "]";
-    else static if (isDynamicArray!T || isStaticArray!T)
-        return hostTypeName!(ForeachType!T) ~ "[]";
+        return hostTypeName!(ValueType!T, input) ~ "[" ~ hostTypeName!(KeyType!T, input) ~ "]";
+    else static if (isDynamicArray!T || isStaticArray!T || (!input && isMaterializedHostRange!T))
+        return hostTypeName!(ForeachType!T, input) ~ "[]";
     else return Unqual!T.stringof;
 }
 
 /// Stable type spelling for generated host completion catalogs.
 string hostCompletionName(T)() { return hostTypeName!T; }
+// 明示的な型公開は、返り値を配列化しても元の型名を保持する。
+string hostReflectedTypeName(T)() { return hostTypeName!(T, true); }
 
 /// Declaration inspection only: defaults are marked, never evaluated.
 auto hostCompletionSignature(alias declaration)()
@@ -2769,7 +2794,7 @@ auto hostCompletionSignature(alias declaration)()
         enum name = ParameterIdentifierTuple!declaration[index];
         parameters ~= JSONValue([
             "name": JSONValue(name.length ? name : "arg" ~ index.stringof),
-            "type": JSONValue(hostTypeName!P),
+            "type": JSONValue(hostTypeName!(P, true)),
             "optional": JSONValue(parameterHasDefault!(declaration, index)),
             "variadic": JSONValue(variadicFunctionStyle!declaration == Variadic.typesafe
                 && index + 1 == Parameters!declaration.length)]);
@@ -2860,7 +2885,7 @@ auto describeHostCompletionType(T)()
             static if (__traits(compiles, makeReflectedConstructor!(ctor, T)("new")))
             {
                 auto signature = hostCompletionSignature!ctor();
-                signature["returnType"] = JSONValue(hostTypeName!T);
+                signature["returnType"] = JSONValue(hostReflectedTypeName!T);
                 constructors ~= signature;
             }
         }}
@@ -2933,6 +2958,33 @@ private Value convertToValue(T)(auto ref T value)
     else static if (isAssociativeArray!T)
     {
         return Value.from(value);
+    }
+    else static if (isMaterializedHostRange!T)
+    {
+        // saveは列挙位置だけを分離する。事前の件数走査と中間のD配列は作らない。
+        auto cursor = value.save;
+        Value[] converted;
+        static if (hasNonTraversingHostLength!(typeof(cursor)))
+        {
+            converted.length = cursor.length;
+            size_t index;
+            while (!cursor.empty)
+            {
+                enforce(index < converted.length, "Host range yielded more elements than its length");
+                converted[index++] = convertToValue(cursor.front);
+                cursor.popFront();
+            }
+            enforce(index == converted.length, "Host range yielded fewer elements than its length");
+        }
+        else
+        {
+            while (!cursor.empty)
+            {
+                converted ~= convertToValue(cursor.front);
+                cursor.popFront();
+            }
+        }
+        return Value.fromOwnedArray(converted);
     }
     else static if (isAggregateType!T)
     {

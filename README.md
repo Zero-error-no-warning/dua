@@ -94,3 +94,17 @@ dub test --compiler=ldc2
 ```
 
 CI を導入する場合も、まずこの 2 コマンド（`build` / `test`）を通す運用を推奨します。
+
+### D の range の返り値
+
+D→Dua の値変換は、`save` を持つ有限の forward struct range を通常の Dua 配列へ実体化します。たとえば D 側で `filter` / `map` の結果を返せば、Dua では `foreach`、`.length`、添字、`$`、スライスを利用できます。具体的な range 型の個別登録は不要です。関数・メソッド・getter・公開フィールド・`bindAuto`・`Value.fromAuto` で同じ変換を使います。
+
+列挙位置を `save` で分離し、走査は一回だけです。標準 `iota` の算術的な length、または `@NonTraversingLength` を型に指定したホストの明示契約で長さを安全に取得できる場合は `Value[]` を事前確保し、それ以外は拡張します。`hasLength` だけでは length 自身が再走査しない保証がないため、任意の length は呼びません。この UDA は最適化の指定であり、自動配列化の利用に個別登録は不要です。D の中間 `T[]` と仕上げ時の配列バッファコピーは作りません。要素の変換・構造体の値コピーは従来の配列変換と同じ境界で行います。長さ不明の拡張、文字列変換、反映された構造体、ユーザーの `save` などでは追加確保が発生し得ます。
+
+文字列・配列・連想配列は既存の変換を維持します。クラス range、input-only range、`alias this` を持つコンテナ、宣言上の無限 range は従来どおり反映され、自動消費しません。有限の forward range へ明示的に変換して返してください。元の range を公開する必要がある場合は `Value.reflect(range)` を返せます。自動配列化は D→Dua 方向だけであり、Dua 配列から任意の D range 型を再構築するものではありません。
+
+`save` はデータの深い複製ではありません。元の配列・参照要素・predicate の状態は共有され得ます。有限性、正しい length、front の値の寿命はホスト側の契約です。共有カーソルや借用バッファを持つ input-only range を forward range と偽装しないでください。`isInfinite == false` は停止の証明ではなく、ホスト内の列挙には Dua の命令数上限も適用されません。必要ならホスト側で件数を制限してください。
+
+実体化された配列の要素代入は元の range へ書き戻しません。クラス要素などの参照共有は既存の配列と同じです。例外は通常のホスト呼び出しと同じ経路で伝播します。
+
+`NoBind` を指定した range プロトコルを持つ型も、自動実体化から除外します。確保量の再現用ベンチは `benchmarks/host_ranges.d` にあります。GC の allocatedInCurrentThread だけでは配列のその場拡張を捕捉できないため、GC.stats.usedSize の差も記録します。

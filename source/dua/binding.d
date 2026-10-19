@@ -50,6 +50,8 @@ mixin template AutoBindingAPI()
             registerHostType!T();
         static if (is(T == Value))
             bind(name, value);
+        else static if (isMaterializedHostRange!T)
+            bind(name, Value.fromAuto(value));
         else static if (isAggregateType!T)
             bind(name, Value.reflect(value));
         else

@@ -5,6 +5,10 @@ module dua.attributes;
 /// Converting a declaration to a function pointer/delegate erases its UDAs.
 struct NoBind {}
 
+/// lengthがカーソルの列挙や副作用を伴わず件数を返す、ホストrangeの明示的な契約。
+/// 自動配列化自体に指定は不要。指定した型だけlengthによる事前確保を許可する。
+struct NonTraversingLength {}
+
 package(dua) template isNoBind(alias declaration)
 {
     import std.traits : hasUDA;
