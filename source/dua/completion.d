@@ -17,7 +17,7 @@ final class CompletionRegistry
     {
         static if (isAggregateType!T && !is(T == Value))
         {
-            enum name = hostCompletionName!T;
+            enum name = hostReflectedTypeName!T;
             if (name !in types) types[name] = describeHostCompletionType!T();
         }
     }
@@ -44,16 +44,16 @@ final class CompletionRegistry
         registerType!T();
         auto entry = symbols[path];
         entry["kind"] = JSONValue("type");
-        entry["type"] = JSONValue(hostCompletionName!T);
-        entry["signatures"] = types[hostCompletionName!T]["constructors"];
+        entry["type"] = JSONValue(hostReflectedTypeName!T);
+        entry["signatures"] = types[hostReflectedTypeName!T]["constructors"];
         symbols[path] = entry;
         foreach (name, member; value.tableValue)
             if (!name.startsWith("__")) this.value(path ~ "." ~ name, member);
-        foreach (name, member; types[hostCompletionName!T]["members"].object)
+        foreach (name, member; types[hostReflectedTypeName!T]["members"].object)
             if ("static" in member.object && member["static"].boolean)
                 description(path ~ "." ~ name, member);
         symbols[path ~ ".new"] = JSONValue(["kind": JSONValue("function"),
-            "signatures": types[hostCompletionName!T]["constructors"]]);
+            "signatures": types[hostReflectedTypeName!T]["constructors"]]);
     }
 
     private void description(string path, JSONValue entry)

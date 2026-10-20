@@ -23,7 +23,7 @@ import std.exception : enforce;
 import std.file : exists, readText, remove, write;
 import std.format : format;
 import std.string : join, replace, startsWith;
-import std.traits : BaseClassesTuple, isAggregateType, isNumeric, Parameters, ReturnType;
+import std.traits : BaseClassesTuple, ForeachType, isAggregateType, isNumeric, Parameters, ReturnType;
 import std.meta : staticIndexOf;
 
 private struct UnionArrayIdentity { Value* pointer; size_t length; }
@@ -881,6 +881,8 @@ final class ScriptEngine
         // through other callable structs. Visit each type once per traversal.
         static if (staticIndexOf!(T, Seen) < 0)
         {
+            static if (isMaterializedHostRange!T)
+                registerHostType!(ForeachType!T, Seen, T)();
             static if (isAggregateType!T)
                 if (completionRegistry_ !is null) completionRegistry_.registerType!T();
             static if (is(T == class))
@@ -953,7 +955,7 @@ final class ScriptEngine
             // bindType normally reads static values. The exporter needs only
             // declarations, since a zero-argument static property can run code.
             auto placeholder = Value.from(cast(Value[string]) null);
-            placeholder.setTypeChain([Value.from(hostCompletionName!T)]);
+            placeholder.setTypeChain([Value.from(hostReflectedTypeName!T)]);
             bind(name, placeholder);
             completionRegistry_.typeBinding!T(name, placeholder);
             return;
