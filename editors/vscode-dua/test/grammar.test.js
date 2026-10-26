@@ -38,5 +38,22 @@ test('TextMate correctly ends nested comments, nested interpolation, and incompl
   assert.ok(scopesAt(aliasTokens, literalAlias.indexOf('string')).includes('support.type.primitive.dua'));
   const afterAlias = grammar.tokenizeLine('Fruit fruit = "Apple";', aliasTokens.ruleStack);
   assert.ok(!scopesAt(afterAlias, 0).includes('string.quoted.double.dua'));
+  const tables = 'table hoge { int x; } auto value = hoge { x = 1 }; auto other = common.Hoge { x = 2 };';
+  const tableTokens = grammar.tokenizeLine(tables);
+  assert.ok(scopesAt(tableTokens,tables.indexOf('hoge')).includes('entity.name.type.dua'));
+  assert.ok(scopesAt(tableTokens,tables.indexOf('hoge {',20)).includes('entity.name.type.construction.dua'));
+  assert.ok(scopesAt(tableTokens,tables.indexOf('common.')).includes('entity.name.namespace.dua'));
+  assert.ok(scopesAt(tableTokens,tables.indexOf('Hoge')).includes('entity.name.type.construction.dua'));
+  const controlText = 'if (flag) { value = 1; } else { value = 2; }';
+  const control = grammar.tokenizeLine(controlText);
+  assert.ok(scopesAt(control,controlText.indexOf('else')).includes('keyword.control.dua'));
+  const unfinishedTable = grammar.tokenizeLine('auto value = common.Hoge {');
+  const afterTable = grammar.tokenizeLine('string label = "one";',unfinishedTable.ruleStack);
+  assert.ok(scopesAt(afterTable,0).includes('support.type.primitive.dua'));
+  const restrictedText='alias Required = Hoge & !null; (Required & !null)[] values; auto flag = !false;';
+  const restricted=grammar.tokenizeLine(restrictedText);
+  for(const position of [restrictedText.indexOf('&'),restrictedText.indexOf('!'),restrictedText.lastIndexOf('!')])
+    assert.ok(scopesAt(restricted,position).includes('keyword.operator.dua'));
+  assert.ok(scopesAt(restricted,restrictedText.indexOf('null')).includes('constant.language.dua'));
   registry.dispose();
 });

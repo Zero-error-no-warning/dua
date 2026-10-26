@@ -15,6 +15,7 @@ test('extension debounces checks, drops stale responses, clears closed files and
     getWordRangeAtPosition() { return undefined; }, validatePosition: position => position
   };
   const config = { 'diagnostics.delay': 0 };
+  const hostClassTypes = ['GenericHostWidget'];
   const vscode = {
     CompletionItemKind: {}, DiagnosticSeverity: { Error: 0 },
     Position: class { constructor(line, character) { this.line = line; this.character = character; } },
@@ -27,14 +28,15 @@ test('extension debounces checks, drops stale responses, clears closed files and
     window: { createOutputChannel: () => ({ appendLine() {}, dispose() {} }), showWarningMessage: message => warnings.push(message) },
     workspace: {
       isTrusted: false, textDocuments: [document],
+      getWorkspaceFolder: () => ({ uri: { scheme: 'file', fsPath: 'C:/test' } }),
       getConfiguration: () => ({ get: (key, fallback) => config[key] ?? fallback }),
       onDidOpenTextDocument: event('open'), onDidChangeTextDocument: event('change'), onDidCloseTextDocument: event('close'),
       onDidChangeConfiguration: event('config'), onDidGrantWorkspaceTrust: event('trust')
     }
   };
-  const checker = { checkSource: () => {
+  const checker = { checkSource: (executable, source, options) => {
     let resolve;
-    const request = { promise: new Promise(done => { resolve = done; }), resolve: value => resolve(value), cancel() { this.cancelled = true; } };
+    const request = { source, options, promise: new Promise(done => { resolve = done; }), resolve: value => resolve(value), cancel() { this.cancelled = true; } };
     requests.push(request);
     return request;
   } };
@@ -46,6 +48,7 @@ test('extension debounces checks, drops stale responses, clears closed files and
     Module._load = function(name, ...args) {
       if (name === 'vscode') return vscode;
       if (name === './checker') return checker;
+      if (name === './hostCompletion') return { loadCatalog: () => ({ types: {} }), diagnosticHostTypes: value => value ? hostClassTypes : [] };
       if (name === './sceneDiagnostics') return { activateSceneDiagnostics() {} };
       return original.call(this, name, ...args);
     };
@@ -60,6 +63,7 @@ test('extension debounces checks, drops stale responses, clears closed files and
   listeners.trust();
   await tick();
   assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].options.hostClassTypes, hostClassTypes);
   document.version++;
   document.source = 'auto n = 1;';
   listeners.change({ document });
@@ -73,10 +77,15 @@ test('extension debounces checks, drops stale responses, clears closed files and
   assert.equal(values.get(uri.toString())[0].message, 'current');
   listeners.close(document);
   assert.equal(values.size, 0);
+  config.checkerPath = path.resolve(__dirname, '../bin/dua-check.exe');
+  listeners.open(document);
+  await tick();
+  assert.deepEqual(requests[2].options.hostClassTypes, [], 'custom checker keeps the legacy input protocol');
+  listeners.close(document);
   config['diagnostics.enable'] = false;
   listeners.config({ affectsConfiguration: () => true });
   await tick();
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 3);
   assert.deepEqual(warnings, []);
   for (const subscription of context.subscriptions) subscription.dispose();
   delete require.cache[file];

@@ -89,17 +89,22 @@ final class Statement : AstNode
     string declaredType;
     string returnType;
     string aliasName;
+    bool isPathImport;
+    string publicTypeName;
+    bool scopedType;
     string[] names;
     bool isExported;
     bool isInstance;
     bool isInstanceBlock;
     Expression expression;
+    Expression metatableReference; // 型宣言時に一度だけ解決する共通meta。
     Expression[] expressions;
     Expression target;
     Expression[] targets;
     string assignmentOperator; // Empty for plain assignment; otherwise the binary operator.
     string[] parameters;
     string[] parameterTypes;
+    Expression[] parameterDefaults; // 省略時に呼出しごと評価する式。既定値なしはnull。
     bool variadic;
     Statement[] body;
     Statement elseBranch;
@@ -134,7 +139,8 @@ abstract class Expression : AstNode
         table,
         function_,
         get,
-        index
+        index,
+        with_
     }
 
     immutable Kind kind;
@@ -149,6 +155,15 @@ final class LiteralExpression : Expression
 {
     Value value;
     this(Value value) { super(Kind.literal); this.value = value; }
+}
+
+final class WithExpression : Expression
+{
+    Expression target, body;
+    string bindingName;
+    this(Expression target, Expression body, string bindingName){
+        super(Kind.with_);this.target=target;this.body=body;this.bindingName=bindingName;
+    }
 }
 
 final class VariableExpression : Expression
@@ -253,6 +268,10 @@ final class AssociativeArrayExpression : Expression
 final class TableExpression : Expression
 {
     TableEntry[] entries;
+    // Empty for the legacy structural literal; otherwise a type construction.
+    string targetType;
+    string sourceType;
+    size_t endLine, endColumn;
     this(TableEntry[] entries) { super(Kind.table); this.entries = entries; }
 }
 
@@ -261,6 +280,7 @@ final class FunctionExpression : Expression
     package(dua) ScopeLayout scopeLayout;
     string[] parameters;
     string[] parameterTypes;
+    Expression[] parameterDefaults; // 省略時に呼出しごと評価する式。既定値なしはnull。
     bool variadic;
     Statement[] body;
     string returnType;
@@ -277,6 +297,7 @@ final class FunctionExpression : Expression
 
 final class GetExpression : Expression
 {
+    bool withMember; // 先頭ドットは外側のUFCSへfallbackしない。
     Expression target;
     string memberName;
     this(Expression target, string memberName)
@@ -320,4 +341,13 @@ final class IndexExpression : Expression
         this.sliceEnd = sliceEnd;
         isSlice = true;
     }
+}
+
+// 末尾の可変長引数は必須ではなく、その手前の既定値から省略可能です。
+package(dua) size_t requiredParameterCount(size_t count, Expression[] defaults, bool variadic)
+{
+    auto fixed = variadic && count > 0 ? count - 1 : count;
+    foreach (i; 0 .. fixed)
+        if (i < defaults.length && defaults[i] !is null) return i;
+    return fixed;
 }

@@ -77,7 +77,8 @@ package(dua) void installStandardLibraries(StdlibContext context)
         enforce(args.length == 3, "rawset(table, key, value) expects three arguments");
         enforce(args[0].kind == ValueKind.table, "rawset first argument must be table");
         auto table = cast(Value) args[0];
-        table.tableValue[(cast(Value) args[1]).toHostString()] = cast(Value) args[2];
+        auto key = (cast(Value) args[1]).toHostString();
+        table.tableValue[key] = table.validateFieldAssignment(key, cast(Value) args[2]);
         return table;
     });
     context.bindNative("setmetatable", (scope const(Value)[] args) {
@@ -88,10 +89,12 @@ package(dua) void installStandardLibraries(StdlibContext context)
         auto table = cast(Value) args[0];
         if (args[1].kind == ValueKind.null_)
         {
+            table.clearDeclaredMetatable();
             table.tableValue.remove("__meta");
         }
         else
         {
+            table.clearDeclaredMetatable();
             table.tableValue["__meta"] = cast(Value) args[1];
         }
         return table;
@@ -101,12 +104,8 @@ package(dua) void installStandardLibraries(StdlibContext context)
     });
     context.bindNative("getmetatable", (scope const(Value)[] args) {
         enforce(args.length == 1, "getmetatable(table) expects one argument");
-        enforce(args[0].kind == ValueKind.table, "getmetatable argument must be table");
-        if (auto meta = "__meta" in args[0].tableValue)
-        {
-            return cast(Value) *meta;
-        }
-        return Value.nullValue();
+        enforce(args[0].kind == ValueKind.table || args[0].kind == ValueKind.struct_, "getmetatable argument must be table or struct");
+        auto value=cast(Value)args[0];return value.effectiveMetatable();
     });
     context.bindNative("pcall", (scope const(Value)[] args) {
         enforce(args.length >= 1, "pcall(callback, ...) expects at least one argument");

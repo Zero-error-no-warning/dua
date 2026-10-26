@@ -129,4 +129,6 @@ struct CheckDiagnostic
     size_t line;
     size_t column;
     string message;
+    string sourceName;
+    string sourceText;
 }

@@ -22,7 +22,7 @@ auto empty = null;
 - 数値は10進整数か小数です。小数点以下は省略でき、`1.` は `1.0` と同じ浮動小数点値です。負数はリテラルではなく単項 `-` を適用した式です。
 - 文字列はダブルクォートで1行に記述します。現在、文字列リテラル内のエスケープシーケンスは提供しません。
 - 文は原則 `;` で終わり、ブロックは `{ ... }` で囲みます。
-- キーワードは `auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。`.new` などのメンバー名には引き続きアクセスできます。
+- キーワードは `auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new with` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。`.new` などのメンバー名には引き続きアクセスできます。
 
 ### 1.2 値の種類と真偽
 
@@ -48,6 +48,18 @@ first, second = [second, first];
 - 宣言には初期値が必須です。未宣言変数への代入はエラーです。
 - ブロックと関数は外側を参照できるレキシカルスコープを作り、ラムダは外側の変数をキャプチャします。
 - `auto a, b = array;` と `a, b = array;` は、右辺の配列要素を左辺へ順番に割り当てる分配代入です。`return a, b;` も書けますが、戻り値は配列にまとめられます。要素が足りない左辺には `null` が入ります。
+
+### with 式
+
+`with(target) expression` は target を一度だけ評価し、先頭ドットだけをその対象へ結び付けます。裸の名前は通常解決です。本体は後続の式全体で、括弧で範囲を区切れます。
+
+```dua
+auto vec = { x = 3, y = 4 }; int x = 7;
+auto total = with(vec) .x * .x + .y * .y + x; // 32
+auto other = (with(vec) .x) + x; // 10
+```
+
+入れ子は最内側の対象、クロージャは定義場所の対象を保持します。外側の変数やUFCSへ先頭ドットをfallbackしません。with外の先頭ドットと先頭ドットによる代入左辺は診断します。[初期化・寿命を含む仕様](with-ja.md)を参照してください。
 
 ## 3. 関数とラムダ
 
@@ -309,6 +321,17 @@ D との互換範囲: Dua の整数の保存形式は符号付き64ビットの�
 
 両構文とも単項演算子と同じ優先順位で、対象を一度だけ評価します。`cast(int) value * 2` は変換後に乗算します。式全体を変換する場合は `cast(int) (value * 2)` と書きます。`cast!(int) (value * 2)` も同様です。
 
+### 型の共通メタテーブル
+
+```dua
+auto meta = {};
+table Number with meta { int value; }
+meta["opBinary+"] = (any a, any b) => Number { value = a.value + b.value };
+auto sum = Number { value = 2 } + Number { value = 3 };
+```
+
+struct も `struct Number with meta { ... }` で指定し、自動コンストラクタで適用します。最上位の型宣言時にscript tableを一度解決し、同じmetaを共有します。metaはフィールド・列挙・JSON・型同一性へ混ぜません。追加instanceで再評価しません。`setmetatable(table, meta/null)` は個体の指定を優先し、`getmetatable(table/struct)` は実効metaを取得します。[詳しい仕様と制約](with-ja.md)を参照してください。
+
 ## 7. 演算子と優先順位
 
 上ほど強い優先順位です。通常の二項演算子は同じ段の中で左から結合します。三項式の偽側は右結合です。`is` の右辺は値の式ではなく型名です。
@@ -358,6 +381,8 @@ text ~= total;
 メタテーブルは `setmetatable(table, meta)` で設定し、`getmetatable(table)` で取得します。`rawget` / `rawset` はメタ処理を経由しません。
 
 D から reflect した class / struct に具体的な引数型の `opIndex` / `opCall` がある場合、`obj[index]` / `obj(args...)` で呼び出せます。`obj[row, column]` や `obj[]` も `opIndex` に引数をそのまま渡します。通常の配列・連想配列・テーブルの添字は1つです。`bindType` で公開した型の static 演算子は `Name[index]` / `Name(args...)` で利用でき、static `opCall` がある型のコンストラクタは `Name.new(...)` で呼びます。詳しくは[埋め込み API](embedding-api-ja.md)を参照してください。
+
+Dホスト型への`obj[key] = value`は具体的な`opIndexAssign(value,key)`へ渡します。単一添字の通常代入が対象です。Dua tableの`__newindex(self,key,value)`とは引数順・適用対象が異なります。[詳細](native-index-assignment.md)を参照してください。
 
 ## 8. 文字列補間
 

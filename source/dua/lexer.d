@@ -50,6 +50,7 @@ enum TokenKind
     keywordNew,
     keywordExport,
     keywordAs,
+    keywordWith,
     plus,
     minus,
     star,
@@ -439,6 +440,7 @@ private TokenKind keywordFor(string identifier)
         case "new": return TokenKind.keywordNew;
         case "export": return TokenKind.keywordExport;
         case "as": return TokenKind.keywordAs;
+        case "with": return TokenKind.keywordWith;
         default: return TokenKind.identifier;
     }
 }

@@ -8,11 +8,13 @@ module dua.coroutine;
  */
 import dua.binding : NativeCallable;
 import dua.value;
+import dua.evaluator : ModuleContext;
 import core.thread : Fiber;
 import std.exception : enforce;
 
 package final class CoroutineState
 {
+    ModuleContext context;
     Value entryFunction;
     Fiber fiber;
     Value[] pendingArgs;
@@ -48,12 +50,14 @@ package mixin template CoroutineImplementation()
 {
     private size_t nextCoroutineId = 1;
     private CoroutineState[size_t] coroutines;
-    private CoroutineState activeCoroutine;
+    private CoroutineState activeCoroutine(){return cast(CoroutineState)evaluatorContext.activeCoroutine;}
+    private void activeCoroutine(CoroutineState state){evaluatorContext.activeCoroutine=state;}
 
     private Value createCoroutine(Value functionValue)
     {
         enforce(functionValue.kind == ValueKind.function_, "coroutine.create(callback) expects function");
         auto state = new CoroutineState();
+        state.context=currentModuleContext();
         state.entryFunction = functionValue;
 
         state.fiber = createFiber({
@@ -98,6 +102,7 @@ package mixin template CoroutineImplementation()
     private Value resumeCoroutine(Value handle, Value[] args)
     {
         auto state = requireCoroutineState(handle);
+        if(state.context !is null && !state.context.alive){state.dead=true;return Value.from([Value.from(false),Value.from("Module context is closed")]);}
         if (state.dead)
         {
             auto message = state.failed && state.errorMessage.length > 0
@@ -128,6 +133,7 @@ package mixin template CoroutineImplementation()
             evaluatorContext.moduleName = previousModule;
         }
         state.fiber.call();
+        if(state.dead)fiberEvaluatorContexts.remove(cast(void*)state.fiber);
 
         if (state.failed)
         {

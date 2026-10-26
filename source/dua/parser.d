@@ -4,7 +4,7 @@ import dua.execution : locatedException, scriptDiagnostic;
 import dua.ast;
 import dua.lexer : Token, TokenKind, lex;
 import dua.value : Value;
-import dua.type_syntax : stringLiteralType;
+import dua.type_syntax : stringLiteralType, nonNullType;
 import std.algorithm.searching : canFind;
 import std.array : appender;
 import std.conv : to;
@@ -130,6 +130,8 @@ private struct Parser
     Token[] tokens;
     size_t position;
     size_t statementDepth;
+    size_t nextWithBinding;
+    string[] withBindings;
 
     Statement locatedStatement(Statement.Kind kind, Token token)
     {
@@ -175,6 +177,17 @@ private struct Parser
 
     Statement parseStatementCore()
     {
+        // Type exports precede the ordinary value/function export parser.
+        if (check(TokenKind.keywordExport) &&
+            (peekAt(1).kind == TokenKind.keywordAlias || peekAt(1).kind == TokenKind.keywordStruct
+             || (peekAt(1).kind == TokenKind.identifier && peekAt(1).lexeme == "table")))
+        {
+            auto token = advance();
+            requireLocated(statementDepth == 1, "Type exports are only allowed at module top level", token.line, token.column);
+            auto declaration = parseStatementCore();
+            declaration.isExported = true;
+            return declaration;
+        }
         if (check(TokenKind.keywordInstance)
             || (check(TokenKind.keywordExport) && peekAt(1).kind == TokenKind.keywordInstance))
         {
@@ -201,7 +214,8 @@ private struct Parser
         // `table` remains an ordinary identifier outside declaration context
         // so the standard `table.map(...)` namespace stays source-compatible.
         if (check(TokenKind.identifier) && peek().lexeme == "table"
-            && peekAt(1).kind == TokenKind.identifier && peekAt(2).kind == TokenKind.leftBrace)
+            && peekAt(1).kind == TokenKind.identifier
+            && (peekAt(2).kind == TokenKind.leftBrace || peekAt(2).kind == TokenKind.keywordWith))
         {
             auto start = advance();
             return parseAggregateDeclaration(Statement.Kind.tableDecl, start, true);
@@ -214,13 +228,27 @@ private struct Parser
         if (match(TokenKind.keywordImport))
         {
             auto statement = locatedStatement(Statement.Kind.import_, previous());
-            statement.name = parseModuleName();
-            auto aliasName = lastModuleSegment(statement.name);
+            string aliasName;
+            if (match(TokenKind.string_))
+            {
+                import std.path : baseName, stripExtension;
+                statement.isPathImport = true;
+                statement.name = previous().lexeme;
+                aliasName = statement.name.baseName.stripExtension;
+            }
+            else
+            {
+                statement.name = parseModuleName();
+                aliasName = lastModuleSegment(statement.name);
+            }
             if (match(TokenKind.keywordAs))
             {
                 aliasName = consume(TokenKind.identifier, "Expected alias name after 'as'").lexeme;
             }
             statement.aliasName = aliasName;
+            auto aliasTokens = lex(aliasName);
+            requireLocated(aliasTokens.length == 2 && aliasTokens[0].kind == TokenKind.identifier,
+                "Import filename requires an explicit valid 'as' name", statement.line, statement.column);
             consume(TokenKind.semicolon, "Expected ';' after import statement");
             return statement;
         }
@@ -287,7 +315,7 @@ private struct Parser
                 statement.returnType = declaredType;
                 statement.name = nameToken.lexeme;
                 parseTypedFunctionSignature(statement.parameterTypes, statement.parameters,
-                    statement.variadic, statement.body);
+                    statement.variadic, statement.body, statement.parameterDefaults);
                 return statement;
             }
 
@@ -298,10 +326,7 @@ private struct Parser
             statement.names = [statement.name];
             if (check(TokenKind.semicolon) && declaredType[$ - 1] == ']')
             {
-                if (declaredType.length >= 2 && declaredType[$ - 2 .. $] == "[]")
-                    statement.expression = locatedExpression(new ArrayExpression(null), typeToken);
-                else
-                    statement.expression = locatedExpression(new AssociativeArrayExpression(), typeToken);
+                statement.expression = locatedExpression(new LiteralExpression(Value.nullValue()), typeToken);
             }
             else
             {
@@ -529,6 +554,17 @@ private struct Parser
         auto statement = locatedStatement(kind, start);
         statement.declaredType = allowBases ? "table" : "struct";
         statement.name = consume(TokenKind.identifier, "Expected aggregate name").lexeme;
+        if(match(TokenKind.keywordWith)){
+            requireLocated(statementDepth==1,"Type with declarations are only allowed at module top level",previous().line,previous().column);
+            auto token=consume(TokenKind.identifier,"Expected metatable reference after with");
+            Expression meta=locatedExpression(new VariableExpression(token.lexeme),token);
+            while(match(TokenKind.dot)){
+                auto dot=previous();
+                auto name=consume(TokenKind.identifier,"Expected metatable member name");
+                meta=locatedExpression(new GetExpression(meta,name.lexeme),dot);
+            }
+            statement.metatableReference=meta;
+        }
         consume(TokenKind.leftBrace, "Expected '{' after aggregate name");
         auto fieldNames = appender!(string[])();
         auto fieldTypes = appender!(string[])();
@@ -854,6 +890,27 @@ private struct Parser
         auto expression = parsePrimary();
         while (true)
         {
+            if (check(TokenKind.leftBrace) && constructionTypeName(expression).length)
+            {
+                auto name = constructionTypeName(expression);
+                auto start = expression;
+                while (start.kind == Expression.Kind.get) start = (cast(GetExpression)start).target;
+                auto token = advance();
+                auto literal = cast(TableExpression)parseTableLiteral(token);
+                literal.targetType = literal.sourceType = name;
+                literal.line = start.line; literal.column = start.column;
+                literal.endLine = previous().line; literal.endColumn = previous().column + 1;
+                bool[string] seen;
+                foreach (entry; literal.entries)
+                    if (!entry.isSpread && entry.keyExpression is null)
+                    {
+                        requireLocated((entry.key in seen) is null, "Duplicate initializer field '" ~ entry.key ~ "'",
+                            literal.line, literal.column);
+                        seen[entry.key] = true;
+                    }
+                expression = literal;
+                continue;
+            }
             if (match(TokenKind.leftParen))
             {
                 auto callToken = previous();
@@ -876,7 +933,9 @@ private struct Parser
                 auto memberName = match(TokenKind.keywordNew, TokenKind.keywordInstance)
                     ? previous().lexeme
                     : consume(TokenKind.identifier, "Expected property name after '.'").lexeme;
-                expression = locatedExpression(new GetExpression(expression, memberName), getToken);
+                auto member=new GetExpression(expression,memberName);
+                member.withMember=isLeadingWithPath(expression);
+                expression = locatedExpression(member, getToken);
                 continue;
             }
             if (match(TokenKind.leftBracket))
@@ -906,14 +965,46 @@ private struct Parser
         return expression;
     }
 
+    string constructionTypeName(Expression expression)
+    {
+        if (expression.kind == Expression.Kind.variable) return (cast(VariableExpression)expression).name;
+        if (expression.kind == Expression.Kind.get)
+        {
+            auto get = cast(GetExpression)expression;
+            auto parent = constructionTypeName(get.target);
+            return parent.length ? parent ~ "." ~ get.memberName : "";
+        }
+        return "";
+    }
+
     Expression parsePrimary()
     {
+        if(match(TokenKind.keywordWith)){
+            auto token=previous();
+            consume(TokenKind.leftParen,"Expected '(' after expression with");
+            auto target=parseExpression();
+            consume(TokenKind.rightParen,"Expected ')' after with target");
+            auto name="\0with:"~(nextWithBinding++).to!string;
+            withBindings~=name;
+            scope(exit)withBindings.length-=1;
+            return locatedExpression(new WithExpression(target,parseExpression(),name),token);
+        }
+        if(match(TokenKind.dot)){
+            auto dot=previous();
+            requireLocated(withBindings.length>0,"Leading '.' requires a with expression",dot.line,dot.column);
+            auto name=match(TokenKind.keywordNew,TokenKind.keywordInstance)
+                ? previous() : consume(TokenKind.identifier,"Expected member after leading '.'");
+            auto target=locatedExpression(new VariableExpression(withBindings[$-1]),dot);
+            auto member=new GetExpression(target,name.lexeme);member.withMember=true;
+            return locatedExpression(member,dot);
+        }
         if (isTypedLambdaExpressionWithParen())
         {
             auto startToken = peek();
             string[] parameterTypes;
             string[] parameters;
-            parseTypedLambdaParameters(parameterTypes, parameters);
+            Expression[] defaults;
+            parseTypedLambdaParameters(parameterTypes, parameters, defaults);
             Statement[] body;
             string returnType;
             if (match(TokenKind.leftBrace))
@@ -935,6 +1026,7 @@ private struct Parser
             }
             auto functionNode = new FunctionExpression(parameters, false, body, returnType);
             functionNode.parameterTypes = parameterTypes;
+            functionNode.parameterDefaults = defaults;
             return locatedExpression(functionNode, startToken);
         }
         if (check(TokenKind.identifier)
@@ -1246,37 +1338,50 @@ private struct Parser
     }
 
     void parseTypedFunctionSignature(out string[] parameterTypes, out string[] parameters,
-        out bool variadic, out Statement[] body)
+        out bool variadic, out Statement[] body, out Expression[] defaults)
     {
-        consume(TokenKind.leftParen, "Expected '(' after function name");
-        auto types = appender!(string[])();
-        auto params = appender!(string[])();
-        variadic = false;
-        if (!check(TokenKind.rightParen))
-        {
-            do
-            {
-                types.put(parseTypeName());
-                params.put(consume(TokenKind.identifier, "Expected parameter name").lexeme);
-                if (match(TokenKind.ellipsis))
-                {
-                    variadic = true;
-                    break;
-                }
-            }
-            while (match(TokenKind.comma));
-        }
-        consume(TokenKind.rightParen, "Expected ')' after parameters");
+        parseFunctionParameters(parameterTypes, parameters, defaults, variadic, true);
         consume(TokenKind.leftBrace, "Expected '{' before function body");
         body = parseBlockTail();
-        parameterTypes = types.data;
-        parameters = params.data;
+    }
+
+    void parseFunctionParameters(out string[] types, out string[] names, out Expression[] defaults,
+        out bool variadic, bool allowVariadic)
+    {
+        consume(TokenKind.leftParen, "Expected '(' before function parameters");
+        bool seenDefault;
+        Expression[] values;
+        if (!check(TokenKind.rightParen)) do
+        {
+            types ~= parseTypeName();
+            auto name = consume(TokenKind.identifier, "Expected parameter name");
+            names ~= name.lexeme;
+            bool rest = match(TokenKind.ellipsis);
+            requireLocated(!rest || allowVariadic, "Variadic lambdas are not supported", name.line, name.column);
+            Expression value;
+            if (match(TokenKind.equal))
+            {
+                requireLocated(!rest, "A variadic parameter cannot have a default", name.line, name.column);
+                value = parseExpression();seenDefault = true;
+            }
+            else requireLocated(!seenDefault || rest,
+                "Required parameters must precede default parameters", name.line, name.column);
+            values ~= value;
+            if (rest) { variadic = true;break; }
+        } while (match(TokenKind.comma));
+        consume(TokenKind.rightParen, "Expected ')' after parameters");
+        if (seenDefault) defaults = values;
     }
 
     string parseTypeName()
     {
         string result;
-        if (match(TokenKind.string_))
+        if (match(TokenKind.leftParen))
+        {
+            result = parseTypeName();
+            consume(TokenKind.rightParen, "Expected ')' after parenthesized type");
+        }
+        else if (match(TokenKind.string_))
         {
             result = stringLiteralType(previous().lexeme);
         }
@@ -1287,6 +1392,8 @@ private struct Parser
         else
         {
             result = consume(TokenKind.identifier, "Expected type name").lexeme;
+            while (match(TokenKind.dot))
+                result ~= "." ~ consume(TokenKind.identifier, "Expected qualified type name").lexeme;
         }
         while (match(TokenKind.leftBracket))
         {
@@ -1311,26 +1418,20 @@ private struct Parser
             consume(TokenKind.rightParen, "Expected ')' after delegate argument types");
             result ~= argumentTypes.data.join(",") ~ ")";
         }
+        if (match(TokenKind.amp))
+        {
+            consume(TokenKind.bang, "Only '& !null' is supported in a type");
+            consume(TokenKind.keywordNull, "Expected null after '& !' in a type");
+            result = nonNullType(result);
+        }
         return result;
     }
 
-    void parseTypedLambdaParameters(out string[] parameterTypes, out string[] parameters)
+    void parseTypedLambdaParameters(out string[] parameterTypes, out string[] parameters,
+        out Expression[] defaults)
     {
-        consume(TokenKind.leftParen, "Expected '(' before lambda parameters");
-        auto types = appender!(string[])();
-        auto params = appender!(string[])();
-        if (!check(TokenKind.rightParen))
-        {
-            do
-            {
-                types.put(parseTypeName());
-                params.put(consume(TokenKind.identifier, "Expected lambda parameter name").lexeme);
-            }
-            while (match(TokenKind.comma));
-        }
-        consume(TokenKind.rightParen, "Expected ')' after lambda parameters");
-        parameterTypes = types.data;
-        parameters = params.data;
+        bool variadic;
+        parseFunctionParameters(parameterTypes, parameters, defaults, variadic, false);
     }
 
 
@@ -1386,6 +1487,8 @@ private struct Parser
 
     void setAssignmentOperator(Statement statement, Token token, Expression[] targets)
     {
+        foreach(target;targets)requireLocated(!isWithAssignment(target),
+            "with member assignment is not supported",target.line,target.column);
         if (token.kind != TokenKind.compoundAssign) return;
         requireLocated(targets.length == 1,
             format("Compound assignment requires a single target at %s:%s", token.line, token.column), token.line, token.column);
@@ -1396,11 +1499,40 @@ private struct Parser
         statement.assignmentOperator = token.lexeme[0 .. $ - 1];
     }
 
+    bool isWithAssignment(Expression target){
+        if(target.kind==Expression.Kind.with_)return true;
+        if(target.kind==Expression.Kind.get){auto get=cast(GetExpression)target;return get.withMember||isWithAssignment(get.target);}
+        if(target.kind==Expression.Kind.index)return isWithAssignment((cast(IndexExpression)target).target);
+        if(target.kind==Expression.Kind.call)return isWithAssignment((cast(CallExpression)target).callee);
+        return false;
+    }
+
+    bool isLeadingWithPath(Expression target){
+        if(target.kind==Expression.Kind.get)return (cast(GetExpression)target).withMember;
+        if(target.kind==Expression.Kind.index)return isLeadingWithPath((cast(IndexExpression)target).target);
+        if(target.kind==Expression.Kind.call)return isLeadingWithPath((cast(CallExpression)target).callee);
+        return false;
+    }
+
     bool scanType(ref size_t cursor) const
     {
-        if (cursor >= tokens.length || (tokens[cursor].kind != TokenKind.identifier
-            && tokens[cursor].kind != TokenKind.keywordNull)) return false;
-        ++cursor;
+        if (cursor >= tokens.length) return false;
+        if (tokens[cursor].kind == TokenKind.leftParen)
+        {
+            ++cursor;
+            if (!scanType(cursor) || cursor >= tokens.length || tokens[cursor++].kind != TokenKind.rightParen) return false;
+        }
+        else
+        {
+            if (tokens[cursor].kind != TokenKind.identifier && tokens[cursor].kind != TokenKind.keywordNull) return false;
+            ++cursor;
+        }
+        while (cursor < tokens.length && tokens[cursor].kind == TokenKind.dot)
+        {
+            ++cursor;
+            if (cursor >= tokens.length || tokens[cursor].kind != TokenKind.identifier) return false;
+            ++cursor;
+        }
         while (cursor < tokens.length && tokens[cursor].kind == TokenKind.leftBracket)
         {
             ++cursor;
@@ -1421,13 +1553,19 @@ private struct Parser
                 }
             if (cursor >= tokens.length || tokens[cursor++].kind != TokenKind.rightParen) return false;
         }
+        if (cursor < tokens.length && tokens[cursor].kind == TokenKind.amp)
+        {
+            if (cursor + 2 >= tokens.length || tokens[cursor + 1].kind != TokenKind.bang
+                || tokens[cursor + 2].kind != TokenKind.keywordNull) return false;
+            cursor += 3;
+        }
         return true;
     }
 
     bool isTypedDeclaration() const
     {
         size_t cursor = position;
-        return check(TokenKind.identifier) && scanType(cursor)
+        return (check(TokenKind.identifier) || check(TokenKind.leftParen)) && scanType(cursor)
             && cursor < tokens.length && tokens[cursor].kind == TokenKind.identifier;
     }
 
@@ -1443,6 +1581,25 @@ private struct Parser
                 if (!scanType(cursor)) return false;
                 if (cursor >= tokens.length || tokens[cursor].kind != TokenKind.identifier) return false;
                 ++cursor;
+                if (cursor < tokens.length && tokens[cursor].kind == TokenKind.equal)
+                {
+                    ++cursor;
+                    // 既定式の入れ子の括弧/配列/table内のカンマは引数区切りではありません。
+                    size_t parens, brackets, braces;
+                    while (cursor < tokens.length)
+                    {
+                        auto kind=tokens[cursor].kind;
+                        if (!parens && !brackets && !braces
+                            && (kind==TokenKind.comma || kind==TokenKind.rightParen)) break;
+                        if(kind==TokenKind.leftParen)++parens;
+                        else if(kind==TokenKind.rightParen){if(!parens)return false;--parens;}
+                        else if(kind==TokenKind.leftBracket)++brackets;
+                        else if(kind==TokenKind.rightBracket){if(!brackets)return false;--brackets;}
+                        else if(kind==TokenKind.leftBrace)++braces;
+                        else if(kind==TokenKind.rightBrace){if(!braces)return false;--braces;}
+                        ++cursor;
+                    }
+                }
                 if (cursor < tokens.length && tokens[cursor].kind == TokenKind.comma)
                 {
                     ++cursor;

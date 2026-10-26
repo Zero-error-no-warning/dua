@@ -2,6 +2,34 @@ module dua.type_syntax;
 
 import std.json : JSONValue;
 
+// 一般の交差型ではなく、null だけを除外する限定 wrapper です。
+package(dua) string nonNullType(string inner) { return "(" ~ inner ~ " & !null)"; }
+
+package(dua) bool splitNonNullType(string name, out string inner)
+{
+    enum suffix = " & !null)";
+    if (name.length <= suffix.length + 1 || name[0] != '('
+        || name[$ - suffix.length .. $] != suffix) return false;
+    size_t depth;
+    bool quoted, escaped;
+    foreach (i, ch; name)
+    {
+        if (quoted)
+        {
+            if (escaped) escaped = false;
+            else if (ch == '\\') escaped = true;
+            else if (ch == '"') quoted = false;
+            continue;
+        }
+        if (ch == '"') { quoted = true; continue; }
+        if (ch == '(') ++depth;
+        else if (ch == ')' && --depth == 0 && i + 1 != name.length) return false;
+    }
+    if (depth) return false;
+    inner = name[1 .. $ - suffix.length];
+    return true;
+}
+
 // 型名と文字列の値を混同しないよう、リテラル型はJSONの引用表記で保持します。
 package(dua) string stringLiteralType(string value)
 {

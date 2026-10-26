@@ -61,7 +61,7 @@ abstract class CallableValue
         return expectedArity();
     }
 
-    final bool acceptsArity(size_t arity) const
+    bool acceptsArity(size_t arity) const
     {
         return arity >= minimumArity() && arity <= maximumArity();
     }
@@ -154,6 +154,15 @@ final class OverloadedReflectedCallable : CallableValue
     {
         super(debugName);
         this.overloads = overloads;
+    }
+
+    override bool acceptsArity(size_t arity) const
+    {
+        // オーバーロード集合の既定範囲では、必要引数のある関数まで
+        // 括弧省略で呼ばれるため、実際の各候補を確認します。
+        foreach (overload; overloads)
+            if (overload.acceptsArity(arity)) return true;
+        return false;
     }
 
     override Value invoke(Value[] args)
@@ -329,8 +338,14 @@ enum ValueKind
 /// module exports already handed to an importer) therefore observe additions.
 private final class TableStorage
 {
+    // with指定型だけが共有セルを持つ。通常のValue/各フィールドへmetaを混ぜない。
+    Value* declaredMetatable;
+    // Nominal identity is not a user-visible key or replaceable metatable tag.
+    string explicitTableType;
+    Value[] explicitTableChain;
     Object moduleOwner;
     Value[string] entries;
+    Value delegate(Value)[string][string] fieldConstraints;
     ReflectedMembers reflected;
     // Coroutine identity belongs to the table allocation, not its script-visible
     // key space.  The flag keeps the first valid id distinct from ordinary tables.
@@ -876,6 +891,7 @@ private struct ScalarAssociativeKey
 
 private final class AssociativeStorage
 {
+    bool nullHandle;
     string keyType;
     string valueType;
     AssociativeEntry[] entries;
@@ -902,6 +918,7 @@ private final class AssociativeStorage
 
     void set(Value key, Value value)
     {
+        nullHandle = false;
         auto index = find(key);
         if (index != size_t.max)
         {
@@ -981,6 +998,7 @@ struct Value
     bool booleanValue;
     string stringValue;
     Value[] arrayValue;
+    private bool nullArrayHandle;
     // Explicit script array annotations survive aliases, slices and concatenation.
     package(dua) string arrayElementType;
     package(dua) string arrayUnionType;
@@ -1002,6 +1020,28 @@ struct Value
         result.associativeStorage.keyType = keyType;
         return result;
     }
+
+    package(dua) static Value nullArray(string elementType = "any")
+    {
+        auto result = fromOwnedArray(null, elementType);
+        result.nullArrayHandle = true;
+        return result;
+    }
+
+    package(dua) static Value nullAssociativeArray(string valueType = "any", string keyType = "any")
+    {
+        auto result = associativeArray(valueType, keyType);
+        result.associativeStorage.nullHandle = true;
+        return result;
+    }
+
+    package(dua) bool isNullContainer() const
+    {
+        return (kind == ValueKind.array && nullArrayHandle)
+            || (kind == ValueKind.associativeArray && associativeStorage.nullHandle);
+    }
+
+    package(dua) bool isNullReference() const { return kind == ValueKind.null_ || isNullContainer; }
 
     string associativeKeyType() const { return associativeStorage.keyType; }
     string associativeValueType() const { return associativeStorage.valueType; }
@@ -1085,6 +1125,11 @@ struct Value
     }
 
     package(dua) bool isClassReference() const { return nativeClass.instance !is null; }
+
+    package(dua) bool isNativeAggregate() const {
+        return isClassReference || (kind==ValueKind.struct_ && tableStorage !is null && tableStorage.nativeOwner !is null);
+    }
+
 
     // Binding a receiver copies only the handle, never a callable or a table.
     package(dua) Value withReceiver(Value receiver) const
@@ -1222,6 +1267,9 @@ struct Value
 
     Value valueCopy() const
     {
+        // null AA のハンドルコピーは、最初の挿入先まで共有させません。
+        if (kind == ValueKind.associativeArray && associativeStorage.nullHandle)
+            return nullAssociativeArray(associativeValueType, associativeKeyType);
         if (kind != ValueKind.struct_) return cast(Value) this;
         return copyStructValue();
     }
@@ -1315,6 +1363,9 @@ struct Value
     {
         if (tableStorage !is null)
         {
+            // セル自体は宣言後に書き換えず、共有tableの参照をコピーする。
+            result.tableStorage.declaredMetatable=cast(Value*)tableStorage.declaredMetatable;
+            result.tableStorage.fieldConstraints = cast(Value delegate(Value)[string][string])tableStorage.fieldConstraints;
             // The outer arrays are private snapshots and never edited in place.
             // Share them across value copies; per-value setters replace them.
             result.tableStorage.typeChain = cast(Value[]) tableStorage.typeChain;
@@ -1327,7 +1378,57 @@ struct Value
 
     package(dua) const(Value[]) typeChain() const
     {
-        return tableStorage is null ? null : tableStorage.typeChain;
+        return tableStorage is null ? null : tableStorage.explicitTableType.length
+            ? tableStorage.explicitTableChain : tableStorage.typeChain;
+    }
+
+    package(dua) string explicitTableType() const
+    {
+        return tableStorage is null ? "" : tableStorage.explicitTableType;
+    }
+
+    package(dua) void addFieldConstraint(string name, string type, Value delegate(Value) validator)
+    {
+        if (tableStorage is null) tableStorage = new TableStorage;
+        if ((type in tableStorage.fieldConstraints.get(name, null)) is null)
+            tableStorage.fieldConstraints[name][type] = validator;
+    }
+
+    package(dua) Value validateFieldAssignment(string name, Value value)
+    {
+        if (tableStorage !is null)
+            if (auto constraints = name in tableStorage.fieldConstraints)
+                foreach (validator; (*constraints).byValue) value = validator(value);
+        return value;
+    }
+
+    package(dua) void declareMetatable(Value meta){
+        if(tableStorage is null)tableStorage=new TableStorage;
+        auto cell=new Value;*cell=meta;
+        tableStorage.declaredMetatable=cell;
+    }
+    package(dua) void inheritDeclaredMetatable(Value definition){
+        if(definition.tableStorage !is null && definition.tableStorage.declaredMetatable !is null){
+            if(tableStorage is null)tableStorage=new TableStorage;
+            tableStorage.declaredMetatable=definition.tableStorage.declaredMetatable;
+        }
+    }
+    package(dua) void clearDeclaredMetatable(){
+        if(tableStorage !is null)tableStorage.declaredMetatable=null;
+    }
+    package(dua) Value effectiveMetatable(){
+        if(auto explicit_=findMember("__meta"))return *explicit_;
+        return tableStorage !is null && tableStorage.declaredMetatable !is null
+            ? *tableStorage.declaredMetatable : Value.nullValue();
+    }
+
+    package(dua) void setExplicitTableType(string name, Value[] chain)
+    {
+        assert(kind == ValueKind.table);
+        if (tableStorage is null) tableStorage = new TableStorage;
+        tableStorage.explicitTableType = name;
+        tableStorage.explicitTableChain = chain.dup;
+        tableStorage.typeChain = chain.dup;
     }
 
     package(dua) const(Value[]) aliasThisTargets() const
@@ -1907,6 +2008,7 @@ struct Value
 
     string toScriptLiteral() const
     {
+        if (isNullContainer) return "null";
         final switch (kind)
         {
             case ValueKind.null_:
@@ -2889,7 +2991,11 @@ auto describeHostCompletionType(T)()
                 constructors ~= signature;
             }
         }}
-    return JSONValue(["members": JSONValue(members), "constructors": JSONValue(constructors)]);
+    // 値型をnull許容と誤認しないよう、生成元の宣言種別を診断にも渡します。
+    enum aggregateKind = is(T == class) ? "class" : is(T == struct) ? "struct"
+        : is(T == union) ? "union" : "aggregate";
+    return JSONValue(["kind": JSONValue(aggregateKind),
+        "members": JSONValue(members), "constructors": JSONValue(constructors)]);
 }
 
 private Value convertToTypedValue(T)(auto ref T value)
@@ -3053,6 +3159,14 @@ private int conversionScore(T)(const(Value) value)
     }
     else static if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
     {
+        static if (isDynamicArray!T)
+        {
+            if (value.kind == ValueKind.null_) return 80;
+        }
+        else
+        {
+            if (value.isNullContainer) return -1;
+        }
         if (value.kind != ValueKind.array)
             return -1;
         static if (isStaticArray!T)
@@ -3070,6 +3184,7 @@ private int conversionScore(T)(const(Value) value)
     }
     else static if (isAssociativeArray!T)
     {
+        if (value.kind == ValueKind.null_) return 80;
         if (value.kind == ValueKind.associativeArray)
         {
             if (!associativeKeyTypeMatches!(KeyType!T)(value.associativeKeyType)) return -1;
@@ -3260,6 +3375,14 @@ private T convertFromValue(T)(const(Value) value)
     }
     else static if ((isDynamicArray!T || isStaticArray!T) && !isSomeString!T)
     {
+        static if (isDynamicArray!T)
+        {
+            if (value.kind == ValueKind.null_) return T.init;
+        }
+        else
+        {
+            enforce(!value.isNullContainer, "Cannot convert null array to a static array");
+        }
         enforce(value.kind == ValueKind.array,
             format("Expected array value to convert into '%s' but got %s", T.stringof, value.kind));
         static if (isStaticArray!T)
@@ -3285,6 +3408,7 @@ private T convertFromValue(T)(const(Value) value)
     }
     else static if (isAssociativeArray!T)
     {
+        if (value.kind == ValueKind.null_) return T.init;
         // Materialize a new AA; host mutations do not write back to the table.
         Unqual!T result;
         if (value.kind == ValueKind.associativeArray)
@@ -3524,6 +3648,13 @@ private bool associativeKeysEqual(Value left, Value right)
 
 bool valuesEqual(Value left, Value right)
 {
+    // 内容比較は長さと要素で決まり、null ハンドルの有無とは別です。
+    if (left.kind == ValueKind.null_ || right.kind == ValueKind.null_)
+    {
+        auto other = left.kind == ValueKind.null_ ? right : left;
+        if (other.kind == ValueKind.array) return other.arrayValue.length == 0;
+        if (other.kind == ValueKind.associativeArray) return other.associativeEntries.length == 0;
+    }
     if (left.kind == right.kind)
     {
         final switch (left.kind)

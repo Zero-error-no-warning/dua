@@ -155,7 +155,7 @@ unittest
     foreach (checked; [false, true]) foreach (source; [
         "int value = null;", "bool value = null;", "string value = null;",
         "double value = null;", "NativePoint value = null;", "Unknown value = null;",
-        "table Record { int number; } Record value = null;",
+        "table Record { int number; } Record & !null value = null;",
         "struct Record { int number; } Record value = null;",
         "alias PointAlias = NativePoint; PointAlias value = null;",
         "alias NativeItem = int; NativeItem value = null;",
@@ -253,12 +253,13 @@ unittest
         assert(engine.check(source).length == 0, source);
         assert(engine.check("NativeItem value = null;").length == 0); // checkは登録しない。
         engine.run(declaration);
-        assert(engine.check("NativeItem value = null;").length != 0); // 既存のtable/structは確定。
+        auto tableNullable = declaration[0 .. 5] == "table";
+        assert((engine.check("NativeItem value = null;").length == 0) == tableNullable);
         foreach (checked; [false, true])
         {
             RunOptions options; options.typeCheck = checked;
-            assert(!createEngine().runSafe(source, options).ok);
-            assert(!engine.runSafe("NativeItem value = null;", options).ok);
+            assert(createEngine().runSafe(source, options).ok == tableNullable);
+            assert(engine.runSafe("NativeItem value = null;", options).ok == tableNullable);
         }
     }
     foreach (source; [
@@ -273,7 +274,8 @@ unittest
         foreach (checked; [false, true])
         {
             RunOptions options; options.typeCheck = checked;
-            assert(!createEngine().runSafe(source, options).ok, source);
+            // class を table が隠しても、どちらも既定 nullable です。
+            assert(createEngine().runSafe(source, options).ok, source);
         }
     }
     foreach (source; [

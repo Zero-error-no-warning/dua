@@ -1,0 +1,315 @@
+[
+  {
+    "id": "table-default-null",
+    "ok": true,
+    "source": "table A { int x; } A a=null; return a==null;"
+  },
+  {
+    "id": "typed-uninitialized-still-unsupported",
+    "ok": false,
+    "source": "table A { int x; } A a; return a==null;"
+  },
+  {
+    "id": "generic-table-null",
+    "ok": true,
+    "source": "table a=null; return a==null && cast(table)null==null && !(null is table);"
+  },
+  {
+    "id": "alias-qualified-null",
+    "ok": true,
+    "source": "import types; alias Local=types.Item; Local value=null; types.Item other=null; return value==other;"
+  },
+  {
+    "id": "required-null-rejected",
+    "ok": false,
+    "error": "Non-nullable",
+    "source": "table A{int x;} A & !null a=null; return true;"
+  },
+  {
+    "id": "required-uninitialized",
+    "ok": false,
+    "source": "table A{int x;} (A & !null) a; return true;"
+  },
+  {
+    "id": "alias-required-constructor",
+    "ok": true,
+    "source": "table A{int x;} alias Required=A & !null; Required a=Required{x=1}; return a is A && a is Required && a.x==1;"
+  },
+  {
+    "id": "qualified-required",
+    "ok": true,
+    "source": "import types as t; t.Item & !null a=t.Item{x=2}; t.Required b=t.Required{x=3}; return a.x+b.x==5;"
+  },
+  {
+    "id": "required-reassignment",
+    "ok": false,
+    "error": "Non-nullable",
+    "source": "table A{int x;} A & !null a=A{x=1}; a=null; return true;"
+  },
+  {
+    "id": "required-reassignment-through-closure",
+    "ok": false,
+    "source": "table A{int x;} alias Req=A & !null; Req a=A{x=1}; auto clear=(){a=null;}; clear(); return true;"
+  },
+  {
+    "id": "nullable-reassignment",
+    "ok": true,
+    "source": "table A{int x;} A a=A{x=1}; a=null; a=A{x=2}; return a.x==2;"
+  },
+  {
+    "id": "nullable-union",
+    "ok": true,
+    "source": "table A{int x;} alias U=A|int; U a=null; return a==null && !(a is A);"
+  },
+  {
+    "id": "required-union",
+    "ok": false,
+    "source": "table A{int x;} table B{int y;} alias U=A|B; U & !null a=null; return true;"
+  },
+  {
+    "id": "required-union-member",
+    "ok": true,
+    "source": "table A{int x;} table B{int x;} alias U=A|B; U & !null a=B{x=1}; return a is B && !(a is A);"
+  },
+  {
+    "id": "union-member-precedence",
+    "ok": true,
+    "source": "table A{int x;} alias U=A & !null | null; U a=null; return a==null;"
+  },
+  {
+    "id": "union-all-required-reject",
+    "ok": false,
+    "source": "table A{int x;} table B{int x;} alias U=A & !null | B & !null; U a=null; return true;"
+  },
+  {
+    "id": "required-arguments-returns-lambda",
+    "ok": true,
+    "source": "table A{int x;} A & !null echo(A & !null a){return a;} auto fn=(A & !null a)=>a.x; return fn(echo(A{x=3}))==3;"
+  },
+  {
+    "id": "required-argument-null",
+    "ok": false,
+    "source": "table A{int x;} int get(A & !null a){return a.x;} return get(null);"
+  },
+  {
+    "id": "required-parameter-rebind",
+    "ok": false,
+    "source": "table A{int x;} int get(A & !null a){a=null;return 1;} return get(A{x=1});"
+  },
+  {
+    "id": "required-return-null",
+    "ok": false,
+    "source": "table A{int x;} A & !null make(){return null;} return make();"
+  },
+  {
+    "id": "nullable-arguments-returns",
+    "ok": true,
+    "source": "table A{int x;} A echo(A a){return a;} return echo(null)==null;"
+  },
+  {
+    "id": "nullable-to-required-needs-cast-static",
+    "ok": true,
+    "checkedOK": false,
+    "source": "table A{int x;} A maybe=A{x=1}; A & !null a=maybe; return a.x==1;"
+  },
+  {
+    "id": "explicit-cast-required",
+    "ok": true,
+    "source": "table A{int x;} A maybe=A{x=1}; A & !null a=cast(A & !null) maybe; return a.x==1;"
+  },
+  {
+    "id": "cast-null-required",
+    "ok": false,
+    "error": "Cannot cast null",
+    "source": "table A{int x;} return cast(A & !null) null;"
+  },
+  {
+    "id": "nullable-field-explicit-null",
+    "ok": true,
+    "source": "table A{int x;} table Owner{A child;} auto o=Owner{child=null}; return o.child==null;"
+  },
+  {
+    "id": "nullable-field-still-required",
+    "ok": false,
+    "source": "table A{int x;} table Owner{A child;} return Owner{};"
+  },
+  {
+    "id": "required-field-null",
+    "ok": false,
+    "source": "table A{int x;} table Owner{A & !null child;} return Owner{child=null};"
+  },
+  {
+    "id": "required-field-dot-write",
+    "ok": false,
+    "source": "table A{int x;} table Owner{A & !null child;} auto o=Owner{child=A{x=1}}; o.child=null; return true;"
+  },
+  {
+    "id": "required-field-shared-alias",
+    "ok": false,
+    "source": "table A{int x;} table Owner{A & !null child;} auto o=Owner{child=A{x=1}}; any other=o; other.child=null; return true;"
+  },
+  {
+    "id": "required-field-bracket-write",
+    "ok": false,
+    "source": "table A{int x;} table Owner{A & !null child;} auto o=Owner{child=A{x=1}}; o[\"child\"]=null; return true;"
+  },
+  {
+    "id": "required-field-rawset",
+    "ok": false,
+    "source": "table A{int x;} table Owner{A & !null child;} auto o=Owner{child=A{x=1}}; rawset(o,\"child\",null); return true;"
+  },
+  {
+    "id": "struct-field-required",
+    "ok": false,
+    "source": "table A{int x;} struct Owner{A & !null child;} auto o=Owner(A{x=1}); auto copied=o; copied.child=null; return true;"
+  },
+  {
+    "id": "nonnull-elements-array",
+    "ok": false,
+    "source": "table A{int x;} (A & !null)[] a=[A{x=1}]; a[0]=null; return true;"
+  },
+  {
+    "id": "nullable-elements-array",
+    "ok": true,
+    "source": "table A{int x;} A[] a=[null,A{x=1}]; a[1]=null; return a[0]==a[1];"
+  },
+  {
+    "id": "nonnull-array-container",
+    "ok": true,
+    "source": "table A{int x;} A[] & !null a=[null]; return a.length==1;"
+  },
+  {
+    "id": "nonnull-aa-value",
+    "ok": false,
+    "source": "table A{int x;} alias Req=A & !null; Req[string] aa=[\"a\":A{x=1}]; aa[\"a\"]=null; return true;"
+  },
+  {
+    "id": "primitive-struct-array-unchanged",
+    "ok": false,
+    "source": "struct S{int x;} S s=null; return true;"
+  },
+  {
+    "id": "primitive-null-rejected",
+    "ok": false,
+    "source": "int a=null; return true;"
+  },
+  {
+    "id": "unknown-null-rejected",
+    "ok": false,
+    "source": "Unknown a=null; return true;"
+  },
+  {
+    "id": "class-remains-nullable",
+    "ok": true,
+    "source": "HostClass a=null; return a==null && !(a is HostClass);"
+  },
+  {
+    "id": "class-explicit-required",
+    "ok": false,
+    "source": "HostClass & !null a=null; return true;"
+  },
+  {
+    "id": "null-member-error",
+    "ok": false,
+    "error": "Cannot access member 'x' on null",
+    "source": "table A{int x;} A a=null; return a.x;"
+  },
+  {
+    "id": "null-call-error",
+    "ok": false,
+    "error": "Cannot call member 'method' on null",
+    "source": "table A{int x;} A a=null; return a.method();"
+  },
+  {
+    "id": "null-write-error",
+    "ok": false,
+    "error": "Cannot assign member 'x' on null",
+    "source": "table A{int x;} A a=null; a.x=1; return true;"
+  },
+  {
+    "id": "ufcs-and-constructor-preserved",
+    "ok": true,
+    "source": "table A{int x;} int twice(A & !null a){return a.x*2;} auto a=A{x=3}; return a.twice==6 && a.twice()==6;"
+  },
+  {
+    "id": "postfix-bang-rejected",
+    "ok": false,
+    "source": "table A{int x;} A! a=null; return true;"
+  },
+  {
+    "id": "general-intersection-rejected",
+    "ok": false,
+    "source": "table A{int x;} alias U=A & int; return true;"
+  },
+  {
+    "id": "cast-conversion-preserved",
+    "ok": true,
+    "source": "return cast!(string) 42==\"42\";"
+  },
+  {
+    "id": "export-required-boundary",
+    "ok": false,
+    "source": "import types; types.required=null; return true;"
+  },
+  {
+    "id": "export-separate-required-boundary",
+    "ok": false,
+    "source": "import types; types.separate=null; return true;"
+  },
+  {
+    "id": "union-required-alias-cast",
+    "ok": true,
+    "source": "table A{int x;} alias U=A|int; alias Req=U & !null; U a=A{x=1}; Req b=cast(Req)a; return b is A;"
+  },
+  {
+    "id": "host-builtin-int-null-runtime",
+    "hostTypeName": "int",
+    "ok": false,
+    "source": "int value=null; return true;"
+  },
+  {
+    "id": "nonnull-array-null-literal",
+    "ok": false,
+    "source": "table Item{int count;} (Item & !null)[] values=[null]; return true;"
+  },
+  {
+    "id": "nonnull-aa-null-literal",
+    "ok": false,
+    "source": "table Item{int count;} (Item & !null)[string] values=[\"one\":null]; return true;"
+  },
+  {
+    "id": "nonnull-array-field-null-literal",
+    "ok": false,
+    "source": "table Item{int count;} table Owner{(Item & !null)[] children;} return Owner{children=[null]};"
+  },
+  {
+    "id": "nonnull-array-argument-null-literal",
+    "ok": false,
+    "source": "table Item{int count;} int read((Item & !null)[] values){return 1;} return read([null]);"
+  },
+  {
+    "id": "nonnull-array-return-null-literal",
+    "ok": false,
+    "source": "table Item{int count;} (Item & !null)[] read(){return [null];} return read();"
+  },
+  {
+    "id": "nonnull-union-array-mutation",
+    "ok": false,
+    "source": "table Item{int count;} alias U=(Item & !null)[]|int; U values=[Item{count=1}]; values[0]=null; return true;"
+  },
+  {
+    "id": "nonnull-nested-union-array-mutation",
+    "ok": false,
+    "source": "table Item{int count;} alias U=(Item & !null)[][]|int; U values=[[Item{count=1}]]; values[0][0]=null; return true;"
+  },
+  {
+    "id": "nonnull-structural-literal-boundaries",
+    "ok": true,
+    "source": "table T{int x;} table O{T & !null child;} T & !null echo(T & !null v){return v;} T & !null make(){return {x=1};} auto o=O{child={x=1}}; T & !null t={x=2}; t={x=3}; return echo({x=4}).x+o.child.x+t.x+make().x==9;"
+  },
+  {
+    "id": "auto-table-remains-nullable",
+    "ok": true,
+    "source": "auto value={x=1}; value=null; return value==null;"
+  }
+]

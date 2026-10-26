@@ -1,0 +1,13 @@
+{
+  "name": "dua-default-arguments-test",
+  "targetType": "executable",
+  "sourcePaths": [
+    "."
+  ],
+  "mainSourceFile": "app.d",
+  "dependencies": {
+    "dua": {
+      "path": "../.."
+    }
+  }
+}

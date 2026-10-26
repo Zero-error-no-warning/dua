@@ -66,6 +66,7 @@ unittest
     auto data = engine.completionRegistry.toJson();
     assert(data["symbols"]["makeVec"]["signatures"].array[0]["returnType"].str == "CompletionVec");
     assert("CompletionVec" in data["types"].object, "Struct return type was omitted");
+    assert(data["types"]["CompletionVec"]["kind"].str == "struct");
     assert("x" in data["types"]["CompletionVec"]["members"].object);
     assert(calls == 0);
 }
@@ -87,6 +88,7 @@ unittest
     assert(data["symbols"]["aliasLoad"]["signatures"].array.length == 1);
     assert(data["symbols"]["host.twice"]["signatures"].array.length == 1);
     auto members = data["types"]["HostFixture"]["members"];
+    assert(data["types"]["HostFixture"]["kind"].str == "class");
     assert("count" in members.object);
     assert("secret" !in members.object && "internalOnly" !in members.object);
     assert(members["move"]["signatures"].array[0]["parameters"].array[1]["optional"].boolean);

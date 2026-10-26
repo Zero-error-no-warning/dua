@@ -1,4 +1,6 @@
 module dua.runtime;
+public import dua.evaluator : ModuleContext;
+import core.thread : Fiber;
 
 import dua.ast;
 import dua.attributes;
@@ -13,6 +15,9 @@ import dua.module_system : ModuleImplementation;
 import dua.parser : parse;
 import dua.stdlib.core : StdlibContext, installStandardLibraries;
 import dua.typecheck : checkSource;
+import dua.typecheck : checkModuleGraph;
+import dua.module_analysis;
+import dua.module_resolver;
 import dua.value;
 import dua.completion : CompletionRegistry;
 import dua.type_syntax;
@@ -245,6 +250,7 @@ final class ModuleHandle
     private ModuleVisibility visibility;
     private bool hostCreated;
     private Program moduleProgram;
+    private BoundModule boundModule;
     private string sourceName;
     private string sourceText;
     private bool hasSourceText;
@@ -709,10 +715,13 @@ final class ScriptCallable : CallableValue
 {
     private ScriptEngine engine;
     private Environment closure;
+    private ModuleContext moduleContext;
     private string[] parameters;
     private bool variadic;
     private Statement[] body;
     private string[] parameterTypes;
+    private Expression[] parameterDefaults;
+    private size_t requiredArguments;
     private string returnType;
     private string sourceName;
     private string sourceText;
@@ -729,15 +738,18 @@ final class ScriptCallable : CallableValue
 
     package(dua) this(string name, ScriptEngine engine, Environment closure, string[] parameters,
         bool variadic, Statement[] body, string[] parameterTypes, string returnType, ScopeLayout scopeLayout,
-        size_t declarationLine = 0, size_t declarationColumn = 0)
+        size_t declarationLine = 0, size_t declarationColumn = 0, Expression[] parameterDefaults = null)
     {
         super(name);
         this.engine = engine;
         this.closure = closure;
+        this.moduleContext = engine.currentModuleContext();
         this.parameters = parameters.dup;
         this.variadic = variadic;
         this.body = body.dup;
         this.parameterTypes = parameterTypes.dup;
+        this.parameterDefaults = parameterDefaults.dup;
+        requiredArguments = requiredParameterCount(parameters.length, parameterDefaults, variadic);
         this.returnType = returnType;
         this.declarationLine = declarationLine;
         this.declarationColumn = declarationColumn;
@@ -750,6 +762,8 @@ final class ScriptCallable : CallableValue
 
     override Value invoke(Value[] args)
     {
+        auto contextScope=engine.enterModuleContext(moduleContext);
+        scope(exit)engine.leaveModuleContext(contextScope);
         auto previousSource = engine.evaluatorContext.sourceName;
         auto previousText = engine.evaluatorContext.sourceText;
         auto previousHasText = engine.evaluatorContext.hasSourceText;
@@ -771,8 +785,21 @@ final class ScriptCallable : CallableValue
     private Value invokeBody(Value[] args)
     {
         closure.validateModuleLifetime();
-        auto requiredCount = variadic && parameters.length > 0 ? parameters.length - 1 : parameters.length;
-        if (variadic)
+        auto suppliedCount = args.length;
+        auto requiredCount = requiredArguments;
+        if (parameterDefaults.length)
+        {
+            enforce(args.length >= requiredCount && (variadic || args.length <= parameters.length),
+                format("Function '%s' expected %s to %s arguments but got %s", debugName,
+                    requiredCount, variadic ? "unlimited" : parameters.length.to!string, args.length));
+            auto fixedCount = variadic ? parameters.length - 1 : parameters.length;
+            if (args.length < fixedCount)
+            {
+                auto filled = new Value[fixedCount];
+                filled[0 .. args.length] = args[];args = filled;
+            }
+        }
+        else if (variadic)
         {
             enforce(args.length >= requiredCount,
                 format("Function '%s' expected at least %s arguments but got %s", debugName, requiredCount, args.length));
@@ -784,6 +811,12 @@ final class ScriptCallable : CallableValue
         }
 
         auto environment = new Environment(closure, scopeLayout);
+        if (parameterDefaults.length)
+        {
+            // 自身/後続引数は外側の同名変数へfallbackせず、未初期化として拒否します。
+            environment.pendingBindingLabel = "Parameter";
+            foreach (parameter; parameters) environment.reserveDeclaration(parameter);
+        }
         if (engine.hasThisContext())
         {
             environment.define("this", engine.currentThisContext());
@@ -793,7 +826,8 @@ final class ScriptCallable : CallableValue
             if (variadic && index + 1 == parameters.length)
             {
                 auto rest = Value.from(args[index .. $].dup);
-                if (index < parameterTypes.length && engine.hasLiteralConstraint(parameterTypes[index]))
+                if (index < parameterTypes.length && (engine.hasLiteralConstraint(parameterTypes[index])
+                    || engine.hasNonNullConstraint(parameterTypes[index]) || engine.hasContainerConstraint(parameterTypes[index])))
                 {
                     auto restType = parameterTypes[index] ~ "[]";
                     rest = engine.prepareContainerValue(rest, restType);
@@ -801,6 +835,12 @@ final class ScriptCallable : CallableValue
                 }
                 else environment.define(parameter, rest);
                 break;
+            }
+            if (index >= suppliedCount)
+            {
+                enforce(index < parameterDefaults.length && parameterDefaults[index] !is null,
+                    "Missing required argument: " ~ parameter);
+                args[index] = engine.evaluate(parameterDefaults[index], environment);
             }
             if (index < parameterTypes.length)
             {
@@ -812,7 +852,8 @@ final class ScriptCallable : CallableValue
             string elementType, keyType;
             if (index < parameterTypes.length && (splitContainerType(
                 engine.resolveContainerType(parameterTypes[index]), elementType, keyType)
-                || engine.hasLiteralConstraint(parameterTypes[index])))
+                || engine.hasLiteralConstraint(parameterTypes[index]) || engine.hasNonNullConstraint(parameterTypes[index])
+                || engine.hasContainerConstraint(parameterTypes[index])))
                 environment.define(parameter, args[index], engine.containerValidator(parameterTypes[index]));
             else
                 environment.define(parameter, args[index]);
@@ -841,7 +882,7 @@ final class ScriptCallable : CallableValue
 
     override size_t minimumArity() const
     {
-        return variadic && parameters.length > 0 ? parameters.length - 1 : parameters.length;
+        return requiredArguments;
     }
 }
 
@@ -853,7 +894,45 @@ final class ScriptEngine
     private string[string] typeRegistryNames;
     mixin ModuleImplementation;
     mixin CoroutineImplementation;
-    private EvaluatorContext evaluatorContext;
+    private EvaluatorContext rootEvaluatorContext;
+    // Scene側でFiberが明示破棄されても、辞書のhash計算で破棄済みobjectを呼びません。
+    private EvaluatorContext*[void*] fiberEvaluatorContexts;
+    private ref EvaluatorContext evaluatorContext(){
+        auto fiber=Fiber.getThis();
+        if(fiber is null)return rootEvaluatorContext;
+        auto identity=cast(void*)fiber;
+        auto found=identity in fiberEvaluatorContexts;
+        if(found is null){fiberEvaluatorContexts[identity]=new EvaluatorContext;found=identity in fiberEvaluatorContexts;}
+        return **found;
+    }
+    private ref const(EvaluatorContext) evaluatorContext() const{
+        auto fiber=Fiber.getThis();
+        if(fiber !is null)if(auto found=cast(void*)fiber in fiberEvaluatorContexts)return **found;
+        return rootEvaluatorContext;
+    }
+    private struct ContextScope {EvaluatorContext* state;ModuleContext previous;void* fiber;}
+    private ContextScope enterModuleContext(ModuleContext context){
+        if(context !is null)enforce(context.alive,"Module context is closed");
+        auto state=&evaluatorContext();
+        auto result=ContextScope(state,state.moduleContext,cast(void*)Fiber.getThis());
+        if(state.contextDepth++==0)state.rootContext=context;
+        state.moduleContext=context;
+        return result;
+    }
+    private void leaveModuleContext(ContextScope scope_){
+        auto state=scope_.state;state.moduleContext=scope_.previous;
+        if(--state.contextDepth==0){
+            state.rootContext=null;
+            if(scope_.fiber !is null && state.activeCoroutine is null)fiberEvaluatorContexts.remove(scope_.fiber);
+        }
+    }
+    ModuleContext currentModuleContext(){
+        auto fiber=Fiber.getThis();
+        if(fiber is null)return rootEvaluatorContext.moduleContext;
+        // 単なる文脈照会では、終了間際のFiber用stateを再生成しません。
+        if(auto found=cast(void*)fiber in fiberEvaluatorContexts)return (**found).moduleContext;
+        return null;
+    }
     private ModuleHandle globalModule_;
     private bool[string] nativeClassTypes;
     private CompletionRegistry completionRegistry_;
@@ -1310,20 +1389,25 @@ final class ScriptEngine
         return globals.get(name);
     }
 
-    CheckDiagnostic[] check(string source)
+    CheckDiagnostic[] check(string source, string sourceName = "")
     {
         // 前の実行で同名tableやaliasが定義された場合も、現在の型定義を優先します。
         try
         {
-            string[] nullableClassTypes;
-            foreach (name; nativeClassTypes.byKey)
-                if (typeAllowsNull(name)) nullableClassTypes ~= name;
-            return checkSource(source, nullableClassTypes, nativeClassTypes.keys);
+            return analyzeModule(source, sourceName).diagnostics;
         }
         catch (Exception error)
         {
             return [CheckDiagnostic(0, 0, error.msg)];
         }
+    }
+
+    private string[] nullableHostClassTypes()
+    {
+        string[] result;
+        foreach (name; nativeClassTypes.byKey)
+            if (typeAllowsNull(name)) result ~= name;
+        return result;
     }
 
     ScriptDiagnostic diagnostic(Throwable error)
@@ -1343,7 +1427,8 @@ final class ScriptEngine
         return invokeFunctionValue(callable, copiedArgs);
     }
 
-    private RunOutcome runInEnvironmentSafe(string source, Environment environment, RunOptions options)
+    private RunOutcome runInEnvironmentSafe(string source, Environment environment, RunOptions options,
+        BoundModule previous = null, ModuleHandle ownerModule = null)
     {
         auto previousSource = evaluatorContext.sourceName;
         auto previousText=evaluatorContext.sourceText;auto previousHasText=evaluatorContext.hasSourceText;
@@ -1359,14 +1444,27 @@ final class ScriptEngine
         RunOutcome outcome;
         try
         {
+            auto sourceKey = options.sourceName.length ? canonicalModulePath(options.sourceName) : "";
+            auto analyzer = moduleAnalyzer(true);
+            auto bound = analyzer.bind(source, options.sourceName, sourceKey, previous);
             if (options.typeCheck)
             {
-                auto typeDiagnostics = check(source);
-                if(typeDiagnostics.length)throw locatedException(format("Type check failed at %s:%s: %s",
-                    typeDiagnostics[0].line,typeDiagnostics[0].column,typeDiagnostics[0].message),
-                    typeDiagnostics[0].line,typeDiagnostics[0].column);
+                ModuleAnalysis analysis;
+                analysis.root = bound; analysis.modules = analyzer.modules;
+                auto typeDiagnostics = checkModuleGraph(analysis, nullableHostClassTypes());
+                if (typeDiagnostics.length)
+                {
+                    auto diagnostic = typeDiagnostics[0];
+                    auto error = new SourceException(format("Type check failed at %s:%s: %s",
+                        diagnostic.line, diagnostic.column, diagnostic.message));
+                    error.diagnostic.line = diagnostic.line; error.diagnostic.column = diagnostic.column;
+                    error.diagnostic.sourceName = diagnostic.sourceName;
+                    error.diagnostic.sourceText = diagnostic.sourceText; error.diagnostic.hasSourceText = true;
+                    throw error;
+                }
             }
-            auto program = parse(lex(source));
+            auto program = bound.program;
+            if (ownerModule !is null) ownerModule.boundModule = bound;
             if(program.hasInstanceDeclarations){
                 auto statement=program.firstInstanceDeclaration;
                 throw locatedException("instance declarations require a source module definition, not run/load",
@@ -1404,10 +1502,10 @@ final class ScriptEngine
             throw new StepLimitException(maximum);
     }
 
-    private void registerTypeAlias(Statement statement)
+    private void registerTypeAlias(Statement statement, Environment environment=null)
     {
         auto registryName = "__dua_type_" ~ statement.name;
-        enforce(globals.find(registryName) is null,
+        enforce(statement.scopedType || globals.find(registryName) is null,
             format("Type alias '%s' is already defined", statement.name));
         Value[string] definition;
         if (statement.declaredType == "table")
@@ -1448,12 +1546,16 @@ final class ScriptEngine
             foreach (name; statement.names) alternatives ~= Value.from(name);
             definition["alternatives"] = Value.from(alternatives);
         }
-        globals.define(registryName, Value.from(definition));
+        auto definitionValue=Value.from(definition);
+        attachDeclarationMetatable(definitionValue,statement,environment);
+        if (statement.scopedType && globals.find(registryName) !is null)
+            globals.assign(registryName, definitionValue);
+        else globals.define(registryName, definitionValue);
     }
 
-    private void registerStructType(Statement statement)
+    private void registerStructType(Statement statement, Environment environment, Environment evaluationEnvironment)
     {
-        enforce(!globals.contains("__dua_type_" ~ statement.name),
+        enforce(statement.scopedType || !globals.contains("__dua_type_" ~ statement.name),
             format("Type '%s' is already defined", statement.name));
         Value[string] fields;
         foreach (index, fieldName; statement.parameters)
@@ -1464,7 +1566,11 @@ final class ScriptEngine
         definition["isStruct"] = Value.from(true);
         definition["fields"] = Value.from(fields);
         definition["chain"] = Value.from(chain);
-        globals.define("__dua_type_" ~ statement.name, Value.from(definition));
+        auto registry = "__dua_type_" ~ statement.name;
+        auto definitionValue=Value.from(definition);
+        attachDeclarationMetatable(definitionValue,statement,evaluationEnvironment);
+        if (statement.scopedType && globals.find(registry) !is null) globals.assign(registry, definitionValue);
+        else globals.define(registry, definitionValue);
 
         auto typeName = statement.name;
         auto names = statement.parameters.dup;
@@ -1491,10 +1597,21 @@ final class ScriptEngine
                 entries[fieldName] = prepared.valueCopy();
             }
             auto result = Value.fromStruct(entries);
+            result.inheritDeclaredMetatable(definitionValue);
             result.setTypeChain(chain);
+            attachNonNullFields(result, Value.from(definition));
             return result;
         }));
-        globals.define(typeName, constructor);
+        if (statement.scopedType) environment.define(statement.publicTypeName, constructor);
+        else globals.define(typeName, constructor);
+    }
+
+    private void attachDeclarationMetatable(ref Value definition,Statement statement,Environment environment){
+        if(statement.metatableReference is null)return;
+        auto meta=evaluate(statement.metatableReference,environment);
+        enforce(meta.kind==ValueKind.table && !meta.isClassReference,
+            "Type with requires a non-null script metatable");
+        definition.declareMetatable(meta);
     }
 
     private Value* findTypeDefinition(string name)
@@ -1549,6 +1666,8 @@ final class ScriptEngine
     private string resolveContainerType(string name, size_t depth = 0)
     {
         enforce(depth < 64, "Cyclic or excessively nested container type");
+        string nonNullInner;
+        if (splitNonNullType(name, nonNullInner)) return nonNullType(resolveContainerType(nonNullInner, depth + 1));
         if (auto definition = findTypeDefinition(name))
             if (!definition.tableValue["isTable"].truthy())
             {
@@ -1570,10 +1689,37 @@ final class ScriptEngine
     private Value prepareContainerValue(Value value, string typeName)
     {
         typeName = resolveContainerType(typeName);
+        string nonNullInner;
+        if (splitNonNullType(typeName, nonNullInner))
+        {
+            enforce(!value.isNullReference, "Non-nullable type expected " ~ typeName ~ " but got null");
+            return prepareContainerValue(value, nonNullInner);
+        }
+        if (value.kind == ValueKind.null_)
+        {
+            auto target = nullContainerTarget(typeName);
+            string element, key;
+            if (target == "array")
+            {
+                auto result = Value.nullArray();
+                return typeName != target && (hasLiteralConstraint(typeName) || hasNonNullConstraint(typeName))
+                    ? prepareUnionArray(result, typeName) : result;
+            }
+            if (target == "associativeArray") return Value.nullAssociativeArray();
+            if (splitContainerType(target, element, key))
+            {
+                if (key.length) return Value.nullAssociativeArray(element, key);
+                auto result = Value.nullArray(element);
+                if (typeName != target && (hasLiteralConstraint(typeName) || hasNonNullConstraint(typeName)))
+                    result = prepareUnionArray(result, typeName);
+                return result;
+            }
+            return value;
+        }
         string elementType, keyType;
         if (!splitContainerType(typeName, elementType, keyType))
         {
-            if (value.kind == ValueKind.array && hasLiteralConstraint(typeName))
+            if (value.kind == ValueKind.array && (hasLiteralConstraint(typeName) || hasNonNullConstraint(typeName)))
             {
                 if (value.arrayUnionType == typeName)
                 {
@@ -1587,6 +1733,9 @@ final class ScriptEngine
         if (keyType.length == 0)
         {
             enforce(value.kind == ValueKind.array, "Expected array for " ~ typeName);
+            // 同じ型のハンドル代入では要素を複製せず、既存データを共有します。
+            if (value.arrayElementType == elementType) return value;
+            if (value.isNullContainer) return Value.nullArray(elementType);
             Value[] elements;
             elements.length = value.arrayValue.length;
             foreach (index, element; value.arrayValue)
@@ -1632,7 +1781,8 @@ final class ScriptEngine
         if (keepValidated && value.arrayValidation !is null) return value;
         auto identity = UnionArrayIdentity(value.arrayValue.ptr, value.arrayValue.length);
         if (auto copied = identity in copies) return *copied;
-        Value result; result.kind = ValueKind.array;
+        Value result = value.isNullContainer ? Value.nullArray(value.arrayElementType) : Value.init;
+        result.kind = ValueKind.array;
         result.arrayValue.length = value.arrayValue.length;
         // 子を辿る前に登録し、共有参照・循環参照を同じコピーへ結びます。
         copies[identity] = result;
@@ -1661,6 +1811,8 @@ final class ScriptEngine
         foreach (typeName; types)
         {
             auto resolved = resolveContainerType(typeName);
+            string nonNullInner;
+            while (splitNonNullType(resolved, nonNullInner)) resolved = nonNullInner;
             if (resolved == "any" || resolved == "auto" || resolved == "array") return ["any"];
             string element, key;
             if (splitContainerType(resolved, element, key) && !key.length) result ~= element;
@@ -1718,14 +1870,22 @@ final class ScriptEngine
     private bool typeAllowsNull(string typeName, size_t depth = 0)
     {
         if (depth >= 64) return false;
+        string nonNullInner;
+        if (splitNonNullType(typeName, nonNullInner)) return false;
         if (typeName == "auto" || typeName == "any" || typeName == "null" || typeName == "void")
             return true;
+        if (typeName == "table" || typeName == "array" || typeName == "associativeArray") return true;
         string elementType, keyType;
-        if (isBuiltinTypeName(typeName) || splitContainerType(typeName, elementType, keyType)
+        if (splitContainerType(typeName, elementType, keyType)) return true;
+        if (isBuiltinTypeName(typeName)
             || canFind(typeName, " delegate(")) return false;
         auto definition = findTypeDefinition(typeName);
         if (definition is null) return (typeName in nativeClassTypes) !is null;
-        if (definition.tableValue["isTable"].booleanValue) return false;
+        if (definition.tableValue["isTable"].booleanValue)
+        {
+            auto isStruct = "isStruct" in definition.tableValue;
+            return isStruct is null || !isStruct.truthy();
+        }
         foreach (alternative; definition.tableValue["alternatives"].arrayValue)
             if (typeAllowsNull(alternative.stringValue, depth + 1)) return true;
         return false;
@@ -1745,8 +1905,109 @@ final class ScriptEngine
         return false;
     }
 
+    private bool hasNonNullConstraint(string typeName, size_t depth = 0)
+    {
+        if (depth >= 64) return false;
+        string inner, element, key;
+        if (splitNonNullType(typeName, inner)) return true;
+        if (splitContainerType(typeName, element, key))
+            return hasNonNullConstraint(element, depth + 1) || (key.length && hasNonNullConstraint(key, depth + 1));
+        auto definition = findTypeDefinition(typeName);
+        if (definition is null || definition.tableValue["isTable"].truthy()) return false;
+        foreach (alternative; definition.tableValue["alternatives"].arrayValue)
+            if (hasNonNullConstraint(alternative.toHostString(), depth + 1)) return true;
+        return false;
+    }
+
+    // nullable な候補が同じコンテナ種別に決まる場合だけ型付き null ハンドルへ準備します。
+    private string nullContainerTarget(string typeName, size_t depth = 0)
+    {
+        if (depth >= 64) return "";
+        typeName = resolveContainerType(typeName);
+        string inner, element, key;
+        if (splitNonNullType(typeName, inner)) return "";
+        if (typeName == "array" || typeName == "associativeArray"
+            || splitContainerType(typeName, element, key)) return typeName;
+        auto definition = findTypeDefinition(typeName);
+        if (definition is null || definition.tableValue["isTable"].truthy()) return "";
+        string target;
+        foreach (member; definition.tableValue["alternatives"].arrayValue)
+        {
+            auto type = member.toHostString();
+            if (!typeAllowsNull(type) || type == "null" || type == "void") continue;
+            auto candidate = nullContainerTarget(type, depth + 1);
+            if (!candidate.length) return "";
+            if (!target.length) target = candidate;
+            else if (target != candidate)
+            {
+                string a, ak, b, bk;
+                auto arrays = (target == "array" || (splitContainerType(target, a, ak) && !ak.length))
+                    && (candidate == "array" || (splitContainerType(candidate, b, bk) && !bk.length));
+                if (!arrays) return "";
+                target = "array";
+            }
+        }
+        return target;
+    }
+
+    private bool hasContainerConstraint(string typeName)
+    {
+        typeName = resolveContainerType(typeName);
+        string inner;
+        while (splitNonNullType(typeName, inner)) typeName = inner;
+        return nullContainerTarget(typeName).length > 0;
+    }
+
+    private void attachNonNullFields(Value value, Value definition)
+    {
+        foreach (name, fieldType; definition.tableValue["fields"].tableValue)
+        {
+            auto type = fieldType.toHostString();
+            if (hasNonNullConstraint(type) || hasContainerConstraint(type))
+                value.addFieldConstraint(name, type, containerValidator(type));
+        }
+    }
+
+    private Value constructNamedTable(string typeName, Value value)
+    {
+        string target = typeName;
+        size_t depth;
+        Value* definition;
+        while (true)
+        {
+            enforce(depth++ < 64, "Cyclic named table construction type");
+            string inner;
+            if (splitNonNullType(target, inner)) { target = inner; continue; }
+            enforce(!isBuiltinTypeName(target), "Named table construction requires a declared table type: " ~ typeName);
+            definition = findTypeDefinition(target);
+            enforce(definition !is null, "Unknown named table type '" ~ typeName ~ "'");
+            if (definition.tableValue["isTable"].truthy()) break;
+            auto alternatives = definition.tableValue["alternatives"].arrayValue;
+            enforce(alternatives.length == 1, "Named table construction cannot target a union: " ~ typeName);
+            target = alternatives[0].toHostString();
+        }
+        auto structFlag = "isStruct" in definition.tableValue;
+        enforce(structFlag is null || !structFlag.truthy(), "Named table construction requires table, not struct: " ~ typeName);
+        foreach (fieldName, fieldType; definition.tableValue["fields"].tableValue)
+        {
+            auto field = fieldName in value.tableValue;
+            enforce(field !is null, "Named table '" ~ typeName ~ "' initializer is missing '" ~ fieldName ~ "'");
+            auto prepared = prepareContainerValue(*field, fieldType.toHostString());
+            enforce(valueMatchesType(prepared, fieldType.toHostString()),
+                "Named table field '" ~ fieldName ~ "' expected " ~ fieldType.toHostString());
+            *field = prepared.valueCopy();
+        }
+        value.setExplicitTableType(target, definition.tableValue["chain"].arrayValue);
+        value.inheritDeclaredMetatable(*definition);
+        attachNonNullFields(value, *definition);
+        return value;
+    }
+
     private bool valueMatchesType(Value value, string typeName)
     {
+        string nonNullInner;
+        if (splitNonNullType(typeName, nonNullInner))
+            return !value.isNullReference && valueMatchesType(value, nonNullInner);
         if (isStringLiteralType(typeName))
             return value.kind == ValueKind.string_ && stringLiteralType(value.stringValue) == typeName;
         if (value.kind == ValueKind.null_) return typeAllowsNull(typeName);
@@ -1808,11 +2069,15 @@ final class ScriptEngine
             return false;
         }
         if (!value.isFieldAggregate) return false;
+        // A construction may match its own/base chain, checked above, but may
+        // not be silently reclassified as an unrelated structural alternative.
+        if (value.explicitTableType.length) return false;
         foreach (fieldName, fieldType; definition.tableValue["fields"].tableValue)
         {
             auto field = fieldName in value.tableValue;
             if (field is null || !valueMatchesType(*field, fieldType.toHostString())) return false;
         }
+        attachNonNullFields(value, *definition);
         Value[] chain;
         foreach (chainName; definition.tableValue["chain"].arrayValue) chain ~= chainName;
         value.setTypeChain(chain);
@@ -1821,6 +2086,11 @@ final class ScriptEngine
 
     private bool valueIsType(Value value, string typeName)
     {
+        string nonNullInner;
+        if (splitNonNullType(typeName, nonNullInner))
+            return !value.isNullReference && valueIsType(value, nonNullInner);
+        if (value.isNullContainer && (typeName == "null" || typeName == "void")) return true;
+        if (value.kind == ValueKind.null_ && typeName == "table") return false;
         if (isBuiltinTypeName(typeName)) return valueMatchesType(value, typeName);
         auto definition = findTypeDefinition(typeName);
         // 代入可能であっても、null自体がクラスの実体になるわけではありません。
@@ -3133,8 +3403,7 @@ unittest
 
 unittest
 {
-    // A cycle sees each export as it executes, including the first entry in
-    // an initially empty table. All importers retain that same table.
+    // Reject a source import cycle before executing either initializer.
     auto engine = new ScriptEngine();
     size_t executions;
     engine.bindNative("markModule", (scope const(Value)[] args) {
@@ -3162,29 +3431,21 @@ unittest
         export int readAfter() { return A.after; }
     });
 
-    auto a = engine.loadModule("A");
-    auto b = engine.loadModule("B");
-    assert(a["during"].toInt() == 4);
-    assert(a["selfAfter"].toInt() == 4);
-    assert(b["missing"].kind == ValueKind.null_);
-    assert(b.call("readAfter").toInt() == 4);
-    // Publishing immediately does not introduce live variable bindings.
-    assert(a["before"].toInt() == 1);
-    assert(a.call("add", [Value.from(0)]).toInt() == 2);
-    assert(engine.loadModule("A") is a);
-    assert(executions == 2);
+    auto failed = engine.loadModuleSafe("A");
+    assert(!failed.ok && failed.errorMessage.canFind("A -> B -> A"));
+    assert(executions == 0);
+    assert(engine.run(`return package.loaded("A") == null && package.loaded("B") == null;`).truthy());
 }
 
 unittest
 {
-    // Forward access is still an error; neither module may stay cached after
-    // this nested load fails, and the export scope must be restored.
+    // Cyclic forward access fails without retaining either module in cache.
     auto engine = new ScriptEngine();
     engine.registerModule("earlyA", "import earlyB; export auto later = 1;");
     engine.registerModule("earlyB", "import earlyA; export auto seen = earlyA.later;");
     auto failed = engine.loadModuleSafe("earlyA");
     assert(!failed.ok);
-    assert(failed.errorMessage.canFind("Unknown property 'later'"));
+    assert(failed.errorMessage.canFind("earlyA -> earlyB -> earlyA"));
     assert(engine.run(q{
         return package.loaded("earlyA") == null && package.loaded("earlyB") == null;
     }).truthy());
@@ -3196,8 +3457,7 @@ unittest
 
 unittest
 {
-    // Failure evicts the entire nested load transaction, including a dependency
-    // that observed a provisional export through an ordinary import cycle.
+    // Failure evicts dependencies initialized in the same load transaction.
     auto engine = new ScriptEngine();
     engine.registerModule("failing", q{
         export auto before = 1;
@@ -3205,16 +3465,15 @@ unittest
         error("initialization failed");
     });
     engine.registerModule("observer", q{
-        import failing;
-        export auto seen = failing.before;
-        export int read() { return failing.before; }
+        export auto seen = 1;
+        export int read() { return seen; }
     });
     auto failed = engine.loadModuleSafe("failing");
     assert(!failed.ok);
     assert(failed.errorMessage.canFind("initialization failed"));
     assert(engine.run("return package.loaded(\"failing\") == null;").truthy());
     assert(engine.run("return package.loaded(\"observer\") == null;").truthy());
-    assert(!engine.loadModuleSafe("observer").ok);
+    assert(engine.loadModuleSafe("observer").ok);
 }
 
 unittest

@@ -44,6 +44,16 @@
     "body": "instance import ${1:module};$0",
     "description": "モジュールごとの依存実体"
   },
+  "Import file": {
+    "prefix": "importfile",
+    "body": "import \"${1:./types.dua}\";$0",
+    "description": "ファイル指定のimport"
+  },
+  "Import file as": {
+    "prefix": "importfileas",
+    "body": "import \"${1:../common/types.dua}\" as ${2:commonTypes};$0",
+    "description": "ファイル指定のimportに別名を付ける"
+  },
   "Interpolated string": {
     "prefix": "istr",
     "body": "i\"${1:text} \\$(${2:expression})\"$0",

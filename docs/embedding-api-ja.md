@@ -431,7 +431,8 @@ assert(counter.value == 7); // class は元インスタンスへ反映
 - 同名の0引数メソッドと1引数メソッドは property getter/setter としても扱われます。通常の `obj.method(...)` 呼び出しも可能です。
 - class の継承チェーンは `typeinfo(value).chain` で取得できます。
 - 引数型が確定している D の `opIndex` / `opCall` は、Dua の `obj[index]` / `obj(args...)` から呼び出せます。`obj[row, column]` や引数なしの `obj[]` にも対応します。オーバーロード、既定引数、型安全な可変長引数は通常の reflected メソッドと同じ規則で扱います。引数型の推論が必要な未インスタンス化テンプレートは公開しません。
-- `opIndex` の戻り値は通常の値変換を経由します。D の `ref` 戻り値への書き込み、`opIndexAssign`、`opSlice`、`opDollar` の自動呼び出しは対象外です。
+- `opIndex` の戻り値は通常の値変換を経由します。D の `ref` 戻り値への書き込み、`opSlice`、`opDollar` の自動呼び出しは対象外です。
+- bound class/structの通常の単一添字代入`obj[key] = value`は、公開された具体的な`opIndexAssign(value, key)`を呼びます。Dua tableの`__newindex`は従来どおりです。複数/空添字、slice代入、native indexed複合代入は対象外です。[添字代入の詳細](native-index-assignment.md)を参照してください。
 
 Reflection は D の型安全な境界変換に対応できるメンバーだけを公開します。公開面が意図どおりかテストしてください。
 

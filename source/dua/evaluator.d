@@ -71,8 +71,39 @@ package(dua) struct EvaluationStack(T)
 
 /// Mutable state that belongs exclusively to evaluation of a run.
 /// Keeping it together prevents evaluator internals from becoming ScriptEngine API.
+/// 一つの実行場所に属する名前空間。通常変数の共有環境とは独立させます。
+final class ModuleContext
+{
+    package(dua) Environment globals;
+    package(dua) Object[string] modules;
+    package(dua) string[] paths;
+    package(dua) Value[] loaders;
+    package(dua) void delegate(ModuleContext) release;
+    ModuleContext parent;
+    Object owner;
+    private bool active = true;
+    bool alive() const {
+        return active && (parent is null || parent.alive);
+    }
+    package(dua) bool belongsTo(ModuleContext ancestor){
+        for(auto current=this;current !is null;current=current.parent)if(current is ancestor)return true;
+        return false;
+    }
+    void close(){
+        if(!active)return;
+        active=false;modules=null;
+        if(release !is null)release(this);
+    }
+}
+
 struct EvaluatorContext
 {
+    package(dua) ModuleContext moduleContext;
+    package(dua) ModuleContext rootContext;
+    package(dua) size_t contextDepth;
+    package(dua) string[] moduleCreationPath;
+    package(dua) Value[] moduleExportScopes;
+    package(dua) Object activeCoroutine;
     package string moduleName;
     package string sourceName;
     package string sourceText;
@@ -88,10 +119,13 @@ struct EvaluatorContext
 final class Environment
 {
     Environment parent;
+    package(dua) ModuleContext context;
+    private Environment sharedSource;
     package(dua) Environment sharedDeclarations;
     package(dua) bool initializingModule;
     package(dua) bool failedModule;
     private bool[string] pendingDeclarations;
+    package(dua) string pendingBindingLabel = "Module binding";
 
     package(dua) void reserveDeclaration(string name)
     {
@@ -102,13 +136,16 @@ final class Environment
 
     private void checkInitialized(string name)
     {
+        if(context !is null)enforce(context.alive,"Module context is closed");
+        if(sharedSource !is null)sharedSource.checkInitialized(name);
         enforce(!failedModule, "Cannot access a failed module instance");
         if (auto pending = name in pendingDeclarations)
-            enforce(!*pending, format("Module binding '%s' is not initialized", name));
+            enforce(!*pending, format("%s '%s' is not initialized", pendingBindingLabel, name));
     }
 
     package(dua) void validateModuleLifetime()
     {
+        if(context !is null)enforce(context.alive,"Module context is closed");
         for (auto environment = this; environment !is null; environment = environment.parent)
             enforce(!environment.failedModule, "Cannot call a function belonging to a failed module instance");
     }
@@ -135,13 +172,21 @@ final class Environment
     this(Environment parent = null)
     {
         this.parent = parent;
+        if(parent !is null)context=parent.context;
     }
 
     package(dua) this(Environment parent, ScopeLayout layout)
     {
         this.parent = parent;
+        if(parent !is null)context=parent.context;
         reserveSlots(layout);
     }
+
+    package(dua) Environment sharedView(Environment parent){
+        auto result=new Environment(parent);result.sharedSource=this;return result;
+    }
+    private Storage* bindingStorage(){return sharedSource is null ? storage : sharedSource.bindingStorage();}
+    private const(Storage)* bindingStorage() const{return sharedSource is null ? storage : sharedSource.bindingStorage();}
 
     package(dua) bool hasStorage() const { return storage !is null; }
 
@@ -200,7 +245,7 @@ final class Environment
         for (auto environment = Rebindable!(const Environment)(this);
             environment !is null; environment = environment.parent)
         {
-            auto data = environment.storage;
+            auto data = environment.bindingStorage();
             if (data is null) continue;
             if (data.layout !is null)
             {
@@ -230,7 +275,7 @@ final class Environment
         for (auto environment = this; environment !is null; environment = environment.parent)
         {
             environment.checkInitialized(name);
-            auto data = environment.storage;
+            auto data = environment.bindingStorage();
             if (data is null) continue;
             if (data.layout !is null)
             {
@@ -293,7 +338,7 @@ final class Environment
             if (environment is null)
                 return resolveSlots(name, cache);
             environment.checkInitialized(name);
-            auto data = environment.storage;
+            auto data = environment.bindingStorage();
             if ((data is null ? null : data.layout) !is step.layout)
                 return resolveSlots(name, cache);
             if (data !is null)
@@ -317,7 +362,7 @@ final class Environment
             environment = environment.parent)
         {
             environment.checkInitialized(name);
-            auto data = environment.storage;
+            auto data = environment.bindingStorage();
             auto layout = data is null ? null : data.layout;
             auto slot = layout is null ? size_t.max : layout.find(name);
             resolved.steps ~= VariableSlots.Step(layout, slot);
@@ -502,7 +547,8 @@ mixin template EvaluatorImplementation()
                         auto declaredType = statement.declaredType;
                         string elementType, keyType;
                         if (splitContainerType(resolveContainerType(declaredType), elementType, keyType)
-                            || hasLiteralConstraint(declaredType))
+                            || hasLiteralConstraint(declaredType) || hasNonNullConstraint(declaredType)
+                            || hasContainerConstraint(declaredType))
                             declarationEnvironment.define(name, value, containerValidator(declaredType));
                         else
                             declarationEnvironment.define(name, value);
@@ -518,11 +564,12 @@ mixin template EvaluatorImplementation()
                     result.lastValue = Value.nullValue();
                     break;
                 case Statement.Kind.tableDecl:
-                    registerTypeAlias(statement);
+                    registerTypeAlias(statement, environment);
                     result.lastValue = Value.nullValue();
                     break;
                 case Statement.Kind.structDecl:
-                    registerStructType(statement);
+                    registerStructType(statement, declarationEnvironment, environment);
+                    if (statement.isExported) exportSymbol(statement.publicTypeName, declarationEnvironment.get(statement.publicTypeName));
                     result.lastValue = Value.nullValue();
                     break;
                 case Statement.Kind.try_:
@@ -563,7 +610,7 @@ mixin template EvaluatorImplementation()
                         auto target = resolveCompoundTarget(statement.target, environment, left);
                         auto right = evaluate(statement.expression, environment);
                         auto value = evaluateBinary(statement.assignmentOperator, left, right);
-                        assignTarget(target, value, environment);
+                        assignTarget(target, value, environment, false);
                         result.lastValue = value;
                         break;
                     }
@@ -598,7 +645,8 @@ mixin template EvaluatorImplementation()
                 case Statement.Kind.functionDecl:
                     auto callable = Value.fromFunction(new ScriptCallable(statement.name, this, environment,
                         statement.parameters, statement.variadic, statement.body,
-                        statement.parameterTypes, statement.returnType, layoutFor(statement), statement.line, statement.column));
+                        statement.parameterTypes, statement.returnType, layoutFor(statement), statement.line, statement.column,
+                        statement.parameterDefaults));
                     environment.define(statement.name, callable);
                     result.lastValue = callable;
                     if (statement.isExported)
@@ -607,9 +655,9 @@ mixin template EvaluatorImplementation()
                     }
                     break;
                 case Statement.Kind.import_:
-                    auto imported = (statement.isInstance ? instantiateModule(statement.name)
-                        : requireModuleHandle(statement.name)).exportsValue();
-                    declarationEnvironment.define(statement.aliasName, imported);
+                    auto imported = (statement.isInstance ? instantiateModule(statement.name, statement.isPathImport)
+                        : requireModuleHandle(statement.name, statement.isPathImport)).exportsValue();
+                    (environment.context is null ? declarationEnvironment : environment).define(statement.aliasName, imported);
                     result.lastValue = imported;
                     break;
                 case Statement.Kind.export_:
@@ -900,6 +948,9 @@ mixin template EvaluatorImplementation()
                 enforce(!indexed.isSlice, "Slice cannot be an assignment target");
                 enforce(indexed.indices.length == 1, "Index assignment requires a single index");
                 auto container = evaluate(indexed.target, environment);
+                if(container.isNativeAggregate)
+                    if(auto setter=container.findMember("opIndexAssign"))
+                        enforce(setter.kind!=ValueKind.function_,"Native indexed compound assignment is not supported");
                 auto pushedLength = canMeasureLength(container);
                 if (pushedLength) evaluatorContext.indexLengthStack.push(measuredLength(container));
                 scope (exit)
@@ -918,7 +969,7 @@ mixin template EvaluatorImplementation()
         return resolved;
     }
 
-    private void assignTarget(Expression target, Value value, Environment environment)
+    private void assignTarget(Expression target, Value value, Environment environment, bool simpleAssignment=true)
     {
         try
         {
@@ -931,10 +982,12 @@ mixin template EvaluatorImplementation()
                 case Expression.Kind.get:
                     auto get = cast(GetExpression) target;
                     auto container = evaluate(get.target, environment);
+                    enforce(container.kind != ValueKind.null_, "Cannot assign member '" ~ get.memberName ~ "' on null");
                     enforce(container.kind != ValueKind.array || get.memberName != "length",
                         "Array length is read-only");
                     enforce(container.isFieldAggregate,
                         "Property assignment currently supports tables/reflected structs/classes");
+                    value = container.validateFieldAssignment(get.memberName, value);
                     if (auto property = container.findMember(get.memberName))
                     {
                         if (property.kind == ValueKind.function_
@@ -958,6 +1011,8 @@ mixin template EvaluatorImplementation()
                 case Expression.Kind.index:
                     auto indexed = cast(IndexExpression) target;
                     auto container = evaluate(indexed.target, environment);
+                    enforce(container.kind != ValueKind.null_, "Cannot index untyped null");
+                    enforce(container.kind != ValueKind.null_, "Cannot index untyped null");
                     enforce(!indexed.isSlice, "Slice cannot be an assignment target");
                     enforce(indexed.indices.length == 1, "Index assignment requires a single index");
                     // A compound target already resolved its index to a literal and measured length once.
@@ -968,6 +1023,16 @@ mixin template EvaluatorImplementation()
                         if (pushedLength) evaluatorContext.indexLengthStack.pop();
                     }
                     auto index = evaluate(indexed.index, environment);
+                    if(container.isNativeAggregate){
+                        if(auto setter=container.findMember("opIndexAssign")){
+                            if(setter.kind==ValueKind.function_){
+                                enforce(simpleAssignment,"Native indexed compound assignment is not supported");
+                                // Dの代入演算子は値、キーの順。キーを文字列化する前に渡します。
+                                invokeFunctionValueWithThis(*setter,[value,index],container,callSite(target));
+                                return;
+                            }
+                        }
+                    }
                     if (container.kind == ValueKind.associativeArray)
                     {
                         index = checkedAssociativeKey(container, index);
@@ -1003,6 +1068,7 @@ mixin template EvaluatorImplementation()
                     if (container.isFieldAggregate)
                     {
                         auto key = index.toHostString();
+                        value = container.validateFieldAssignment(key, value);
                         if (!applyTableNewIndex(container, key, value))
                         {
                             container.tableValue[key] = value.valueCopy();
@@ -1030,6 +1096,13 @@ mixin template EvaluatorImplementation()
             consumeStep();
             final switch (expression.kind)
             {
+                case Expression.Kind.with_:
+                    auto with_=cast(WithExpression)expression;
+                    auto target=evaluate(with_.target,environment);
+                    enforce(target.isFieldAggregate,"with target must be a table, struct or reflected object");
+                    auto scope_=new Environment(environment);
+                    scope_.define(with_.bindingName,target);
+                    return evaluate(with_.body,scope_);
                 case Expression.Kind.literal:
                     return (cast(LiteralExpression) expression).value;
                 case Expression.Kind.variable:
@@ -1141,8 +1214,9 @@ mixin template EvaluatorImplementation()
                     }
                     return result;
                 case Expression.Kind.table:
+                    auto tableLiteral = cast(TableExpression)expression;
                     Value[string] entries;
-                    foreach (entry; (cast(TableExpression) expression).entries)
+                    foreach (entry; tableLiteral.entries)
                     {
                         if (entry.isSpread)
                         {
@@ -1155,6 +1229,8 @@ mixin template EvaluatorImplementation()
                                 {
                                     continue;
                                 }
+                                enforce(!tableLiteral.targetType.length || (spreadKey in entries) is null,
+                                    "Duplicate initializer field '" ~ spreadKey ~ "'");
                                 entries[spreadKey] = spreadValue;
                             }
                             continue;
@@ -1168,54 +1244,80 @@ mixin template EvaluatorImplementation()
                         {
                             key = evaluate(entry.keyExpression, environment).toHostString();
                         }
+                        enforce(!tableLiteral.targetType.length || (key in entries) is null,
+                            "Duplicate initializer field '" ~ key ~ "'");
                         entries[key] = evaluate(entry.value, environment);
                     }
-                    return Value.from(entries);
+                    auto tableValue = Value.from(entries);
+                    return tableLiteral.targetType.length ? constructNamedTable(tableLiteral.targetType, tableValue) : tableValue;
                 case Expression.Kind.function_:
                     auto functionExpression = cast(FunctionExpression) expression;
                     return Value.fromFunction(new ScriptCallable("anonymous", this, environment,
                         functionExpression.parameters, functionExpression.variadic, functionExpression.body,
                         functionExpression.parameterTypes, functionExpression.returnType, layoutFor(functionExpression),
-                        functionExpression.line, functionExpression.column));
+                        functionExpression.line, functionExpression.column, functionExpression.parameterDefaults));
                 case Expression.Kind.get:
                     auto get = cast(GetExpression) expression;
                     auto container = evaluate(get.target, environment);
+                    enforce(container.kind != ValueKind.null_, "Cannot access member '" ~ get.memberName ~ "' on null");
                     if (container.kind == ValueKind.array && get.memberName == "length")
                         return Value.from(cast(long) container.arrayValue.length);
+                    if (container.kind == ValueKind.associativeArray
+                        && (get.memberName == "keys" || get.memberName == "values" || get.memberName == "length"))
+                        return associativeProperty(container, get.memberName);
+                    if (container.isFieldAggregate)
+                    {
+                        Value getter;
+                        if (container.lookupPropertyGetter(get.memberName, getter))
+                        {
+                            auto refreshed = invokeFunctionValueWithThis(getter, [], container, callSite(get));
+                            auto property = container.findMember(get.memberName);
+                            if (!container.isClassReference && (property is null || property.kind != ValueKind.function_))
+                            {
+                                container.refreshMember(get.memberName, refreshed);
+                            }
+                            return refreshed;
+                        }
+                        if (auto value = container.findMember(get.memberName))
+                        {
+                            if (container.moduleOwner is null && value.kind == ValueKind.function_
+                                && value.functionValue.acceptsArity(0))
+                            {
+                                return invokeFunctionValueWithThis(*value, [], container, callSite(get));
+                            }
+                            return value.withReceiver(container);
+                        }
+                        Value resolved;
+                        if (resolveTableIndex(container, get.memberName, resolved))
+                        {
+                            return resolved;
+                        }
+                    }
+                    // メンバーと __index を優先し、受け手だけで呼べる UFCS を
+                    // 既存の引数なしメンバーと同じ arity 判定で評価します。
+                    if (!get.withMember) if (auto functionValue = resolveUfcs(get.memberName, environment))
+                    {
+                        auto callable = functionValue.functionValue;
+                        // raw bindNative のように引数数が不明な関数は、
+                        // 必須引数の不足を避けるため明示呼び出しに残します。
+                        auto knownArity = callable.expectedArity() != size_t.max
+                            || callable.minimumArity() != 0 || callable.maximumArity() != size_t.max
+                            || (cast(ScriptCallable)callable) !is null
+                            || (cast(ReflectedCallable)callable) !is null
+                            || (cast(OverloadedReflectedCallable)callable) !is null;
+                        if (knownArity && callable.acceptsArity(1))
+                            return invokeFunctionValue(*functionValue, [container], callSite(get));
+                    }
                     if (container.kind == ValueKind.associativeArray)
                         return associativeProperty(container, get.memberName);
                     enforce(container.isFieldAggregate,
-                        "Property access currently supports tables/reflected structs/classes");
-                    Value getter;
-                    if (container.lookupPropertyGetter(get.memberName, getter))
-                    {
-                        auto refreshed = invokeFunctionValueWithThis(getter, [], container, callSite(get));
-                        auto property = container.findMember(get.memberName);
-                        if (!container.isClassReference && (property is null || property.kind != ValueKind.function_))
-                        {
-                            container.refreshMember(get.memberName, refreshed);
-                        }
-                        return refreshed;
-                    }
-                    if (auto value = container.findMember(get.memberName))
-                    {
-                        if (container.moduleOwner is null && value.kind == ValueKind.function_
-                            && value.functionValue.acceptsArity(0))
-                        {
-                            return invokeFunctionValueWithThis(*value, [], container, callSite(get));
-                        }
-                        return value.withReceiver(container);
-                    }
-                    Value resolved;
-                    if (resolveTableIndex(container, get.memberName, resolved))
-                    {
-                        return resolved;
-                    }
+                        "Property access currently supports tables/reflected structs/classes or callable UFCS");
                     enforce(false, format("Unknown property '%s'", get.memberName));
                     assert(0);
                 case Expression.Kind.index:
                     auto indexed = cast(IndexExpression) expression;
                     auto container = evaluate(indexed.target, environment);
+                    enforce(container.kind != ValueKind.null_, "Cannot index untyped null");
                     bool pushedLengthContext;
                     if (canMeasureLength(container))
                     {
@@ -1243,7 +1345,8 @@ mixin template EvaluatorImplementation()
                         {
                             sliced = container.arrayValue[lowerBound .. upperBound].dup;
                         }
-                        auto result = Value.fromOwnedArray(sliced, container.arrayElementType);
+                        auto result = container.isNullContainer ? Value.nullArray(container.arrayElementType)
+                            : Value.fromOwnedArray(sliced, container.arrayElementType);
                         if (container.arrayValidation !is null)
                             foreach (types; container.arrayValidation.localTypes)
                                 result = prepareUnionArray(result, types);
@@ -1262,6 +1365,7 @@ mixin template EvaluatorImplementation()
 
     private Value readIndex(Value container, Value[] indices, CallSite caller = CallSite.init)
     {
+        enforce(container.kind != ValueKind.null_, "Cannot index untyped null");
         if (container.isFieldAggregate)
         {
             if (auto method = container.findMember("opIndex"))
@@ -1353,6 +1457,12 @@ mixin template EvaluatorImplementation()
     private Value castValue(Value value, string targetType, bool checkedConversion = false, size_t depth = 0)
     {
         enforce(depth < 64, "Cyclic or excessively nested cast type alias");
+        string nonNullInner;
+        if (splitNonNullType(targetType, nonNullInner))
+        {
+            enforce(!value.isNullReference, "Cannot cast null to non-nullable type " ~ targetType);
+            return castValue(value, nonNullInner, checkedConversion, depth + 1);
+        }
         string elementType, keyType;
         if (splitContainerType(resolveContainerType(targetType), elementType, keyType)
             || (value.kind == ValueKind.array && hasLiteralConstraint(targetType)))
@@ -1391,10 +1501,15 @@ mixin template EvaluatorImplementation()
                 if (value.kind == ValueKind.null_) return value;
                 break;
             case "array":
+                if (value.kind == ValueKind.null_) return Value.nullArray();
                 if (value.kind == ValueKind.array) return value;
                 break;
+            case "associativeArray":
+                if (value.kind == ValueKind.null_) return Value.nullAssociativeArray();
+                if (value.kind == ValueKind.associativeArray) return value;
+                break;
             case "table":
-                if (value.kind == ValueKind.table) return value;
+                if (value.kind == ValueKind.table || value.kind == ValueKind.null_) return value;
                 break;
             case "function":
                 if (value.kind == ValueKind.function_) return value;
@@ -1549,7 +1664,7 @@ mixin template EvaluatorImplementation()
         {
             auto get = cast(GetExpression) calleeExpression;
             auto receiver = evaluate(get.target, environment);
-            return callMethodOrUfcs(receiver, get.memberName, args, environment, caller);
+            return callMethodOrUfcs(receiver, get.memberName, args, environment, caller, !get.withMember);
         }
 
         return invokeCallableValue(evaluate(calleeExpression, environment), args, caller);
@@ -1577,8 +1692,9 @@ mixin template EvaluatorImplementation()
     }
 
     private Value callMethodOrUfcs(Value receiver, string functionName, Value[] args,
-        Environment environment, CallSite caller)
+        Environment environment, CallSite caller, bool allowUfcs=true)
     {
+        enforce(receiver.kind != ValueKind.null_, "Cannot call member '" ~ functionName ~ "' on null");
         if (receiver.kind == ValueKind.associativeArray)
         {
             if (functionName == "keys" || functionName == "values" || functionName == "length")
@@ -1612,7 +1728,7 @@ mixin template EvaluatorImplementation()
             }
         }
 
-        if (auto ufcsFunction = resolveUfcs(functionName, environment))
+        if (allowUfcs) if (auto ufcsFunction = resolveUfcs(functionName, environment))
         {
             Value[] ufcsArgs = [receiver];
             ufcsArgs ~= args;
@@ -1764,7 +1880,7 @@ mixin template EvaluatorImplementation()
 
     private Value delegate(Value) containerValidator(string declaredType)
     {
-        if (hasLiteralConstraint(declaredType))
+        if (hasLiteralConstraint(declaredType) || hasNonNullConstraint(declaredType) || hasContainerConstraint(declaredType))
             return (Value next) {
                 auto prepared = prepareContainerValue(next, declaredType);
                 enforce(valueMatchesType(prepared, declaredType), "Assignment expected " ~ declaredType);
@@ -1935,6 +2051,7 @@ mixin template EvaluatorImplementation()
         enforce(args[1].kind == ValueKind.table || args[1].kind == ValueKind.null_,
             "setmetatableWithType second argument must be table or null");
         auto table = cast(Value) args[0];
+        table.clearDeclaredMetatable();
         if (args[1].kind == ValueKind.null_)
         {
             table.tableValue.remove("__meta");
@@ -2172,15 +2289,13 @@ mixin template EvaluatorImplementation()
             return true;
         }
 
-        if (auto meta = container.findMember("__meta"))
+        auto meta=container.effectiveMetatable();
+        if (meta.kind == ValueKind.table)
         {
-            if (meta.kind == ValueKind.table)
+            if (auto nested = key in meta.tableValue)
             {
-                if (auto nested = key in meta.tableValue)
-                {
-                    method = *nested;
-                    return true;
-                }
+                method = *nested;
+                return true;
             }
         }
         return false;

@@ -7,9 +7,11 @@
     { "include": "#interpolated-string" },
     { "include": "#string" },
     { "include": "#numbers" },
+    { "include": "#type-declaration" },
     { "include": "#keywords" },
     { "include": "#function-declaration" },
     { "include": "#types" },
+    { "include": "#table-construction" },
     { "include": "#function-call" },
     { "include": "#operators" }
   ],
@@ -90,7 +92,7 @@
       "patterns": [
         {
           "name": "keyword.control.dua",
-          "match": "\\b(?:try|catch|return|if|else|while|for|foreach|switch|case|default|break|continue|yield|import|export|as)\\b"
+          "match": "\\b(?:try|catch|return|if|else|while|for|foreach|switch|case|default|break|continue|yield|import|export|as|with)\\b"
         },
         {
           "name": "storage.type.dua",
@@ -105,6 +107,14 @@
           "match": "\\b(?:true|false|null|this)\\b"
         }
       ]
+    },
+    "type-declaration": {
+      "match": "\\b(table|struct)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": { "1": { "name": "storage.type.dua" }, "2": { "name": "entity.name.type.dua" } }
+    },
+    "table-construction": {
+      "match": "\\b(?:([A-Za-z_][A-Za-z0-9_]*(?:\\s*\\.\\s*[A-Za-z_][A-Za-z0-9_]*)*)\\s*\\.\\s*)?([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\{)",
+      "captures": { "1": { "name": "entity.name.namespace.dua" }, "2": { "name": "entity.name.type.construction.dua" } }
     },
     "types": {
       "name": "support.type.primitive.dua",

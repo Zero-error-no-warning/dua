@@ -40,6 +40,12 @@ Schema version 1 uses:
 
 Module/static members use dotted symbol keys. Instance members are under `types`. The extension follows straightforward local declarations, assignments, aliases, function return types and property chains. Unknown expressions invalidate inferred values. This is conservative token analysis, not a full type checker; arbitrary flow, script-defined functions, and overload resolution are not implemented. Existing language completion remains available without a catalog. Use `Ctrl+Space` to request candidates.
 
+From 0.4.4, a type descriptor may also contain `kind: "class"`, `"struct"`, `"union"` or `"aggregate"`. This is an additive field in schema version 1. The exporter derives it from the D declaration, without invoking getters. The bundled checker receives only explicitly declared class names and public type aliases in a JSON request (`--request-json`, `protocolVersion: 1`, `source`, `hostClassTypes`). It uses the same static checker as the runtime and never loads imports, constructs host objects or runs scripts. Value types do not acquire nullable semantics.
+
+Older catalogs remain usable for completion. Missing/unknown type kinds do not grant null compatibility; regenerate with the updated exporter to clear nullable-reference false positives. Catalogs written again by an older host also need regeneration. `dua.checkerPath` overrides retain their original source-only stdin protocol, so an older custom checker continues to work but cannot consume the catalog's class metadata.
+
+Nested `members` descriptors are retained as well. Version 0.4.3 can complete an enum reached through a module type alias, such as `ui.Font.Type.`, directly from the host's declared members. Regenerate the entire host catalog after an API migration; do not merge symbols from an obsolete catalog into the new one.
+
 ## Asset string arguments and scene context
 
 Hosts may add the following generic arrays. No host-specific API or scene-format names are built into the extension.

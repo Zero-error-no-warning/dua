@@ -13,6 +13,7 @@ string encodeJson(const Value value)
 
 private JSONValue toJsonValue(const Value value)
 {
+    if (value.isNullContainer) return JSONValue(null);
     final switch (value.kind)
     {
         case ValueKind.null_:

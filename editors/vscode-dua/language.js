@@ -1,6 +1,8 @@
 'use strict';
+const {readType}=require('./typeSyntax');
+const {tokens}=require('./hostCompletion');
 
-const keywords = 'auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new table'.split(' ');
+const keywords = 'auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new table with'.split(' ');
 const types = 'any void bool byte ubyte short ushort int uint long ulong float double real string'.split(' ');
 const builtins = {
   error: ['error(value, level?)', 'スクリプトエラーを送出します。'],
@@ -68,10 +70,19 @@ function maskSource(source) {
 function documentNames(source) {
   const text = maskSource(source).text;
   const names = new Map();
+  for(const match of text.matchAll(/\b(table|struct)\s+([A-Za-z_]\w*)\b/g))names.set(match[2],match[1]);
   const declaration = /\b([A-Za-z_]\w*(?:\s*\[[A-Za-z_\w]*\])*)\s+([A-Za-z_]\w*)\s*(?=[=;,(){}])/g;
   const excluded = new Set(keywords.filter(word => !['auto', 'struct', 'table', 'alias'].includes(word)));
   for (const match of text.matchAll(declaration)) {
     if (!excluded.has(match[1])) names.set(match[2], match[1]);
+  }
+  const input=tokens(source).tokens;
+  for(let i=0;i<input.length;i++) {
+    if(excluded.has(input[i].text) || !['identifier'].includes(input[i].kind) && input[i].text!=='(')continue;
+    const annotation=readType(input,i,name=>name);
+    if(!annotation || !input.slice(i,annotation.next).some(token=>token.text==='&'))continue;
+    const name=input[annotation.next],after=input[annotation.next+1]?.text;
+    if(name?.kind==='identifier' && ['=',';',',','(',')','{','}'].includes(after))names.set(name.text,annotation.type);
   }
   for (const match of text.matchAll(/\b(?:import\s+([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)*|as\s+([A-Za-z_]\w*))/g)) {
     names.set(match[2] || match[1], 'module');
@@ -94,6 +105,8 @@ function completions(source, offset) {
     if (member[1] === 'package') items.push({ label: 'path', kind: 'variable', detail: 'モジュール検索パターン配列' }, { label: 'loaded', kind: 'variable', detail: '読み込み済みモジュール' });
     return items;
   }
+  // 先頭ドットや式の結果へのmember補完に、外側の名前を混ぜない。
+  if(/\.\s*[A-Za-z_\w]*$/.test(prefix))return [];
   const items = new Map();
   for (const label of keywords) items.set(label, { label, kind: 'keyword' });
   for (const label of types) items.set(label, { label, kind: 'type' });

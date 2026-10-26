@@ -1,0 +1,22 @@
+[
+ {"id":"table-property-and-explicit-once","ok":true,"source":"table WeaponStats { int damage; } int calls=0; int doubledDamage(WeaponStats stats) { calls+=1; return stats.damage*2; } auto weapon=WeaponStats{damage=12}; auto a=weapon.doubledDamage; auto b=weapon.doubledDamage(); return a==24 && b==24 && calls==2;"},
+ {"id":"receiver-evaluated-once","ok":true,"source":"int calls=0; auto make=(){ calls+=1; return {value=3}; }; int read(any x){return x.value;} return make().read==3 && calls==1;"},
+ {"id":"member-value-priority","ok":true,"nativeCalls":0,"source":"auto value={selected=17}; return value.selected==17;"},
+ {"id":"member-method-priority","ok":true,"source":"int read(any value){return 99;} auto value={n=0,read=(){this.n+=1;return this.n;}}; return value.read==1 && value.read()==2 && value.n==2;"},
+ {"id":"index-meta-priority","ok":true,"nativeCalls":0,"source":"auto value={}; setmetatable(value,{__index={selected=42}}); return value.selected==42;"},
+ {"id":"required-script-not-called","ok":false,"source":"int needsExtra(any value,int extra){return extra;} auto value={}; return value.needsExtra;"},
+ {"id":"required-script-explicit","ok":true,"source":"int needsExtra(any value,int extra){return extra;} auto value={}; return value.needsExtra(8)==8;"},
+ {"id":"global-function-value","ok":true,"nativeCalls":1,"source":"auto f=selected; return typeof(f).kind==\"function_\" && f(4)==8;"},
+ {"id":"import-function-value-and-alias-ufcs","ok":true,"source":"import helpers; auto f=helpers.doubled; auto doubled=f; return typeof(f).kind==\"function_\" && (4).doubled==8 && (4).doubled()==8;"},
+ {"id":"lexical-function-resolution","ok":true,"source":"int read(any value){return 1;} auto value={}; { int read(any value){return 2;} if(value.read!=2)return false; } return value.read==1;"},
+ {"id":"native-overload-types","ok":true,"nativeCalls":2,"source":"return (4).selected==8 && \"abc\".selected==3;"},
+ {"id":"native-overload-required-not-called","ok":false,"nativeCalls":0,"source":"return (4).needs;"},
+ {"id":"native-overload-arity-gap","ok":false,"nativeCalls":0,"source":"return (4).gap;"},
+ {"id":"native-default-and-explicit","ok":true,"nativeCalls":2,"source":"return (4).bonus==7 && (4).bonus(5)==9;"},
+ {"id":"host-existing-zero-method","ok":true,"hostCalls":2,"source":"return host.read==1 && host.read()==2;"},
+ {"id":"host-required-method-value","ok":true,"hostCalls":0,"source":"auto f=host.required; return typeof(f).kind==\"function_\";"},
+ {"id":"arrays-and-aa-keep-properties","ok":true,"source":"int sum(int[] x){return x[0]+x[1];} int count(int[string] x){return x.length;} int length(any x){return 99;} auto a=[2,3]; int[string] aa=[\"a\":1]; return a.sum==5 && a.sum()==5 && a.length==2 && aa.count==1 && aa.keys.length==1 && aa.length==1;"},
+ {"id":"variadic-one-receiver","ok":true,"source":"int head(int first, any rest...){return first+rest.length;} return (3).head==3 && (3).head(1,2)==5;"},
+ {"id":"ufcs-function-result-no-double-call","ok":true,"source":"int calls=0; any factory(any receiver){calls+=1;return ()=>7;} auto value={}; auto f=value.factory; auto g=value.factory(); return calls==2 && f()==7 && g()==7;"},
+ {"id":"raw-native-unknown-arity-not-called","ok":false,"source":"auto a=[1,2]; return a.map;"}
+]

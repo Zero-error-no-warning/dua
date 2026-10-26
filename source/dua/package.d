@@ -22,6 +22,7 @@ struct Dua
     alias ScriptEngine = dua.runtime.ScriptEngine;
     alias ScriptModule = dua.runtime.ScriptModule;
     alias ModuleHandle = dua.runtime.ModuleHandle;
+    alias ModuleContext = dua.runtime.ModuleContext;
     alias RunOutcome = dua.runtime.RunOutcome;
     alias ScriptDiagnostic = dua.execution.ScriptDiagnostic;
     alias scriptDiagnostic = dua.execution.scriptDiagnostic;

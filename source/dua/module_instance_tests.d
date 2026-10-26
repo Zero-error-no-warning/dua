@@ -173,8 +173,10 @@ unittest
     assert(engine.run(q{return package.loaded("A") == null && package.loaded("B") == null;}).truthy());
     engine.registerModule("ordinaryA", "import ordinaryB; instance int x = 1; export int read() { return x; }");
     engine.registerModule("ordinaryB", "import ordinaryA; export int read() { return ordinaryA.read(); }");
-    assert(engine.loadModule("ordinaryB").call("read").toInt() == 1);
-    assert(engine.instantiateModule("ordinaryA").call("read").toInt() == 1);
+    auto ordinaryCycle = engine.loadModuleSafe("ordinaryB");
+    assert(!ordinaryCycle.ok && ordinaryCycle.errorMessage.canFind("ordinaryB -> ordinaryA -> ordinaryB"));
+    assertThrown!Exception(engine.instantiateModule("ordinaryA"));
+    assert(engine.run(`return package.loaded("ordinaryA") == null && package.loaded("ordinaryB") == null;`).truthy());
 }
 
 unittest

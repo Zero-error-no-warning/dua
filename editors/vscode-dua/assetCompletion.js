@@ -54,7 +54,8 @@ function createContext(catalog, documentPath) {
         assets: Array.isArray(binding.assets) ? binding.assets.map(p => key(path.resolve(root, p))) : null };
     });
     const value = host.combine(values);
-    symbols[name] = { kind: 'variable', ...value };
+    const module = contexts.every(c => c.bindings?.[name]?.kind === 'module');
+    symbols[name] = { kind: module ? 'module' : 'variable', ...value };
   }
   const effective = { ...catalog, symbols };
   const initial = new Map();

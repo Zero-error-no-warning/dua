@@ -2,7 +2,7 @@
   "name": "dua-language",
   "displayName": "Dua Language",
   "description": "Syntax highlighting, completions, snippets and diagnostics for the Dua scripting language.",
-  "version": "0.4.2",
+  "version": "0.6.6",
   "publisher": "dua-lang",
   "license": "MIT",
   "repository": {
@@ -56,6 +56,17 @@
           "type": "boolean",
           "default": true,
           "description": "Show syntax and static type errors while editing Dua files."
+        },
+        "dua.modulePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "?.dua",
+            "?/init.dua"
+          ],
+          "description": "Module search patterns in runtime priority order. Defaults use validated scene/session catalog directories when available. Explicit relative patterns use the workspace folder; quoted relative imports use the importing file."
         },
         "dua.diagnostics.delay": {
           "type": "integer",

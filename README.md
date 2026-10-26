@@ -71,6 +71,9 @@ void main()
 - [言語リファレンス](docs/language-reference-ja.md) — 構文、型、標準ライブラリの一覧
 - [日本語 HTML リファレンス](docs/language-reference-ja.html) — 30章の言語仕様・標準関数詳解・D API・実用例。全文検索、コードコピー、ダークモード、印刷に対応し、ブラウザーで直接開けます
 - [埋め込み API リファレンス](docs/embedding-api-ja.md) — `ScriptEngine` / `Value` / reflection / 安全な実行
+- [デフォルト引数](docs/default-arguments-ja.md) — 末尾の複数既定値、呼出し時評価、スコープと可変値
+- [2つの with](docs/with-ja.md) — 型の共通メタテーブルと先頭ドットの字句対象
+- [今後の変更候補](docs/future-changes-ja.md) — 未決定の機能案と調査記録（実装予定ではありません）
 
 HTML版は外部依存のない単体ファイルです。原稿を更新したら `node docs/build-reference.mjs` で再生成できます。
 

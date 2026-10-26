@@ -164,3 +164,8 @@ implementation as Dua's `new`.
 
 See the [runnable example](../examples/module-instances/README.md) and the
 [complete Japanese reference](language-reference-ja.md).
+
+## with declarations and expressions
+
+A top-level table or struct may specify a shared metatable with a with clause. A with(target) expression binds only leading-dot members to a lexical target evaluated once. Bare names retain normal lookup. See [the with specification](with-ja.md).
+
