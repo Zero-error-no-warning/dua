@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { checkSource,analyzeSource } = require('../checker');
-const executable=path.resolve(__dirname,'../bin/dua-check.exe');
+const executable=path.resolve(__dirname,'../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check');
 test('overloaded host binary operators do not imply a numeric result',async()=>{
  for(const expr of ['v * 2.0','2.0 * v','v / 2.0','v + v','v % v','v ~ v','(v * 2.0) * 3.0']){
   assert.deepEqual(await checkSource(executable,'Vec3 v=Vec3(1,2,3);v='+expr+';').promise,[],expr);

@@ -23,6 +23,28 @@ private ScriptEngine actorEngine()
 
 unittest
 {
+    auto engine = actorEngine();
+    auto a = engine.createModuleContext();
+    auto b = engine.createModuleContext();
+    auto first = engine.loadModule("actors.player", a);
+    auto second = engine.loadModule("actors.player", b);
+    assert(engine.loadModule("actors.player", a) is first);
+    assert(second !is first);
+    first.call("damage", [Value.from(7)]);
+    assert(engine.loadModule("actors.player", a).call("health").toInt() == 93);
+    assert(second.call("health").toInt() == 100);
+    assert(second.call("total").toInt() == 7);
+    // 失敗時にもcontextが復元され、別の所有者を汚染しないことを確認します。
+    assertThrown!Exception(engine.loadModule("missing.module", a));
+    assert(engine.loadModule("actors.player", b) is second);
+    a.close();
+    assertThrown!Exception(engine.loadModule("actors.player", a));
+    assert(engine.loadModule("actors.player", b).call("health").toInt() == 100);
+    b.close();
+}
+
+unittest
+{
     auto engine = new ScriptEngine();
     engine.registerModule("privateState", "instance auto data = { count = 1 };");
     auto state = engine.loadModule("privateState");
@@ -214,7 +236,10 @@ unittest
         auto outcome = engine.runSafe(source);
         assert(!outcome.ok, source);
     }
+    // checkも依存を解決するため、構文上有効なimportには実際の定義を用意します。
+    engine.registerModule("movement", "export instance int ticks = 0;");
     assert(engine.check("instance { int hp = 100; import movement; } auto p = new movement;").length == 0);
+    assert(engine.check("instance import missingMovement;").length > 0);
     assert(engine.check("instance int hp = \"bad\";").length > 0);
     assertThrown!Exception(engine.newModule("host").instantiate());
     assert(!engine.runSafe("export instance import invalid;").ok);
@@ -280,9 +305,15 @@ unittest
         export int ok = 1;
     });
     engine.registerModule("bad", "export int x = 1; import observer; error(\"bad\");");
-    engine.registerModule("observer", "import bad; export int read() { return bad.x; }");
+    // cleanup対象を増やす依存。static import cycleではtry実行前に解析が失敗します。
+    engine.registerModule("observer", "export int read() { return 1; }");
     assert(engine.loadModule("catcher")["ok"].toInt() == 1);
     assert(engine.run(q{return package.loaded("bad") == null && package.loaded("observer") == null;}).truthy());
+    engine.registerModule("cycleA", "import cycleB;");
+    engine.registerModule("cycleB", "import cycleA;");
+    auto cycle = engine.loadModuleSafe("cycleA");
+    assert(!cycle.ok && cycle.errorMessage.canFind("Import cycle"));
+    assert(engine.run(q{return package.loaded("cycleA") == null && package.loaded("cycleB") == null;}).truthy());
 }
 
 unittest

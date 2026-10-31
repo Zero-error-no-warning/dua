@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
 const {analyzeSource}=require('../checker'), modules=require('../moduleIntelligence'),host=require('../hostCompletion');
 const tables=require('../tableConstruction');
-const exe=path.resolve(__dirname,'../bin/dua-check.exe'),empty={symbols:{},types:{}};
+const exe=path.resolve(__dirname,'../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check'),empty={symbols:{},types:{}};
 const declarations='table Hoge { int x; string label; } table Other { bool enabled; } alias Both = Hoge | Other; alias Same = Hoge;\n';
 async function fixture(run){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'dua-named-table-')), sourceName=path.join(root,'main.dua');

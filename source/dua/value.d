@@ -8,7 +8,7 @@ import std.exception : enforce;
 import std.format : format;
 import std.string : indexOf, join;
 import std.meta : AliasSeq, staticIndexOf, staticMap;
-import std.traits : BaseClassesTuple, FieldNameTuple, ForeachType, fullyQualifiedName, hasUDA, KeyType, OriginalType, ParameterDefaults, Parameters, ReturnType, Unqual, ValueType, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
+import std.traits : ParameterStorageClassTuple, ParameterStorageClass, BaseClassesTuple, FieldNameTuple, ForeachType, fullyQualifiedName, hasUDA, KeyType, OriginalType, ParameterDefaults, Parameters, ReturnType, Unqual, ValueType, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
 import std.typecons : Tuple;
 import std.range.primitives : isForwardRange, isInfinite, hasLength;
 import std.math : isFinite;
@@ -30,6 +30,15 @@ abstract class CallableValue
     this(string debugName)
     {
         this.debugName = debugName;
+    }
+
+    /// 呼出し式はこのマスクを参照し、必要な引数だけを遅延します。
+    bool lazyParameter(size_t index) const { return false; }
+    string resultType() const { return ""; }
+
+    Value[] prepareArguments(Value[] args) {
+        foreach(index,ref arg;args) if(!lazyParameter(index)) arg=forceArgument(arg);
+        return args;
     }
 
     abstract Value invoke(Value[] args);
@@ -67,12 +76,84 @@ abstract class CallableValue
     }
 }
 
+/// 通常のdelegate値と区別する内部の未評価引数。
+abstract class DeferredArgument : CallableValue
+{
+    this() { super("lazy argument"); }
+    override size_t expectedArity() const { return 0; }
+}
+
+private final class MappedArgument : DeferredArgument
+{
+    Value original;
+    Value delegate(Value) map;
+    string mappedType;
+    this(Value original,Value delegate(Value) map,string mappedType) {this.original=original;this.map=map;this.mappedType=mappedType;}
+    override string resultType() const {return mappedType.length ? mappedType : argumentType(cast(Value)original);}
+    override Value invoke(Value[] args) {return map(forceArgument(original));}
+}
+
+/// 引数の変換も、lazy式が使用される時点まで遅延させます。
+Value mapDeferredArgument(Value argument,Value delegate(Value) map,string mappedType="")
+{
+    if(argument.kind==ValueKind.function_ && cast(DeferredArgument)argument.functionValue !is null)
+        return Value.fromFunction(new MappedArgument(argument,map,mappedType));
+    return map(argument);
+}
+
+Value forceArgument(Value value)
+{
+    if (value.kind == ValueKind.function_)
+        if (auto deferred = cast(DeferredArgument)value.functionValue)
+            return deferred.invoke([]);
+    return value;
+}
+
+string argumentType(Value value)
+{
+    switch(value.kind) {
+        case ValueKind.function_:
+            if(auto thunk=cast(DeferredArgument)value.functionValue) return thunk.resultType();
+            return "function";
+        case ValueKind.integer:return "int";
+        case ValueKind.floating:return "double";
+        case ValueKind.boolean:return "bool";
+        case ValueKind.string_:return "string";
+        case ValueKind.array:
+            return value.arrayElementType.length ? value.arrayElementType~"[]" : "array";
+        case ValueKind.null_:return "null";
+        default:return value.nativeTypeName;
+    }
+}
+
+private int lazyTypeScore(string actual,string expected)
+{
+    import std.algorithm : canFind;
+    import std.string : endsWith;
+    if(actual==expected)return 10;
+    if(expected=="any")return 0;
+    if(actual=="function" && expected.canFind("delegate("))return 5;
+    if(actual=="array" && expected.endsWith("[]"))return 2;
+    if(actual.endsWith("[]") && expected.endsWith("[]"))
+        return lazyTypeScore(actual[0..$-2],expected[0..$-2]);
+    if(["int","long","uint","ulong","short","ushort","byte","ubyte"].canFind(actual)
+        && ["int","long","uint","ulong","short","ushort","byte","ubyte","float","double","real"].canFind(expected))return 3;
+    if(["float","double","real"].canFind(actual) && ["float","double","real"].canFind(expected))return 3;
+    return -1;
+}
 final class ReflectedCallable : CallableValue
 {
     private Value delegate(Value[] args) invoker;
     private Value delegate(Value[] args, CallSite caller) contextualInvoker;
     private int delegate(scope const(Value)[] args) argumentMatcher;
     private Value delegate(const(Object), Value[], CallSite) receiverInvoker;
+    bool[] lazyParameters;
+    string[] parameterTypes;
+    string returnType;
+    override bool lazyParameter(size_t index) const {
+        return index<lazyParameters.length && lazyParameters[index];
+    }
+    override string resultType() const { return returnType; }
     private size_t minimum;
     private size_t maximum;
     // Keeps a heap-backed struct receiver alive for the lifetime of its bound
@@ -84,9 +165,11 @@ final class ReflectedCallable : CallableValue
         int delegate(scope const(Value)[] args) argumentMatcher = null,
         size_t maximum = size_t.max, bool unbounded = false,
         Value delegate(Value[] args, CallSite caller) contextualInvoker = null,
-        Value delegate(const(Object), Value[], CallSite) receiverInvoker = null)
+        Value delegate(const(Object), Value[], CallSite) receiverInvoker = null,
+        bool[] lazyParameters=null, string[] parameterTypes=null, string returnType="")
     {
         super(debugName);
+        this.lazyParameters=lazyParameters; this.parameterTypes=parameterTypes; this.returnType=returnType;
         this.minimum = minimum;
         this.maximum = unbounded ? size_t.max
             : maximum == size_t.max ? minimum : maximum;
@@ -156,6 +239,46 @@ final class OverloadedReflectedCallable : CallableValue
         this.overloads = overloads;
     }
 
+    // lazy候補がある集合では、選択前にどの引数も実行しません。
+    override bool lazyParameter(size_t index) const {
+        foreach(candidate;overloads) foreach(flag;candidate.lazyParameters) if(flag)return true;
+        return false;
+    }
+    override string resultType() const {
+        if(!overloads.length)return "";
+        auto result=overloads[0].returnType;
+        foreach(candidate;overloads) if(candidate.returnType!=result)return "";
+        return result;
+    }
+    override Value[] prepareArguments(Value[] args) {
+        if(!lazyParameter(0)) return super.prepareArguments(args);
+        return args;
+    }
+    private ReflectedCallable selectDeferred(Value[] args) {
+        ReflectedCallable selected;
+        int best=int.min;
+        bool ambiguous;
+        foreach(candidate;overloads) {
+            if(!candidate.acceptsArity(args.length))continue;
+            int score;
+            bool matches=true;
+            foreach(index,arg;args) {
+                enforce(index<candidate.parameterTypes.length,"Lazy variadic overload resolution is not supported");
+                auto actual=argumentType(arg);
+                enforce(actual.length && actual!="any",
+                    "Cannot determine argument type without evaluation for lazy overload '"~debugName~"'; use an explicit cast or typed function");
+                auto part=lazyTypeScore(actual,candidate.parameterTypes[index]);
+                if(part<0){matches=false;break;} score+=part;
+            }
+            if(!matches)continue;
+            score-=cast(int)(candidate.maximumArity()-args.length);
+            if(score>best){selected=candidate;best=score;ambiguous=false;}
+            else if(score==best)ambiguous=true;
+        }
+        enforce(selected !is null,"No overload matches unevaluated arguments for '"~debugName~"'");
+        enforce(!ambiguous,"Ambiguous lazy overload for '"~debugName~"'");
+        return selected;
+    }
     override bool acceptsArity(size_t arity) const
     {
         // オーバーロード集合の既定範囲では、必要引数のある関数まで
@@ -177,6 +300,10 @@ final class OverloadedReflectedCallable : CallableValue
 
     override Value invokeOn(const(Object) receiver, Value[] args, CallSite caller)
     {
+        if(lazyParameter(0)) {
+            auto selected=selectDeferred(args);
+            return selected.invokeOn(receiver,selected.prepareArguments(args),caller);
+        }
         ReflectedCallable match;
         int bestScore = int.min;
         bool ambiguous;
@@ -251,6 +378,9 @@ private final class ClassReceiverCallable : CallableValue
     {
         return target.invokeOn(receiver, args, caller);
     }
+    override Value[] prepareArguments(Value[] args) { return target.prepareArguments(args); }
+    override bool lazyParameter(size_t index) const { return target.lazyParameter(index); }
+    override string resultType() const { return target.resultType(); }
     override size_t expectedArity() const { return target.expectedArity(); }
     override size_t minimumArity() const { return target.minimumArity(); }
     override size_t maximumArity() const { return target.maximumArity(); }
@@ -627,7 +757,7 @@ private ReflectedLayout reflectedLayout(T)()
     static foreach (name; FieldNameTuple!T)
     {{
         // Ordinary access preserves field visibility; getMember bypasses it.
-        static if (__traits(compiles, convertToValue(mixin("(*cast(T*) null)." ~ name))))
+        static if (isBindableField!(T, name) && __traits(compiles, convertToValue(mixin("(*cast(T*) null)." ~ name))))
             result.members[name] = ReflectedMemberPlan(result.fieldCount++, &bindReflectedField!(T, name));
     }}
     static if (__traits(getAliasThis, T).length && !isInstanceOf!(Tuple, T))
@@ -640,7 +770,7 @@ private ReflectedLayout reflectedLayout(T)()
 // Class descriptors and invokers are registered once per qualified D type/thread.
 // The only per-return data is the original D reference in Value.
 private ReflectedCallable makeClassCallable(alias declaration, Root, string expression = "receiver")(
-    string debugName) if (!isNoBind!declaration)
+    string debugName) if (!isNoBind!declaration && isPublicBinding!declaration)
 {
     static if (__traits(isStaticFunction, declaration))
         return makeStaticReflectedCallable!declaration(debugName);
@@ -806,7 +936,7 @@ private TableStorage reflectedClassLayout(T)()
     registerClassOperators!(T, T)(layout);
     static foreach (name; FieldNameTuple!T)
     {{
-        static if (__traits(compiles, convertToValue(mixin("(*cast(T*) null)." ~ name))))
+        static if (isBindableField!(T, name) && __traits(compiles, convertToValue(mixin("(*cast(T*) null)." ~ name))))
         {
             layout.entries[name] = Value.nullValue();
             layout.propertyGetters[name] = Value.fromFunction(new ReflectedCallable(T.stringof ~ "." ~ name ~ ".getter", 0,
@@ -1396,6 +1526,12 @@ struct Value
 
     package(dua) Value validateFieldAssignment(string name, Value value)
     {
+        // native getterを同名のtable要素で隠さず、setter不在を読取専用として扱います。
+        if (nativeClass.instance !is null || (tableStorage !is null && tableStorage.reflected !is null)) {
+            Value getter, setter;
+            enforce(!lookupPropertyGetter(name, getter) || lookupPropertySetter(name, setter),
+                "Property '" ~ name ~ "' is read-only");
+        }
         if (tableStorage !is null)
             if (auto constraints = name in tableStorage.fieldConstraints)
                 foreach (validator; (*constraints).byValue) value = validator(value);
@@ -1765,7 +1901,7 @@ struct Value
         }
         static foreach (memberName; FieldNameTuple!T)
         {{
-            static if (__traits(compiles, convertToValue(mixin("value." ~ memberName))))
+            static if (isBindableField!(T, memberName) && __traits(compiles, convertToValue(mixin("value." ~ memberName))))
             {
                 static if (is(T == struct))
                     converted[memberName] = convertToValue(mixin("reflectedTarget.value." ~ memberName));
@@ -1879,7 +2015,7 @@ struct Value
         size_t index;
         static foreach (name; FieldNameTuple!T)
         {{
-            static if (__traits(compiles, convertToValue(mixin("value." ~ name))))
+            static if (isBindableField!(T, name) && __traits(compiles, convertToValue(mixin("value." ~ name))))
                 data.fields[index++] = convertToValue(mixin("owner.value." ~ name));
         }}
         Value[] aliasTargets;
@@ -1964,6 +2100,12 @@ struct Value
     T to(T)() const
     {
         return convertFromValue!T(this);
+    }
+
+    /// 通常の型判定では例外を生成せず、元のclass参照と修飾子を確認します。
+    T tryClass(T)() const nothrow @nogc if (is(T == class))
+    {
+        return reflectedClass!T(this);
     }
 
     string toHostString() const
@@ -2237,6 +2379,44 @@ private void assignReflectedDefault(alias declaration, size_t index, T)(ref T ta
         target = evaluateParameterDefault!(declaration, index)();
 }
 
+private bool[] nativeLazyMask(C)() {
+    bool[] mask;
+    static foreach(storage;ParameterStorageClassTuple!C)
+        mask ~= (storage & ParameterStorageClass.lazy_) != 0;
+    return mask;
+}
+private string[] nativeParameterTypes(C)() {
+    string[] types;
+    static foreach(P;Parameters!C) types ~= hostTypeName!(P,true);
+    return types;
+}
+private string nativeCallArguments(C)() {
+    string[] arguments;
+    static foreach(index,P;Parameters!C) {
+        static if((ParameterStorageClassTuple!C[index] & ParameterStorageClass.lazy_)!=0)
+            arguments ~= "convertFromValue!(MutableParams["~index.stringof~"])(forceArgument(args["~index.stringof~"]))";
+        else arguments ~= "converted["~index.stringof~"]";
+    }
+    return arguments.join(",");
+}
+
+private T readNativeArgument(alias declaration,size_t index,T)(Value[] args,CallSite caller) {
+    if(index<args.length)return convertFromValue!T(forceArgument(args[index]));
+    static if(parameterHasDefault!(declaration,index)) {
+        T value;
+        assignReflectedDefault!(declaration,index)(value,caller);
+        return value;
+    } else throw new Exception("Missing required native lazy argument");
+}
+private string nativeDefaultCallArguments(C,alias declaration)() {
+    string[] arguments;
+    static foreach(index,P;Parameters!C) {
+        static if((ParameterStorageClassTuple!C[index] & ParameterStorageClass.lazy_)!=0)
+            arguments ~= "readNativeArgument!(declaration,"~index.stringof~",MutableParams["~index.stringof~"])(args,caller)";
+        else arguments ~= "converted["~index.stringof~"]";
+    }
+    return arguments.join(",");
+}
 private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C)(string debugName,
     auto ref C callable,
     Object lifetimeOwner = null,
@@ -2247,6 +2427,8 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
     alias MutableParams = staticMap!(Unqual, Params);
     enum isTypesafeVariadic = variadicFunctionStyle!C == Variadic.typesafe;
     enum fixedArity = isTypesafeVariadic ? Params.length - 1 : Params.length;
+    static if(isTypesafeVariadic && Params.length && (ParameterStorageClassTuple!C[$-1] & ParameterStorageClass.lazy_)!=0)
+        throw new Exception("Native lazy variadic parameters are not supported");
     enum minimum = isTypesafeVariadic ? fixedArity : reflectedMinimumArity!declaration;
     enum maximum = isTypesafeVariadic ? size_t.max : fixedArity;
     auto storedCallable = callable;
@@ -2263,7 +2445,9 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
         auto converted = Tuple!MutableParams();
         static foreach (index; 0 .. fixedArity)
         {{
-            if (index < args.length)
+            static if ((ParameterStorageClassTuple!C[index] & ParameterStorageClass.lazy_)!=0)
+                {} // 既定式もDが引数を読む時点で評価します。
+            else if (index < args.length)
                 converted[index] = convertFromValue!(MutableParams[index])(args[index]);
             else static if (parameterHasDefault!(declaration, index))
             {
@@ -2282,11 +2466,11 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
 
         static if (is(ReturnType!C == void))
         {
-            actualCallable(converted.expand);
+            mixin("actualCallable("~nativeDefaultCallArguments!(C,declaration)~");");
             return Value.nullValue();
         }
         else
-            return convertToValue(actualCallable(converted.expand));
+            return convertToValue(mixin("actualCallable("~nativeDefaultCallArguments!(C,declaration)~")"));
     };
     auto invoker = (Value[] args, CallSite caller) { return receiverInvoker(null, args, caller); };
     return new ReflectedCallable(debugName, minimum, null, lifetimeOwner, (scope const(Value)[] args) {
@@ -2322,7 +2506,7 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
             }
         }
         return score;
-    }, maximum, isTypesafeVariadic, invoker, receiverInvoker);
+    }, maximum, isTypesafeVariadic, invoker, receiverInvoker, nativeLazyMask!C, nativeParameterTypes!C, hostTypeName!(ReturnType!C));
 }
 
 package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto ref C callable,
@@ -2340,7 +2524,8 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
                 variadic ? "at least " : "", fixedArity, args.length));
         auto converted = Tuple!MutableParams();
         static foreach (index; 0 .. fixedArity){{
-            converted[index] = convertFromValue!(MutableParams[index])(args[index]);
+            static if ((ParameterStorageClassTuple!C[index] & ParameterStorageClass.lazy_)==0)
+                converted[index] = convertFromValue!(MutableParams[index])(args[index]);
         }}
         static if (variadic)
         {
@@ -2350,11 +2535,11 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
         }
         static if (is(ReturnType!C == void))
         {
-            storedCallable(converted.expand);
+            mixin("storedCallable("~nativeCallArguments!C~");");
             return Value.nullValue();
         }
         else
-            return convertToValue(storedCallable(converted.expand));
+            return convertToValue(mixin("storedCallable("~nativeCallArguments!C~")"));
     }, lifetimeOwner, (scope const(Value)[] args) {
         if (variadic ? args.length < fixedArity : args.length != fixedArity)
             return -1;
@@ -2376,11 +2561,11 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
             }
         }
         return score;
-    }, size_t.max, variadic);
+    }, size_t.max, variadic, null, null, nativeLazyMask!C, nativeParameterTypes!C, hostTypeName!(ReturnType!C));
 }
 
 private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string debugName,
-    auto ref T value, Object lifetimeOwner = null) if (!isNoBind!overload)
+    auto ref T value, Object lifetimeOwner = null) if (!isNoBind!overload && isPublicBinding!overload)
 {
     static if (__traits(isStaticFunction, overload))
     {
@@ -2391,17 +2576,14 @@ private ReflectedCallable makeBoundReflectedCallable(alias overload, T)(string d
     else
     {
         alias Function = typeof(overload);
-        static if (variadicFunctionStyle!Function == Variadic.typesafe)
-            alias Delegate = ReturnType!Function delegate(Parameters!Function...);
-        else
-            alias Delegate = ReturnType!Function delegate(Parameters!Function);
+        alias Delegate = typeof(&__traits(child, value, overload));
         Delegate callable = &__traits(child, value, overload);
         return makeReflectedCallableWithDefaults!overload(debugName, callable, lifetimeOwner);
     }
 }
 
 private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string expression)(
-    string debugName, auto ref Root root, Object lifetimeOwner = null) if (!isNoBind!overload)
+    string debugName, auto ref Root root, Object lifetimeOwner = null) if (!isNoBind!overload && isPublicBinding!overload)
 {
     alias Function = typeof(overload);
     alias Params = Parameters!Function;
@@ -2435,7 +2617,7 @@ private ReflectedCallable makeLazyAliasCallable(alias overload, Root, string exp
                 }
             }}
             return score;
-        }, Params.length, false, invoker);
+        }, Params.length, false, invoker, null, nativeLazyMask!Function, nativeParameterTypes!Function, hostTypeName!(ReturnType!Function));
 }
 
 private ReflectedCallable makeLazyAliasBinary(Root, Target, string expression,
@@ -2897,6 +3079,7 @@ auto hostCompletionSignature(alias declaration)()
         parameters ~= JSONValue([
             "name": JSONValue(name.length ? name : "arg" ~ index.stringof),
             "type": JSONValue(hostTypeName!(P, true)),
+            "lazy": JSONValue((ParameterStorageClassTuple!declaration[index] & ParameterStorageClass.lazy_)!=0),
             "optional": JSONValue(parameterHasDefault!(declaration, index)),
             "variadic": JSONValue(variadicFunctionStyle!declaration == Variadic.typesafe
                 && index + 1 == Parameters!declaration.length)]);
@@ -2942,7 +3125,7 @@ auto describeHostCompletionType(T)()
     }}
     static foreach (name; FieldNameTuple!T)
     {{
-        static if (name.length && name[0] != '_'
+        static if (name.length && name[0] != '_' && isBindableField!(T, name)
             && __traits(compiles, mixin("(*cast(T*) null)." ~ name))
             && __traits(compiles, convertToValue(mixin("(*cast(T*) null)." ~ name))))
         {

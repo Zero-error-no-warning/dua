@@ -2,7 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),os=require('node:os');
 const {analyzeSource}=require('../checker');
 const modules=require('../moduleIntelligence'),host=require('../hostCompletion');
-const exe=path.resolve(__dirname,'../bin/dua-check.exe'),empty={symbols:{},types:{}};
+const exe=path.resolve(__dirname,'../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check'),empty={symbols:{},types:{}};
 async function fixture(run){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'dua-named-service-')),sourceName=path.join(root,'main.dua');
  fs.writeFileSync(path.join(root,'types.dua'),'export table Hoge { int x; string label; } table Secret { int hidden; }');

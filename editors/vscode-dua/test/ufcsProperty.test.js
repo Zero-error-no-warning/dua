@@ -62,7 +62,7 @@ test('lexically declared functions and aliases preserve scope and callable resul
 
 test('shared checker matches UFCS scalar/array diagnostics and retains conservative table and unknown-arity boundaries',async()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'dua-ufcs-extension-')),sourceName=path.join(root,'main.dua');
- const exe=path.resolve(__dirname,'../bin/dua-check.exe');
+ const exe=path.resolve(__dirname,'../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check');
  const analyze=source=>analyzeSource(exe,source,{sourceName,modulePaths:[path.join(root,'?.dua')],hostClassTypes:['ListView']}).promise;
  try{
   for(const source of ['int doubled(int n){return n*2;} int value=(3).doubled;',

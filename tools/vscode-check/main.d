@@ -23,13 +23,17 @@ private JSONValue strings(string[] values)
 
 private JSONValue describeExport(ModuleExportInfo value)
 {
+    JSONValue[] lazyParameters;
+    foreach(flag;value.parameterLazy)lazyParameters~=JSONValue(flag);
     JSONValue[string] fields;
     foreach (name, type; value.fields) fields[name] = text(type);
     return JSONValue([
         "name": text(value.name), "kind": text(value.kind), "type": text(value.type),
         "displayType": text(value.displayType), "runtimeValue": JSONValue(value.runtimeValue),
         "exported": JSONValue(value.exported), "declarationKind": text(value.declarationKind),
-        "fields": JSONValue(fields), "alternatives": strings(value.alternatives), "parameterTypes": strings(value.parameterTypes),
+        "fields": JSONValue(fields), "defaultFields": strings(value.defaultFields), "fieldOrder": strings(value.fieldOrder),
+        "alternatives": strings(value.alternatives), "parameterTypes": strings(value.parameterTypes),
+        "parameterLazy": JSONValue(lazyParameters),
         "variadic": JSONValue(value.variadic),
         "requiredParameterCount": value.requiredParameterCount==size_t.max ? JSONValue(null) : position(value.requiredParameterCount),
         "nominalValue": JSONValue(value.nominalValue),
@@ -84,6 +88,8 @@ void main()
                             if (auto variadic = "variadic" in value.object) info.variadic = variadic.boolean;
                             if (auto parameters = "parameterTypes" in value.object)
                                 foreach (parameter; parameters.array) info.parameterTypes ~= parameter.str;
+                            if (auto parameters = "parameterLazy" in value.object)
+                                foreach (parameter; parameters.array) info.parameterLazy ~= parameter.boolean;
                             members ~= info;
                         }
                     auto complete = "exportsComplete" in host.object;

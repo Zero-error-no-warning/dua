@@ -1,4 +1,5 @@
 module dua.lexer;
+import dua.string_literal;
 import dua.execution : locatedException;
 
 import std.array : appender;
@@ -204,20 +205,12 @@ Token[] lex(string source)
         }
         if (current == '"')
         {
-            ++index;
-            ++column;
-            auto start = index;
-            while (index < source.length && source[index] != '"')
-            {
-                if(source[index] == '\n')throw locatedException(format("Unterminated string at %s:%s", line, startColumn),line,startColumn);
-                ++index;
-                ++column;
-            }
-            if(index >= source.length)throw locatedException(format("Unterminated string at %s:%s", line, startColumn),line,startColumn);
-            auto text = source[start .. index];
-            ++index;
-            ++column;
-            tokens.put(Token(TokenKind.string_, text, line, startColumn));
+            bool interpolated = tokens.data.length > 0
+                && tokens.data[$ - 1].kind == TokenKind.identifier
+                && tokens.data[$ - 1].lexeme == "i";
+            auto raw = scanStringLiteral(source, index, line, column, interpolated);
+            auto text = interpolated ? raw : decodeStringLiteral(raw, startLine, startColumn + 1);
+            tokens.put(Token(TokenKind.string_, text, startLine, startColumn));
             continue;
         }
 

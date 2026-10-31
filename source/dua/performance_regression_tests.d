@@ -80,9 +80,12 @@ unittest
 {
     auto engine = new ScriptEngine();
     assert(!engine.runSafe("return cast(Later) 1;").ok);
-    engine.load("alias Later = int; alias Items = Later[];");
+    // script型のopaqueな内部名を仮定せず、可変なhost定義を明示してcacheを検証します。
+    auto definition = Value.from(["isTable": Value.from(false),
+        "alternatives": Value.from([Value.from("int")])]);
+    engine.bind("__dua_type_CachedHost", definition);
+    engine.load("alias Later = CachedHost; alias Items = Later[];");
     assert(engine.run("Items values = [1, 2]; return values[1];").toInt() == 2);
-    auto definition = engine.getGlobal("__dua_type_Later");
     definition.tableValue["alternatives"] = Value.from([Value.from("string")]);
     assert(!engine.runSafe("return cast(Later) 1;").ok);
     assert(engine.run("return cast!(Later) 1;").toHostString() == "1");
@@ -129,7 +132,7 @@ unittest
         }
         auto result = choose()(next(1), next(2), next(3));
         auto items = [next(4), ...[next(5), next(6)], next(7)];
-        return trace == "123c4567" && result == 123 && items == [4, 5, 6, 7];
+        return trace == "c1234567" && result == 123 && items == [4, 5, 6, 7];
     }).truthy());
 }
 

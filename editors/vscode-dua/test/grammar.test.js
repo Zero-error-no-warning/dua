@@ -27,7 +27,7 @@ test('TextMate correctly ends nested comments, nested interpolation, and incompl
   assert.ok(!scopesAt(next, 5).includes('string.quoted.double.dua'));
   const unfinishedInterpolation = grammar.tokenizeLine('auto text = i"$(length(iota(');
   const afterInterpolation = grammar.tokenizeLine('auto after = 1;', unfinishedInterpolation.ruleStack);
-  assert.ok(!scopesAt(afterInterpolation, 5).includes('meta.interpolation.dua'));
+  assert.ok(scopesAt(afterInterpolation, 5).includes('meta.interpolation.dua')); // 式は複数行を許可する。
   const literalAlias = 'alias Fruit = "Apple" | "日本😀" | string;';
   const aliasTokens = grammar.tokenizeLine(literalAlias);
   assert.ok(scopesAt(aliasTokens, 0).includes('storage.type.dua'));

@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),path=require('node:path');
-const {checkSource,analyzeSource}=require('../checker');const exe=path.resolve(__dirname,'../bin/dua-check.exe');
+const {checkSource,analyzeSource}=require('../checker');const exe=path.resolve(__dirname,'../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check');
 const good=['int f(int a,int b=2,int c=3){return a+b+c;} f(1);f(1,5);f(1,5,6);',
  'auto f=(int a=1,int b=a+2)=>a+b;f();f(2);',
  'auto f=(int a=1){return a;};f();',

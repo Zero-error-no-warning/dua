@@ -19,7 +19,7 @@ Choice value = B { x = 1 };
 ## 初期化
 
 必須 field の不足・型不一致を拒否します。型付き配列・AA field は宣言型へ準備して検査します。
-追加 field は既存 table と同じく許可します。field の既定式は追加しません。
+追加 field は既存 table と同じく許可します。既定式付きfieldは省略できます。[メンバー初期値](member-defaults-ja.md)を参照してください。
 キー重複は拒否します。静的キーは parse 時、計算キーと spread の衝突は実行時にも確認します。
 値は通常の literal と同じ順に評価し、各式を一度だけ評価します。
 
@@ -62,5 +62,5 @@ typeCheck=false/true の計68条件です。別途共有解析 API の型 ID・�
 
 ## 共通metaの指定
 
-table Name with meta の最上位宣言は、Name { ... } の生成時に共通metaを内部に保持します。フィールド既定式は追加しません。詳細は [2つのwith](with-ja.md) を参照してください。
+table Name with meta の最上位宣言は、Name { ... } の生成時に共通metaを内部に保持します。フィールド既定式は生成時に省略分だけ評価します。詳細は [2つのwith](with-ja.md) を参照してください。
 

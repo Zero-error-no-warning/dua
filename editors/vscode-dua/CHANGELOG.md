@@ -1,3 +1,7 @@
+## 0.6.7
+
+- table/structメンバーの既定式と生成時の省略に対応。importを含む診断・補完に省略可能フィールドとstruct署名を反映。
+
 ## 0.6.6
 
 - Support contiguous trailing script default arguments, evaluated only when omitted at call time.

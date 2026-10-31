@@ -20,7 +20,7 @@ private struct StaticFunctionInfo
 }
 
 /// Check the already-bound graph, without executing module initializers/loaders.
-package(dua) CheckDiagnostic[] checkModuleGraph(ModuleAnalysis analysis, string[] classTypes)
+package(dua) CheckDiagnostic[] checkModuleGraph(ModuleAnalysis analysis, string[] classTypes, string[] knownHostTypes = null)
 {
     CheckDiagnostic[] diagnostics;
     string[string] aliases;
@@ -37,6 +37,11 @@ package(dua) CheckDiagnostic[] checkModuleGraph(ModuleAnalysis analysis, string[
             {
                 JSONValue[string] fields;
                 foreach (i, name; statement.parameters) fields[name] = JSONValue(statement.parameterTypes[i]);
+                string[] defaults;
+                foreach (i, name; statement.parameters)
+                    if (i < statement.memberDefaults.length && statement.memberDefaults[i] !is null) defaults ~= name;
+                aliases["#defaults_" ~ statement.name] = JSONValue(defaults).toString();
+                aliases["#order_" ~ statement.name] = JSONValue(statement.parameters).toString();
                 aliases["#table_" ~ statement.name] = JSONValue(fields).toString();
                 aliases["#bases_" ~ statement.name] = JSONValue(statement.names).toString();
                 if (statement.kind == Statement.Kind.structDecl) aliases["#struct_" ~ statement.name] = "true";
@@ -63,6 +68,8 @@ package(dua) CheckDiagnostic[] checkModuleGraph(ModuleAnalysis analysis, string[
             {
                 JSONValue[string] fields;
                 foreach (name, fieldType; type.fields) fields[name] = JSONValue(fieldType);
+                aliases["#defaults_" ~ type.type] = JSONValue(type.defaultFields).toString();
+                aliases["#order_" ~ type.type] = JSONValue(type.fieldOrder).toString();
                 aliases["#table_" ~ type.type] = JSONValue(fields).toString();
                 aliases["#bases_" ~ type.type] = JSONValue(type.baseTypes).toString();
                 if (type.declarationKind == "struct") aliases["#struct_" ~ type.type] = "true";
@@ -74,6 +81,7 @@ package(dua) CheckDiagnostic[] checkModuleGraph(ModuleAnalysis analysis, string[
     foreach (unit; analysis.modules)
     {
         auto variables = aliases.dup;
+        foreach (name; knownHostTypes) variables["#known_type_" ~ name] = "host";
         foreach (name; classTypes) variables["#class_" ~ name] = "class";
         StaticFunctionInfo[string] functions;
         foreach (aliasName, dependency; unit.dependencies)
@@ -90,7 +98,10 @@ package(dua) CheckDiagnostic[] checkModuleGraph(ModuleAnalysis analysis, string[
                 else if (export_.kind == "type")
                 {
                     variables["#export_type_" ~ name] = export_.type;
-                    if (export_.runtimeValue) variables["#member_" ~ name] = "any";
+                    if (export_.runtimeValue) {
+                        variables["#member_" ~ name] = "any";
+                        if (export_.declarationKind == "struct") variables["#constructor_" ~ name] = export_.type;
+                    }
                 }
             }
         }
@@ -114,7 +125,7 @@ private void checkParameterDefaults(string[] names, string[] types, Expression[]
             auto actual = inferExpressionType(defaults[index], variables, functions, diagnostics);
             if (!staticTypesCompatible(boundaryActual(defaults[index], actual), type, variables))
                 diagnostics ~= CheckDiagnostic(defaults[index].line, defaults[index].column,
-                    format("Default argument '%s' expects %s but has type %s", name, type, actual));
+                    typeMismatchMessage(type, variables, format("Default argument '%s' expects %s but has type %s", name, type, actual)));
             checkNullLiteralContext(defaults[index], type, variables, diagnostics);
         }
         variables[name] = type;
@@ -182,6 +193,8 @@ private void checkStatements(Statement[] statements, ref string[string] variable
     {
         if (statement.kind == Statement.Kind.tableDecl || statement.kind == Statement.Kind.structDecl)
             variables.remove("#class_" ~ statement.name);
+        if (statement.kind == Statement.Kind.structDecl)
+            variables["#constructor_" ~ statement.publicTypeName] = statement.name;
         if (statement.kind == Statement.Kind.alias_)
         {
             if (statement.names.length == 1) variables["#type_" ~ statement.name] = statement.names[0];
@@ -221,8 +234,8 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                     if (statement.declaredType.length > 0 && statement.declaredType != "auto"
                         && !staticTypesCompatible(boundaryActual(index < statement.expressions.length ? statement.expressions[index] : null, actual), declared, variables))
                         addDiagnostic(diagnostics, statement,
-                            format("Variable '%s' expects %s but expression has type %s",
-                                name, statement.declaredType, actual));
+                            typeMismatchMessage(statement.declaredType, variables, format("Variable '%s' expects %s but expression has type %s",
+                                name, statement.declaredType, actual)));
                     // nullから始めるauto変数には、後から実体を格納できます。
                     variables[name] = declared == "auto"
                         ? (actual == "null" || ("#union_" ~ actual in variables) !is null ? "any"
@@ -248,8 +261,8 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                         if (expected !is null) checkNullLiteralContext(expression, *expected, variables, diagnostics);
                         if (expected !is null && !staticTypesCompatible(boundaryActual(expression, actual), *expected, variables))
                             diagnostics ~= CheckDiagnostic(target.line, target.column,
-                                format("Assignment to '%s' expects %s but expression has type %s",
-                                    (cast(VariableExpression) target).name, *expected, actual));
+                                typeMismatchMessage(*expected, variables, format("Assignment to '%s' expects %s but expression has type %s",
+                                    (cast(VariableExpression) target).name, *expected, actual)));
                     }
                     else if (target.kind == Expression.Kind.index)
                     {
@@ -257,7 +270,7 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                         checkNullLiteralContext(expression, expected, variables, diagnostics);
                         if (!staticTypesCompatible(actual, expected, variables))
                             diagnostics ~= CheckDiagnostic(target.line, target.column,
-                                format("Indexed assignment expects %s but has type %s", expected, actual));
+                                typeMismatchMessage(expected, variables, format("Indexed assignment expects %s but has type %s", expected, actual)));
                     }
                     else if (target.kind == Expression.Kind.get)
                     {
@@ -271,7 +284,7 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                             if (splitNonNullType(resolveStaticType(expected, variables), inner)
                                 && !staticTypesCompatible(boundaryActual(expression, actual), expected, variables))
                                 diagnostics ~= CheckDiagnostic(target.line, target.column,
-                                    "Exported value '" ~ qualified ~ "' expects " ~ expected);
+                                    typeMismatchMessage(expected, variables, "Exported value '" ~ qualified ~ "' expects " ~ expected));
                         }
                         auto container = inferExpressionType(get.target, variables, functions, diagnostics);
                         auto owner = resolveStaticType(container, variables);
@@ -286,7 +299,7 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                             if (splitNonNullType(resolveStaticType(*field, variables), inner)
                                 && !staticTypesCompatible(boundaryActual(expression, actual), *field, variables))
                                 diagnostics ~= CheckDiagnostic(target.line, target.column,
-                                    "Field '" ~ get.memberName ~ "' expects " ~ *field);
+                                    typeMismatchMessage(*field, variables, "Field '" ~ get.memberName ~ "' expects " ~ *field));
                         }
                         string element, key;
                         if (get.memberName == "length" && (container == "array"
@@ -304,8 +317,8 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                         checkNullLiteralContext(statement.expressions[0], expectedReturnType, variables, diagnostics);
                     if (!staticTypesCompatible(boundaryActual(statement.expressions.length ? statement.expressions[0] : null, actual), expectedReturnType, variables))
                         addDiagnostic(diagnostics, statement,
-                            format("Return expects %s but expression has type %s",
-                                expectedReturnType, actual));
+                            typeMismatchMessage(expectedReturnType, variables, format("Return expects %s but expression has type %s",
+                                expectedReturnType, actual)));
                 }
                 break;
             case Statement.Kind.functionDecl:
@@ -377,6 +390,15 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                 inferExpressionType(statement.expression, variables, functions, diagnostics);
                 break;
             case Statement.Kind.tableDecl, Statement.Kind.structDecl:
+                // メンバー名を変数へ追加せず、宣言元の字句環境で式だけ検査します。
+                foreach (index, value; statement.memberDefaults) if (value !is null) {
+                    auto expected = resolveStaticType(statement.parameterTypes[index], variables);
+                    auto actual = inferExpressionType(value, variables, functions, diagnostics);
+                    checkNullLiteralContext(value, expected, variables, diagnostics);
+                    if (!staticTypesCompatible(boundaryActual(value, actual), expected, variables))
+                        diagnostics ~= CheckDiagnostic(value.line, value.column,
+                            typeMismatchMessage(expected, variables, "Default member '" ~ statement.parameters[index] ~ "' expects " ~ expected));
+                }
                 if(statement.metatableReference !is null){
                     auto metaType=inferExpressionType(statement.metatableReference,variables,functions,diagnostics);
                     auto resolved=resolveStaticType(metaType,variables);
@@ -392,6 +414,50 @@ private void checkStatements(Statement[] statements, ref string[string] variable
     }
 }
 
+private string checkStructConstruction(CallExpression call, string type, ref string[string] variables,
+    ref StaticFunctionInfo[string] functions, ref CheckDiagnostic[] diagnostics)
+{
+    auto fields = staticTableFields(type, variables);
+    auto defaults = staticDefaultFields(type, variables);
+    auto order = "#order_" ~ type in variables;
+    if (order is null) return type;
+    bool[string] supplied;
+    bool complete = true;
+    void checkField(string name, Expression value) {
+        auto actual = inferExpressionType(value, variables, functions, diagnostics);
+        if (auto expected = name in fields) {
+            checkNullLiteralContext(value, *expected, variables, diagnostics);
+            if (!staticTypesCompatible(boundaryActual(value, actual), *expected, variables))
+                diagnostics ~= CheckDiagnostic(value.line, value.column, typeMismatchMessage(*expected, variables, "Struct field '" ~ name ~ "' expects " ~ *expected));
+        }
+    }
+    auto tableForm = call.arguments.length == 1 && call.arguments[0].kind == Expression.Kind.table
+        && !(cast(TableExpression)call.arguments[0]).targetType.length;
+    if (tableForm) {
+        foreach (entry; (cast(TableExpression)call.arguments[0]).entries) {
+            if (entry.isSpread || entry.keyExpression !is null) { complete = false; continue; }
+            supplied[entry.key] = true; checkField(entry.key, entry.value);
+        }
+    } else {
+        // 動的なtableは既存のtable形式になり得るため、不足を断定しません。
+        if (call.arguments.length == 1) {
+            auto actual = inferExpressionType(call.arguments[0], variables, functions, diagnostics);
+            if (actual == "any" || actual == "table" || actual.length > 7 && actual[0 .. 7] == "@named:"
+                || ("#table_" ~ resolveStaticType(actual, variables) in variables) !is null) return type;
+        }
+        auto names = parseJSON(*order).array;
+        if (call.arguments.length > names.length)
+            diagnostics ~= CheckDiagnostic(call.line, call.column, "Too many struct field arguments");
+        foreach (i, argument; call.arguments) if (i < names.length) {
+            supplied[names[i].str] = true; checkField(names[i].str, argument);
+        }
+    }
+    if (complete) foreach (name; fields.byKey)
+        if ((name in supplied) is null && (name in defaults) is null)
+            diagnostics ~= CheckDiagnostic(call.line, call.column, "Struct initializer is missing '" ~ name ~ "'");
+    return type;
+}
+
 private string boundaryActual(Expression expression, string actual)
 {
     // コンテナ literal 自体は非 null。ただし auto 変数の宣言型は nullable のまま。
@@ -399,6 +465,21 @@ private string boundaryActual(Expression expression, string actual)
         || (expression.kind == Expression.Kind.array && actual == "array")
         || (expression.kind == Expression.Kind.associativeArray && actual == "associativeArray"))
         ? nonNullType(actual) : actual;
+}
+
+private bool[string] staticDefaultFields(string type, ref string[string] variables, size_t depth = 0)
+{
+    bool[string] result;
+    if (depth >= 64) return result;
+    type = resolveStaticType(type, variables);
+    string inner;
+    if (splitNonNullType(type, inner)) return staticDefaultFields(inner, variables, depth + 1);
+    if (auto bases = "#bases_" ~ type in variables)
+        foreach (base; parseJSON(*bases).array)
+            foreach (name; staticDefaultFields(base.str, variables, depth + 1).byKey) result[name] = true;
+    if (auto defaults = "#defaults_" ~ type in variables)
+        foreach (name; parseJSON(*defaults).array) result[name.str] = true;
+    return result;
 }
 
 private string[string] staticTableFields(string type, ref string[string] variables, size_t depth = 0)
@@ -431,7 +512,7 @@ private void checkNullLiteralContext(Expression expression, string expected,
         {
             if (depth > 0)
                 diagnostics ~= CheckDiagnostic(expression.line, expression.column,
-                    "Null is not allowed by " ~ expected);
+                    typeMismatchMessage(expected, variables, "Null is not allowed by " ~ expected));
             return;
         }
         expected = inner;
@@ -440,7 +521,7 @@ private void checkNullLiteralContext(Expression expression, string expected,
         && (cast(LiteralExpression)expression).value.kind == ValueKind.null_
         && !staticTypeAllowsNull(expected, variables))
     {
-        diagnostics ~= CheckDiagnostic(expression.line, expression.column, "Null is not allowed by " ~ expected);
+        diagnostics ~= CheckDiagnostic(expression.line, expression.column, typeMismatchMessage(expected, variables, "Null is not allowed by " ~ expected));
         return;
     }
     string element, key;
@@ -570,11 +651,12 @@ private string inferExpressionType(Expression expression, ref string[string] var
                     checkNullLiteralContext(entry.value, *expected, variables, diagnostics);
                     if (!staticTypesCompatible(boundaryActual(entry.value, actual), *expected, variables))
                         diagnostics ~= CheckDiagnostic(entry.value.line, entry.value.column,
-                            "Named table field '" ~ entry.key ~ "' expects " ~ *expected);
+                            typeMismatchMessage(*expected, variables, "Named table field '" ~ entry.key ~ "' expects " ~ *expected));
                 }
             }
+            auto defaults = staticDefaultFields(target, variables);
             if (complete) foreach (name; fields.byKey)
-                if ((name in supplied) is null) diagnostics ~= CheckDiagnostic(expression.line, expression.column,
+                if ((name in supplied) is null && (name in defaults) is null) diagnostics ~= CheckDiagnostic(expression.line, expression.column,
                     "Named table initializer is missing '" ~ name ~ "'");
             return "@named:" ~ target;
         case Expression.Kind.function_:
@@ -595,7 +677,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
             {
                 if (!staticTypesCompatible(actual, conversion.targetType, variables))
                     diagnostics ~= CheckDiagnostic(expression.line, expression.column,
-                        "Cannot cast an explicit named table to " ~ conversion.targetType);
+                        typeMismatchMessage(conversion.targetType, variables, "Cannot cast an explicit named table to " ~ conversion.targetType));
                 return actual;
             }
             return conversion.targetType;
@@ -619,7 +701,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
                     if (!rightArray && splitContainerType(left, element, key)
                         && !staticTypesCompatible(right, element, variables))
                         diagnostics ~= CheckDiagnostic(expression.line, expression.column,
-                            format("Array element expects %s but has type %s", element, right));
+                            typeMismatchMessage(element, variables, format("Array element expects %s but has type %s", element, right)));
                     return left;
                 }
                 if (mayUseBinaryOverload(left, variables) || mayUseBinaryOverload(right, variables)) return "any";
@@ -639,6 +721,9 @@ private string inferExpressionType(Expression expression, ref string[string] var
             if (qualifiedExpressionName((cast(CallExpression) expression).callee).length)
             {
                 auto calledName = qualifiedExpressionName((cast(CallExpression) expression).callee);
+                if ((calledName in variables) is null && (calledName in functions) is null)
+                    if (auto constructor = "#constructor_" ~ calledName in variables)
+                        return checkStructConstruction(cast(CallExpression)expression, *constructor, variables, functions, diagnostics);
                 auto functionInfo = calledName in functions;
                 if (functionInfo !is null)
                 {
@@ -658,9 +743,9 @@ private string inferExpressionType(Expression expression, ref string[string] var
                         if (parameterIndex < functionInfo.parameterTypes.length
                             && !staticTypesCompatible(boundaryActual(argument, actual), functionInfo.parameterTypes[parameterIndex], variables))
                             diagnostics ~= CheckDiagnostic(argument.line, argument.column,
-                                format("Argument %s to '%s' expects %s but has type %s",
+                                typeMismatchMessage(functionInfo.parameterTypes[parameterIndex], variables, format("Argument %s to '%s' expects %s but has type %s",
                                     index + 1, calledName,
-                                    functionInfo.parameterTypes[parameterIndex], actual));
+                                    functionInfo.parameterTypes[parameterIndex], actual)));
                         if (parameterIndex < functionInfo.parameterTypes.length)
                             checkNullLiteralContext(argument, functionInfo.parameterTypes[parameterIndex], variables, diagnostics);
                     }
@@ -687,7 +772,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
                 auto expected = key.length ? key : "int";
                 if (!staticTypesCompatible(actual, expected, variables))
                     diagnostics ~= CheckDiagnostic(expression.line, expression.column,
-                        format("Index expects %s but has type %s", expected, actual));
+                        typeMismatchMessage(expected, variables, format("Index expects %s but has type %s", expected, actual)));
                 return element;
             }
             return "any";
@@ -783,6 +868,39 @@ private bool staticTypeAllowsNull(string type, ref string[string] variables, siz
         foreach (member; parseJSON(*members).array)
             if (staticTypeAllowsNull(member.str, variables, depth + 1)) return true;
     return false;
+}
+
+// 診断に必要な時だけ型名を追います。互換性や前方参照の可否は既存判定に委ねます。
+private string unknownStaticType(string name, ref string[string] variables, size_t depth = 0)
+{
+    if (depth >= 64 || name.length == 0 || isBuiltinTypeName(name) || isStringLiteralType(name)) return "";
+    string inner, element, key;
+    if (splitNonNullType(name, inner)) return unknownStaticType(inner, variables, depth + 1);
+    if (splitContainerType(name, element, key))
+    {
+        auto unknown = unknownStaticType(element, variables, depth + 1);
+        return unknown.length ? unknown : unknownStaticType(key, variables, depth + 1);
+    }
+    if (canFind(name, " delegate(")) return "";
+    if (("#table_" ~ name in variables) !is null || ("#class_" ~ name in variables) !is null
+        || ("#known_type_" ~ name in variables) !is null || ("#dynamic_type_" ~ name in variables) !is null) return "";
+    if (auto target = "#type_" ~ name in variables) return unknownStaticType(*target, variables, depth + 1);
+    if (auto alternatives = "#union_" ~ name in variables)
+    {
+        foreach (alternative; parseJSON(*alternatives).array)
+        {
+            auto unknown = unknownStaticType(alternative.str, variables, depth + 1);
+            if (unknown.length) return unknown;
+        }
+        return "";
+    }
+    return name;
+}
+
+private string typeMismatchMessage(string name, ref string[string] variables, string fallback)
+{
+    auto unknown = unknownStaticType(name, variables);
+    return unknown.length ? "Unknown type '" ~ unknown ~ "'" : fallback;
 }
 
 private bool staticTypesCompatible(string actual, string expected, ref string[string] variables,

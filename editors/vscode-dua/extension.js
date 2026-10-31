@@ -62,7 +62,7 @@ function activate(context) {
       const contextual = assets.createContext(catalog, document.uri.fsPath);
       const setting = config.inspect?.('modulePaths');
       const explicit = setting && ['globalValue', 'workspaceValue', 'workspaceFolderValue'].some(name => setting[name] !== undefined);
-      options.moduleContexts = modules.modulePathContexts(root, contextual.directories,
+      options.moduleContexts = modules.modulePathContexts(root, contextual.moduleDirectories,
         config.get('modulePaths', ['?.dua', '?/init.dua']), explicit);
       options.modulePaths = options.moduleContexts[0];
       options.hostModules = modules.hostModules(contextual.catalog);

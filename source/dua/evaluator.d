@@ -154,6 +154,7 @@ final class Environment
         Value value;
         Value delegate(Value) validator;
         bool defined;
+        string declaredType;
     }
     private struct Storage
     {
@@ -259,7 +260,7 @@ final class Environment
 
     Value get(string name)
     {
-        if (auto value = find(name)) return *value;
+        if (auto value = find(name)) return forceArgument(*value);
         enforce(false, format("Undefined variable '%s'", name));
         assert(0);
     }
@@ -268,6 +269,17 @@ final class Environment
     {
         if (auto binding = findBinding(name)) return &binding.value;
         return null;
+    }
+
+    package(dua) void declareType(string name,string type) {
+        if(auto binding=findBinding(name)) binding.declaredType=type;
+    }
+    package(dua) string bindingType(string name) {
+        if(auto binding=findBinding(name)) {
+            if(binding.declaredType.length && binding.declaredType!="auto")return binding.declaredType;
+            return argumentType(binding.value);
+        }
+        return "";
     }
 
     private Binding* findBinding(string name)
@@ -300,13 +312,15 @@ final class Environment
 
     private static void assignBinding(Binding* binding, Value value)
     {
+        enforce(binding.value.kind != ValueKind.function_ || cast(DeferredArgument)binding.value.functionValue is null,
+            "Cannot assign to a lazy parameter" );
         if (binding.validator !is null) value = binding.validator(value);
         binding.value = value.valueCopy();
     }
 
     package(dua) Value get(string name, ref VariableSlots cache)
     {
-        if (auto binding = findBinding(name, cache)) return binding.value;
+        if (auto binding = findBinding(name, cache)) return forceArgument(binding.value);
         enforce(false, format("Undefined variable '%s'", name));
         assert(0);
     }
@@ -541,8 +555,8 @@ mixin template EvaluatorImplementation()
                         {
                             value = prepareContainerValue(value, statement.declaredType);
                             enforce(valueMatchesType(value, statement.declaredType),
-                                format("Variable '%s' expected %s but got %s",
-                                    name, statement.declaredType, value.kind));
+                                typeMismatchMessage(statement.declaredType, format("Variable '%s' expected %s but got %s",
+                                    name, statement.declaredType, value.kind)));
                         }
                         auto declaredType = statement.declaredType;
                         string elementType, keyType;
@@ -552,6 +566,7 @@ mixin template EvaluatorImplementation()
                             declarationEnvironment.define(name, value, containerValidator(declaredType));
                         else
                             declarationEnvironment.define(name, value);
+                        declarationEnvironment.declareType(name,declaredType);
                         result.lastValue = value;
                         if (statement.isExported)
                         {
@@ -646,7 +661,7 @@ mixin template EvaluatorImplementation()
                     auto callable = Value.fromFunction(new ScriptCallable(statement.name, this, environment,
                         statement.parameters, statement.variadic, statement.body,
                         statement.parameterTypes, statement.returnType, layoutFor(statement), statement.line, statement.column,
-                        statement.parameterDefaults));
+                        statement.parameterDefaults, statement.parameterLazy));
                     environment.define(statement.name, callable);
                     result.lastValue = callable;
                     if (statement.isExported)
@@ -1038,7 +1053,7 @@ mixin template EvaluatorImplementation()
                         index = checkedAssociativeKey(container, index);
                         value = prepareContainerValue(value, container.associativeValueType);
                         enforce(valueMatchesType(value, container.associativeValueType),
-                            "Associative array value expected " ~ container.associativeValueType);
+                            typeMismatchMessage(container.associativeValueType, "Associative array value expected " ~ container.associativeValueType));
                         container.associativeSet(index, value);
                         return;
                     }
@@ -1050,7 +1065,7 @@ mixin template EvaluatorImplementation()
                         {
                             value = prepareArrayElement(value, container.arrayElementType);
                             enforce(valueMatchesType(value, container.arrayElementType),
-                                "Array element expected " ~ container.arrayElementType);
+                                typeMismatchMessage(container.arrayElementType, "Array element expected " ~ container.arrayElementType));
                         }
                         if (container.arrayValidation !is null)
                         {
@@ -1183,8 +1198,7 @@ mixin template EvaluatorImplementation()
                 case Expression.Kind.call:
                     auto call = cast(CallExpression) expression;
                     auto caller = callSite(call);
-                    auto args = evaluateExpressionList(call.arguments, environment);
-                    return evaluateCall(call.callee, args, environment, caller);
+                    return evaluateCall(call.callee, call.arguments, environment, caller);
                 case Expression.Kind.array:
                     auto array = cast(ArrayExpression) expression;
                     Value[] items;
@@ -1255,7 +1269,7 @@ mixin template EvaluatorImplementation()
                     return Value.fromFunction(new ScriptCallable("anonymous", this, environment,
                         functionExpression.parameters, functionExpression.variadic, functionExpression.body,
                         functionExpression.parameterTypes, functionExpression.returnType, layoutFor(functionExpression),
-                        functionExpression.line, functionExpression.column, functionExpression.parameterDefaults));
+                        functionExpression.line, functionExpression.column, functionExpression.parameterDefaults, functionExpression.parameterLazy));
                 case Expression.Kind.get:
                     auto get = cast(GetExpression) expression;
                     auto container = evaluate(get.target, environment);
@@ -1460,7 +1474,7 @@ mixin template EvaluatorImplementation()
         string nonNullInner;
         if (splitNonNullType(targetType, nonNullInner))
         {
-            enforce(!value.isNullReference, "Cannot cast null to non-nullable type " ~ targetType);
+            enforce(!value.isNullReference, typeMismatchMessage(targetType, "Cannot cast null to non-nullable type " ~ targetType));
             return castValue(value, nonNullInner, checkedConversion, depth + 1);
         }
         string elementType, keyType;
@@ -1518,7 +1532,7 @@ mixin template EvaluatorImplementation()
                 if (valueMatchesType(value, targetType)) return value.valueCopy();
                 break;
         }
-        enforce(false, format("Cannot cast %s to %s", value.kind, targetType));
+        enforce(false, typeMismatchMessage(targetType, format("Cannot cast %s to %s", value.kind, targetType)));
         assert(0);
     }
 
@@ -1545,7 +1559,8 @@ mixin template EvaluatorImplementation()
         }
         if(!contextual.diagnostic.sourceName.length)contextual.diagnostic.sourceName=sourceName;
         if(!contextual.diagnostic.line){contextual.diagnostic.line=line;contextual.diagnostic.column=column;}
-        auto origin = sourceName.length > 0 ? sourceName : "<global>";
+        // 解析済み依存の最初の発生元を、外側のrun/import名で置換しません。
+        auto origin = contextual.diagnostic.sourceName.length > 0 ? contextual.diagnostic.sourceName : "<global>";
         if (location.length > 0) origin ~= ":" ~ location;
         contextual.msg = format("[%s @ %s] %s", context, origin, error.msg);
         contextual.hasSourceContext = true;
@@ -1587,7 +1602,7 @@ mixin template EvaluatorImplementation()
                         {
                             element = prepareArrayElement(element, left.arrayElementType);
                             enforce(valueMatchesType(element, left.arrayElementType),
-                                "Array element expected " ~ left.arrayElementType);
+                                typeMismatchMessage(left.arrayElementType, "Array element expected " ~ left.arrayElementType));
                         }
                     return Value.fromOwnedArray(combined, left.arrayElementType);
                 }
@@ -1657,17 +1672,115 @@ mixin template EvaluatorImplementation()
         return CallSite(evaluatorContext.moduleName, evaluatorContext.sourceName, expression.line);
     }
 
-    private Value evaluateCall(Expression calleeExpression, Value[] args, Environment environment,
+    // 型の照会ではgetter/関数を呼びません。不明ならlazy overload側で診断します。
+    private Value unevaluatedCallable(Expression expression,Environment environment)
+    {
+        if(auto variable=cast(VariableExpression)expression) {
+            if(auto value=environment.find(variable.name))return *value;
+        }
+        if(auto get=cast(GetExpression)expression) {
+            auto target=unevaluatedCallable(get.target,environment);
+            if(target.isFieldAggregate)
+                if(auto member=target.findMember(get.memberName))return *member;
+            if(!get.withMember)
+                if(auto ufcs=resolveUfcs(get.memberName,environment))return *ufcs;
+        }
+        return Value.nullValue();
+    }
+
+    private string unevaluatedType(Expression expression,Environment environment)
+    {
+        if(auto variable=cast(VariableExpression)expression)return environment.bindingType(variable.name);
+        if(auto literal=cast(LiteralExpression)expression)return argumentType(literal.value);
+        if(cast(FunctionExpression)expression)return "function";
+        if(auto cast_=cast(CastExpression)expression)return cast_.targetType;
+        if(auto array=cast(ArrayExpression)expression) {
+            string element;
+            foreach(item;array.elements) {
+                auto type=unevaluatedType(item,environment);
+                if(!type.length)return "array";
+                if(!element.length)element=type;
+                else if(element!=type)return "array";
+            }
+            return element.length ? element~"[]" : "array";
+        }
+        if(auto call=cast(CallExpression)expression) {
+            auto callable=unevaluatedCallable(call.callee,environment);
+            return callable.kind==ValueKind.function_ ? callable.functionValue.resultType() : "";
+        }
+        if(auto binary=cast(BinaryExpression)expression) {
+            switch(binary.operatorSymbol) {
+                case "==":case "!=":case "<":case ">":case "<=":case ">=":case "&&":case "||":return "bool";
+                default:break;
+            }
+            auto left=unevaluatedType(binary.left,environment);
+            auto right=unevaluatedType(binary.right,environment);
+            return left==right ? left : "";
+        }
+        if(auto unary=cast(UnaryExpression)expression)
+            return unary.operatorSymbol=="!" ? "bool" : unevaluatedType(unary.operand,environment);
+        if(auto ternary=cast(TernaryExpression)expression) {
+            auto left=unevaluatedType(ternary.whenTrue,environment);
+            return left==unevaluatedType(ternary.whenFalse,environment) ? left : "";
+        }
+        auto value=unevaluatedCallable(expression,environment);
+        return value.kind==ValueKind.null_ ? "" : argumentType(value);
+    }
+
+    private Value[] callArguments(Value callee, Expression[] expressions, Environment environment, size_t offset=0)
+    {
+        if (callee.isFieldAggregate)
+        {
+            if (auto method=callee.findMember("opCall")) callee=*method;
+            else {
+                Value method;
+                if (lookupMetamethod(callee,"__call",method)) { callee=method; ++offset; }
+            }
+        }
+        Value[] args;
+        foreach(index, expression;expressions)
+            args ~= callee.kind==ValueKind.function_ && callee.functionValue.lazyParameter(index+offset)
+                ? Value.fromFunction(new ExpressionArgument(this,environment,expression))
+                : evaluate(expression,environment);
+        return args;
+    }
+
+    private Value evaluateCall(Expression calleeExpression, Expression[] expressions, Environment environment,
         CallSite caller)
     {
         if (calleeExpression.kind == Expression.Kind.get)
         {
             auto get = cast(GetExpression) calleeExpression;
+            // UFCSの先頭引数もlazyならreceiver式を先に実行してはいけません。
+            if(!get.withMember) if(auto ufcs=resolveUfcs(get.memberName,environment))
+            {
+                if(ufcs.functionValue.lazyParameter(0)) {
+                    auto known=unevaluatedCallable(get.target,environment);
+                    auto member=known.isFieldAggregate ? known.findMember(get.memberName) : null;
+                    if(member is null) {
+                        auto type=unevaluatedType(get.target,environment);
+                        import std.algorithm : canFind;
+                        enforce(known.isFieldAggregate || ["int","long","uint","ulong","float","double","bool","string","array"].canFind(type),
+                            "Cannot resolve lazy UFCS receiver without evaluation; use an explicit function call");
+                        Value[] args=[Value.fromFunction(new ExpressionArgument(this,environment,get.target))];
+                        args~=callArguments(*ufcs,expressions,environment,1);
+                        return invokeFunctionValue(*ufcs,args,caller);
+                    }
+                }
+            }
             auto receiver = evaluate(get.target, environment);
+            Value callee;
+            size_t offset;
+            if (receiver.isFieldAggregate)
+                if (auto method=receiver.findMember(get.memberName)) callee=*method;
+            if (callee.kind==ValueKind.null_ && !get.withMember)
+                if (auto ufcs=resolveUfcs(get.memberName,environment)) {callee=*ufcs;offset=1;}
+            auto args=callArguments(callee,expressions,environment,offset);
             return callMethodOrUfcs(receiver, get.memberName, args, environment, caller, !get.withMember);
         }
 
-        return invokeCallableValue(evaluate(calleeExpression, environment), args, caller);
+        auto callee=evaluate(calleeExpression,environment);
+        return invokeCallableValue(callee,callArguments(callee,expressions,environment),caller);
     }
 
     private Value invokeCallableValue(Value callee, Value[] args, CallSite caller)
@@ -1705,6 +1818,7 @@ mixin template EvaluatorImplementation()
             if (functionName == "contains" || functionName == "remove" || functionName == "get")
             {
                 enforce(args.length == (functionName == "get" ? 2 : 1), "Invalid associative array method arity");
+                foreach (ref arg; args) arg = forceArgument(arg);
                 auto key = checkedAssociativeKey(receiver, args[0]);
                 if (functionName == "remove") return Value.from(receiver.associativeRemove(key));
                 auto position = receiver.associativeIndex(key);
@@ -1712,7 +1826,7 @@ mixin template EvaluatorImplementation()
                 if (position != size_t.max) return receiver.associativeEntries[position].value.valueCopy();
                 auto fallback = prepareContainerValue(args[1], receiver.associativeValueType);
                 enforce(valueMatchesType(fallback, receiver.associativeValueType),
-                    "Associative array default value expected " ~ receiver.associativeValueType);
+                    typeMismatchMessage(receiver.associativeValueType, "Associative array default value expected " ~ receiver.associativeValueType));
                 return fallback.valueCopy();
             }
         }
@@ -1855,7 +1969,9 @@ mixin template EvaluatorImplementation()
         }
         try
         {
-            return callable.invoke(copyValues(args), caller).valueCopy();
+            args = copyValues(args);
+            args=callable.functionValue.prepareArguments(args);
+            return callable.invoke(args, caller).valueCopy();
         }
         catch (Exception error)
         {
@@ -1883,7 +1999,8 @@ mixin template EvaluatorImplementation()
         if (hasLiteralConstraint(declaredType) || hasNonNullConstraint(declaredType) || hasContainerConstraint(declaredType))
             return (Value next) {
                 auto prepared = prepareContainerValue(next, declaredType);
-                enforce(valueMatchesType(prepared, declaredType), "Assignment expected " ~ declaredType);
+                enforce(valueMatchesType(prepared, declaredType),
+                    typeMismatchMessage(declaredType, "Assignment expected " ~ declaredType));
                 return prepared;
             };
         return (Value next) => prepareContainerValue(next, declaredType);
@@ -1902,7 +2019,7 @@ mixin template EvaluatorImplementation()
     {
         key = prepareContainerValue(key, container.associativeKeyType);
         enforce(valueMatchesType(key, container.associativeKeyType),
-            "Associative array key expected " ~ container.associativeKeyType);
+            typeMismatchMessage(container.associativeKeyType, "Associative array key expected " ~ container.associativeKeyType));
         return key.keyCopy();
     }
 

@@ -13,7 +13,8 @@ string encodeJson(const Value value)
 
 private JSONValue toJsonValue(const Value value)
 {
-    if (value.isNullContainer) return JSONValue(null);
+    // 型付き連想配列はnull handleでもJSON未対応です。通常配列のnullは維持します。
+    if (value.isNullContainer && value.kind != ValueKind.associativeArray) return JSONValue(null);
     final switch (value.kind)
     {
         case ValueKind.null_:
@@ -54,4 +55,16 @@ unittest
     object["enabled"] = Value.from(true);
     assert(encodeJson(Value.from(object)) ==
         `{"enabled":true,"message":"line\n\"quoted\""}`);
+}
+
+unittest
+{
+    import std.exception : assertThrown;
+    foreach (value; [Value.nullAssociativeArray("int", "int"), Value.associativeArray("int", "int")])
+    {
+        assertThrown!Exception(encodeJson(value));
+        assertThrown!Exception(encodeJson(Value.from([value])));
+    }
+    assert(encodeJson(Value.init) == "null");
+    assert(encodeJson(Value.nullArray("int")) == "null");
 }

@@ -77,6 +77,11 @@ mixin template ModuleImplementation()
         auto result=new ModuleHandle(this,name,new Environment(context.globals),ModuleVisibility.explicitExports,true);
         context.modules[name]=result;return result;
     }
+    /// 所有者ごとのcontext内で同じモジュールを再利用し、余分なinstanceを生成しません。
+    ModuleHandle loadModule(string name,ModuleContext context){
+        auto scope_=enterModuleContext(context);scope(exit)leaveModuleContext(scope_);
+        return requireModuleHandle(name);
+    }
     ModuleHandle instantiateModule(string name,ModuleContext context){
         auto scope_=enterModuleContext(context);scope(exit)leaveModuleContext(scope_);
         return instantiateModule(name);
@@ -187,6 +192,13 @@ mixin template ModuleImplementation()
     ModuleAnalysis analyzeModule(string source, string sourceName = "", string[] hostClassTypes = null,
         string[string] sourceOverlays = null)
     {
+        return analyzeModuleState(source, sourceName, hostClassTypes, sourceOverlays);
+    }
+
+    // checkはrun/loadと同じglobal scopeの続き、editor解析は独立sourceとして扱います。
+    private ModuleAnalysis analyzeModuleState(string source, string sourceName, string[] hostClassTypes,
+        string[string] sourceOverlays, BoundModule previous = null)
+    {
         ModuleAnalysis result;
         string[string] overlays;
         foreach (path, text; sourceOverlays) overlays[canonicalModulePath(path)] = text;
@@ -194,10 +206,10 @@ mixin template ModuleImplementation()
         auto analyzer = moduleAnalyzer(false, overlays);
         try
         {
-            auto key = sourceName.length ? canonicalModulePath(sourceName) : "";
-            result.root = analyzer.bind(source, sourceName, key);
+            auto key = previous !is null ? previous.key : sourceName.length ? canonicalModulePath(sourceName) : "";
+            result.root = analyzer.bind(source, sourceName, key, previous);
             result.modules = analyzer.modules;
-            result.diagnostics = checkModuleGraph(result, nullableHostClassTypes() ~ hostClassTypes);
+            result.diagnostics = checkModuleGraph(result, nullableHostClassTypes() ~ hostClassTypes, nativeTypeNames.keys);
         }
         catch (Exception error)
         {

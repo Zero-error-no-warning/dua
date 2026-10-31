@@ -557,3 +557,12 @@ if (!out.ok)
 | D 型の構築機能を公開 | `bindType!T` |
 | 実行せず型診断 | `check` |
 | スクリプトをモジュール化 | `registerModule` + `import` / `require` |
+
+## ネイティブ反射の可視性と読取専用プロパティ
+
+自動反射では各 overload 自身が public/export かを確認します。public getter と package/protected/private setter の組は、getter だけを公開します。
+native getter に public setter がない場合、代入は同名 table 要素を作らずエラーにします。ドット代入・文字列添字代入・rawset が対象です。普通の table の代入規則は変えません。
+
+`@NoBind` は自動反射する関数・メソッド・コンストラクタに加え、field の公開と補完メタデータからの除外にも適用します。
+スクリプト非公開であることと、ホスト側の保存・Inspector 編集可否は別です。関数ポインタ/delegate へ変換済みの値には、元の宣言の UDA は残りません。
+public field 以外を公開する機能や、全ての未知名への table 変数代入を禁止する変更は含みません。NoBind field の同名 table 変数を追加しても native field は変更されません。

@@ -1,4 +1,5 @@
 'use strict';
+const { encodeStringContent } = require('./stringSyntax');
 const host = require('./hostCompletion');
 const nodePath = require('node:path');
 const { diagnosticPosition } = require('./language');
@@ -27,6 +28,7 @@ function hostModules(catalog) {
     values.push({ name: member, kind: entry.kind === 'type' ? 'type' : signatures.length ? 'function' : 'variable',
       type: signatures.length ? (returns.length === 1 ? returns[0] : 'any') : (types.length === 1 ? types[0] : 'any'),
       parameterTypes: exact ? signatures[0].parameters.map(p => p.type) : [],
+      parameterLazy: exact ? signatures[0].parameters.map(p => !!p.lazy) : [],
       variadic: signatures.length > 0 && !exact,
       ...(typeof entry.runtimeValue === 'boolean' ? { runtimeValue: entry.runtimeValue } : {}) });
     modules.set(name, values);
@@ -73,7 +75,7 @@ function catalogWithImports(catalog, analysis, sourceName) {
     }
     const inherited=Object.assign({},...(description.baseTypes || []).map(type=>membersFor(type,new Set(seen))));
     return {...inherited,...Object.fromEntries(Object.entries(description.fields || {}).map(([name, type]) => [name, {
-      kind:'property',type,displayType:displayType(type)}]))};
+      kind:'property',type,displayType:displayType(type),hasDefault:(description.defaultFields || []).includes(name)}]))};
   }
   function constructible(id, seen = new Set()) {
     if (seen.has(id)) return false;
@@ -91,9 +93,15 @@ function catalogWithImports(catalog, analysis, sourceName) {
     return (descriptors.get(id)?.alternatives || []).flatMap(value=>elementTypes(value,new Set(seen)));
   }
   for (const id of descriptors.keys()) types[id] = { members: membersFor(id), tableConstruction: constructible(id), elementTypes:elementTypes(id) };
+  function constructorEntry(value) {
+    if (value.declarationKind !== 'struct') return {};
+    const order=value.fieldOrder || Object.keys(value.fields || {}), defaults=new Set(value.defaultFields || []);
+    const lastRequired=order.reduce((last,name,index)=>defaults.has(name) ? last : index,-1);
+    return {signatures:[{returnType:value.type,parameters:order.map((name,index)=>({name,type:value.fields[name],displayType:displayType(value.fields[name]),optional:index>lastRequired}))}]};
+  }
   const sameFile = (left,right) => left && right && nodePath.resolve(left).toLowerCase() === nodePath.resolve(right).toLowerCase();
   for (const unit of analysis?.modules || []) if (sameFile(unit.sourceName,sourceName)) {
-    for (const type of unit.types || []) symbols[type.name] = {kind:'type',type:type.type,displayType:type.displayType || type.name};
+    for (const type of unit.types || []) symbols[type.name] = {kind:'type',type:type.type,displayType:type.displayType || type.name,...constructorEntry(type)};
   }
   for (const item of analysis?.imports || []) {
     if (!item.aliasName) continue;
@@ -103,10 +111,10 @@ function catalogWithImports(catalog, analysis, sourceName) {
     symbols[item.aliasName] = { kind: 'module' };
     for (const value of target.exports || []) {
       symbols[`${item.aliasName}.${value.name}`] = {
-        kind: value.kind, type: value.type, displayType: value.displayType || value.type, nominalValue: value.nominalValue === true,
+        kind: value.kind, type: value.type, displayType: value.displayType || value.type, nominalValue: value.nominalValue === true, ...constructorEntry(value),
         documentation: value.kind === 'type' && types[value.type]?.tableConstruction ? '公開されたnamed table型' : value.kind === 'type' && !value.runtimeValue ? '公開された型alias（実行時の値・constructorなし）' : 'import先の公開宣言',
         ...(value.kind === 'function' ? { signatures: [{ returnType: value.type,
-          parameters: (value.parameterTypes || []).map((type, index) => ({ type, displayType:displayType(type), name: `arg${index}`,
+          parameters: (value.parameterTypes || []).map((type, index) => ({ type, displayType:displayType(type), name: `arg${index}`, lazy:value.parameterLazy?.[index] === true,
             ...(Number.isInteger(value.requiredParameterCount) && index >= value.requiredParameterCount ? {optional:true} : {}),
             variadic:value.variadic === true && index === value.parameterTypes.length-1 })) }] } : {})
       };
@@ -141,7 +149,7 @@ function pathCompletions(source, offset, analysis) {
   const context = importPathContext(source, offset);
   if (!context) return [];
   return (analysis.pathCompletions || []).map(candidate => ({ label: candidate.label,
-    insertText: candidate.label, detail: candidate.sourceName,
+    insertText: encodeStringContent(candidate.label), detail: candidate.sourceName,
     kind: candidate.directory ? 'folder' : 'file', start: context.start, end: context.end }));
 }
 

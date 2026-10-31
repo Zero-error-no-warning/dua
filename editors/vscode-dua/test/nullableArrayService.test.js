@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),path=require('node:path'),fs=require('node:fs'),os=require('node:os');
 const {analyzeSource}=require('../checker'),modules=require('../moduleIntelligence'),host=require('../hostCompletion');
-const exe=path.resolve(__dirname,'../bin/dua-check.exe');
+const exe=path.resolve(__dirname,'../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check');
 async function fixture(run){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'dua-nullable-array-')),sourceName=path.join(root,'main.dua');
  fs.writeFileSync(path.join(root,'types.dua'),'export table Item{int count;} export alias RequiredItem=Item & !null;');

@@ -1,4 +1,5 @@
 'use strict';
+const { scanQuotedString, encodeStringContent } = require('./stringSyntax');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -43,6 +44,7 @@ function createContext(catalog, documentPath) {
   const contexts = (catalog.contexts || []).filter(c => c && typeof c.script === 'string'
     && key(path.resolve(root, c.script)) === key(documentPath)
     && (!c.assetDirectory || typeof c.assetDirectory === 'string')
+    && (!c.moduleDirectory || typeof c.moduleDirectory === 'string')
     && Array.isArray(c.sources) && c.sources.length && c.sources.every(s => validSource(root, s)));
   const symbols = { ...catalog.symbols };
   const names = new Set(contexts.flatMap(c => Object.keys(c.bindings || {})));
@@ -61,7 +63,8 @@ function createContext(catalog, documentPath) {
   const initial = new Map();
   for (const name of names) if (!name.includes('.')) initial.set(name, { ...symbols[name], symbol: name });
   const directories = [...new Set(contexts.map(c => path.resolve(root, c.assetDirectory || '.')))];
-  const context = { catalog: effective, assets, initial, directories, shared: contexts.length > 1 };
+  const moduleDirectories = [...new Set(contexts.map(c => path.resolve(root, c.moduleDirectory || c.assetDirectory || '.')))];
+  const context = { catalog: effective, assets, initial, directories, moduleDirectories, shared: contexts.length > 1 };
   context.resolveCall = (value, args) => {
     const loader = (catalog.assetLoaders || []).find(l => l && typeof l.returnType === 'string' && l.function === value?.symbol
       && (Array.isArray(l.pathArguments) || Number.isInteger(l.pathArgument)));
@@ -101,20 +104,17 @@ function stringCompletions(source, offset, context) {
   const value = hasReceiver ? host.resolveExpression(receiver, environment, context.catalog, context) : null;
   const rules = (context.catalog.stringArguments || []).filter(rule => rule && typeof rule.source === 'string' && rule.argument === call.argument
     && (hasReceiver ? rule.method === method && (!value?.types?.length || value.types.includes(rule.receiverType)) : rule.function === method));
-  let end = offset;
-  while (end < source.length && source[end] !== '\n' && source[end] !== '\r') {
-    if (source[end] === '"') break;
-    end++;
-  }
+  const scanned = scanQuotedString(source, current.quote);
+  const end = scanned.end - (scanned.closed ? 1 : 0);
   const result = [];
   for (const rule of rules) {
     const candidates = context.assets.filter(a => a.type === rule.receiverType
       && (value?.assets ? value.assets.includes(a.absolute) : true));
     for (const asset of candidates) for (const name of Array.isArray(asset.names[rule.source]) ? asset.names[rule.source] : []) {
-      // Dua strings are raw: quotes/newlines cannot be represented in one literal.
-      if (typeof name !== 'string' || /["\r\n]/.test(name)) continue;
+      // 候補値をDuaの文字列として挿入できる表記にする。
+      if (typeof name !== 'string') continue;
       const status = !value?.assets ? '対象未確定・プロジェクト候補' : context.shared || value.uncertain ? '複数の静的参照候補' : '静的参照';
-      result.push({ label: name, insertText: name, kind: 'value',
+      result.push({ label: name, insertText: encodeStringContent(name), kind: 'value',
         detail: `${rule.source} · ${asset.path} · ${status}`,
         documentation: `${context.catalog.origin || 'Host asset'}\n${asset.path}`,
         start: current.quote + 1, end });

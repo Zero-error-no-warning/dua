@@ -2,7 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),path=require('node:path');
 const {analyzeSource}=require('../checker');
 const host=require('../hostCompletion'),modules=require('../moduleIntelligence');
-const exe=path.resolve(__dirname,'../bin/dua-check.exe'),sourceName=path.resolve(__dirname,'with-entry.dua');
+const exe=path.resolve(__dirname,'../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check'),sourceName=path.resolve(__dirname,'with-entry.dua');
 const analyze=source=>analyzeSource(exe,source,{sourceName}).promise;
 test('checker analyzes with types and leading member completions without exposing meta fields',async()=>{
  const source='auto meta={}; export table Vec with meta {int x;int y;} Vec v=Vec{x=1,y=2}; auto n=with(v) .x+.y;';
