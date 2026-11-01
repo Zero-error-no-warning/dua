@@ -16,7 +16,7 @@ test('lazy parameter hides an outer binding with the parameter value type',()=>{
 });
 test('analysis preserves exported lazy flags and diagnoses unsupported defaults',async()=>{
   const {analyzeSource,checkSource}=require('../checker');
-  const executable=require('node:path').resolve(__dirname,'../bin/dua-check.exe');
+  const executable=require('node:path').resolve(__dirname,'../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check');
   const analysis=await analyzeSource(executable,'export int twice(lazy int value){return value+value;}',{sourceName:'lazy.dua'}).promise;
   assert.deepEqual(analysis.diagnostics,[]);
   assert.deepEqual(analysis.exports.find(value=>value.name==='twice').parameterLazy,[true]);

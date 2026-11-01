@@ -95,7 +95,7 @@ test('TextMate scopes escapes, quoted expressions, nested interpolation and mult
 });
 
 test('rebuilt checker accepts strings and reports original invalid escape byte positions', async () => {
-  const executable = process.env.DUA_STRING_CHECKER || path.resolve(__dirname, '../bin/dua-check.exe');
+  const executable = process.env.DUA_STRING_CHECKER || path.resolve(__dirname, '../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check');
   for (const source of [
     String.raw`return i" $("test") ";`, String.raw`return "\n\r\t\0\"\\";`,
     String.raw`return i"$(i"nested $("value")")";`,
