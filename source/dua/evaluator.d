@@ -74,6 +74,8 @@ package(dua) struct EvaluationStack(T)
 /// 一つの実行場所に属する名前空間。通常変数の共有環境とは独立させます。
 final class ModuleContext
 {
+    /// Optional host policy applied to every resolved source, including relative imports.
+    void delegate(string source) validateSource;
     package(dua) Environment globals;
     package(dua) Object[string] modules;
     package(dua) string[] paths;

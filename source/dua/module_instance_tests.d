@@ -330,3 +330,26 @@ unittest
     auto limited = engine.runSafe("import steps;", options);
     assert(!limited.ok && limited.errorKind == RunErrorKind.stepLimit, limited.errorMessage);
 }
+
+unittest
+{
+    import std.file : tempDir,mkdirRecurse,rmdirRecurse,write;
+    import std.path : buildPath;
+    import std.uuid : randomUUID;
+    auto root=buildPath(tempDir,"dua-source-boundary-"~randomUUID().toString);
+    mkdirRecurse(root);scope(exit)rmdirRecurse(root);
+    write(buildPath(root,"inside.dua"),`import "outside.dua" as outside; export int value(){return outside.value();}`);
+    write(buildPath(root,"outside.dua"),`export int value(){return 9;}`);
+    auto engine=new ScriptEngine;
+    auto allowed=engine.createModuleContext([buildPath(root,"?.dua")]);
+    engine.loadModule("outside",allowed);
+    auto guarded=engine.createModuleContext([buildPath(root,"?.dua")]);
+    size_t checked;
+    guarded.validateSource=(string source){++checked;import std.exception:enforce;enforce(!source.canFind("outside.dua"),"Outside host boundary");};
+    assertThrown!Exception(engine.loadModule("outside",guarded));
+    assertThrown!Exception(engine.loadModule("inside",guarded));
+    auto child=engine.createModuleContext(null,guarded);
+    assertThrown!Exception(engine.loadModule("outside",child));
+    assert(checked>=3);
+}
+

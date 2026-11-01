@@ -47,7 +47,7 @@ mixin template ModuleImplementation()
 
     ModuleContext createModuleContext(string[] paths=null,ModuleContext parent=null,Object owner=null){
         auto context=new ModuleContext;
-        context.parent=parent;context.owner=owner;
+        context.parent=parent;context.owner=owner;context.validateSource=parent is null ? null : parent.validateSource;
         context.paths=paths.length ? paths.dup : parent is null ? effectiveModulePaths().dup : parent.paths.dup;
         context.loaders=parent is null ? effectiveModuleLoaders().dup : parent.loaders.dup;
         context.globals=new Environment(parent is null ? globals : parent.globals);
@@ -147,6 +147,7 @@ mixin template ModuleImplementation()
         }
         auto result = resolveFileImport(request, importer, pathImport, effectiveModulePaths(),
             path => (path in overlays) !is null);
+        if(result.key.length)if(auto context=currentModuleContext())if(context.validateSource !is null)context.validateSource(result.sourceName);
         if (result.key.length && ((result.key in moduleSources) !is null || (result.key in modules) !is null))
             result.registered = true;
         return result;
