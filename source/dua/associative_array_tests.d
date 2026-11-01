@@ -211,6 +211,7 @@ unittest
     engine.bindFunc!((int[bool] flags) => flags[true])("flag");
     engine.bindFunc!((string[double] values) => values[1.5])("fraction");
     engine.bindFunc!((int[int][string] values) => values["team"][1])("nested");
+    engine.bindType!PointKey("PointKey");
     engine.bindFunc!((int[PointKey] values) => values[PointKey(1, 2)])("pointValue");
     engine.bindFunc!((int[int[]] values) => values[[1, 2]])("arrayKey");
     engine.bindFunc!chooseKeys("chooseKeys");
@@ -218,8 +219,10 @@ unittest
     assert(engine.run(`int[bool] a = [true: 42]; return flag(a);`).toInt() == 42);
     assert(engine.run(`string[double] a = [1.5: "half"]; return fraction(a);`).toHostString() == "half");
     assert(engine.run(`int[int][string] a = ["team": [1: 42]]; return nested(a);`).toInt() == 42);
-    assert(engine.run(`struct PointKey { int x; int y; }
-        int[PointKey] a = [PointKey(1, 2): 42]; return pointValue(a);`).toInt() == 42);
+    // D側のkey型は明示bindする。同名script structは別のnominal typeです。
+    assert(engine.run(`int[PointKey] a = [PointKey.new(1, 2): 42]; return pointValue(a);`).toInt() == 42);
+    assert(!engine.runSafe(`struct ScriptPoint { int x; int y; }
+        int[ScriptPoint] a = [ScriptPoint(1, 2): 42]; return pointValue(a);`).ok);
     assert(engine.run(`int[int[]] a = [[1, 2]: 42]; return arrayKey(a);`).toInt() == 42);
     assert(engine.run(`string[int] a; return chooseKeys(a);`).toHostString() == "integer");
     assert(engine.run(`string[string] a; return chooseKeys(a);`).toHostString() == "string");

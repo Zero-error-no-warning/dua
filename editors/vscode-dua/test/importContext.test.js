@@ -13,13 +13,13 @@ test('path import context retains full suffix and UTF-16 replacement range', () 
   assert.equal(context.instance, false);
 });
 
-test('unfinished and instance imports have raw path ranges without escaping', () => {
+test('unfinished and instance imports decode escapes while retaining raw ranges', () => {
   const source = 'instance import "./日本😀/ty';
   const context = importPathContext(source, source.length);
   assert.equal(context.specifier, './日本😀/ty');
   assert.equal(context.instance, true);
   assert.equal(context.closed, false);
-  const windows = String.raw`import ".\common\types.dua";`;
+  const windows = String.raw`import ".\\common\\types.dua";`;
   const result = importPathContext(windows, windows.indexOf('types'));
   assert.equal(result.specifier, String.raw`.\common\types.dua`);
 });

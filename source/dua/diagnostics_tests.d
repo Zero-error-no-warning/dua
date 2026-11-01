@@ -2,6 +2,7 @@ module dua.diagnostics_tests;
 version(unittest):
 import dua;
 import std;
+import dua.module_resolver : canonicalModulePath;
 
 unittest
 {
@@ -96,7 +97,7 @@ unittest
     std.file.write(file,"export void step(){}");
     try{moduleHandle.call("step");assert(false);}catch(Exception error){
         auto diagnostic=engine.diagnostic(error);
-        assert(diagnostic.sourceName==file && diagnostic.line==2 && diagnostic.column>0);
+        assert(canonicalModulePath(diagnostic.sourceName)==canonicalModulePath(file) && diagnostic.line==2 && diagnostic.column>0);
         assert(diagnostic.hasSourceText && diagnostic.sourceText==original,"Must retain executed source rather than reread edited file");
     }
     std.file.write(file,"export void step( {");
@@ -104,7 +105,7 @@ unittest
     broken.bindAuto("__testPaths",[buildPath(root,"?.dua")]);broken.run("package.path=__testPaths;");
     try{broken.instantiateModule("actor");assert(false);}catch(Exception error){
         auto diagnostic=broken.diagnostic(error);
-        assert(diagnostic.sourceName==file && diagnostic.line==1 && diagnostic.column>0);
+        assert(canonicalModulePath(diagnostic.sourceName)==canonicalModulePath(file) && diagnostic.line==1 && diagnostic.column>0);
     }
     std.file.write(file,original);
     auto cached=new Dua.ScriptEngine;

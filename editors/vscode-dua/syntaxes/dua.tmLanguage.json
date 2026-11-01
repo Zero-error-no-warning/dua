@@ -16,6 +16,12 @@
     { "include": "#operators" }
   ],
   "repository": {
+    "string-escapes": {
+      "patterns": [
+        { "name": "constant.character.escape.dua", "match": "\\\\[nrt0\"\\\\]" },
+        { "name": "invalid.illegal.escape.dua", "match": "\\\\[^\\r\\n]" }
+      ]
+    },
     "comments": {
       "patterns": [
         {
@@ -52,6 +58,7 @@
       "end": "\"|$",
       "endCaptures": { "0": { "name": "punctuation.definition.string.end.dua" } },
       "patterns": [
+        { "include": "#string-escapes" },
         {
           "name": "constant.character.escape.dua",
           "match": "\\$\\$"
@@ -60,7 +67,7 @@
           "name": "meta.interpolation.dua",
           "begin": "\\$\\(",
           "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.dua" } },
-          "end": "\\)|(?=\"|$)",
+          "end": "\\)",
           "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.dua" } },
           "patterns": [
             { "include": "#interpolation-parentheses" },
@@ -71,7 +78,7 @@
     },
     "interpolation-parentheses": {
       "begin": "\\(",
-      "end": "\\)|(?=\"|$)",
+      "end": "\\)",
       "patterns": [
         { "include": "#interpolation-parentheses" },
         { "include": "$self" }
@@ -82,7 +89,8 @@
       "begin": "\"",
       "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.dua" } },
       "end": "\"|$",
-      "endCaptures": { "0": { "name": "punctuation.definition.string.end.dua" } }
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.dua" } },
+      "patterns": [{ "include": "#string-escapes" }]
     },
     "numbers": {
       "name": "constant.numeric.dua",
@@ -96,7 +104,7 @@
         },
         {
           "name": "storage.type.dua",
-          "match": "\\b(?:auto|delegate|alias|table|struct|instance)\\b"
+          "match": "\\b(?:auto|lazy|delegate|alias|table|struct|instance)\\b"
         },
         {
           "name": "keyword.operator.word.dua",

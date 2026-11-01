@@ -162,3 +162,7 @@ table/struct の最上位宣言で共通metaを指定できます。with(target)
 ### ホストの添字代入とミニシーンの補完
 
 具体的なDホスト`opIndexAssign`を通常の単一添字代入から呼べます。構文は既存の添字代入のままです。[仕様と対象外](../../docs/native-index-assignment.md)を参照してください。ZsDのMiniStep/miniWhile/miniDoWhile/miniForeachやSceneの処理配列版は、更新した公開登録から生成するホストカタログに含まれます。構文・TextMateの新しいキーワード追加は不要です。実行ファイルに対応するソースでカタログを再生成してください。
+
+### table / struct メンバー初期値（0.6.7）
+
+`int hp = 100;` のような型メンバーの既定式に対応します。named table生成の省略可能フィールド、import/spread/alias、structの末尾省略を診断・補完へ反映します。生成中の他メンバーは自動束縛しません。対応するゲーム実行処理系が必要で、拡張の更新だけでは旧EXEを対応させられません。

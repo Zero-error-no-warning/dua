@@ -109,10 +109,10 @@ unittest
         return value == null && text == "Banana" && existing == 7;
     });
     accepts(q{
-        alias Special = "" | "りんご" | "a|b" | "a[b]" | " delegate(" | "C:\fruit\new";
-        Special text = "C:\fruit\new";
+        alias Special = "" | "りんご" | "a|b" | "a[b]" | " delegate(" | "C:\\fruit\\new";
+        Special text = "C:\\fruit\\new";
         Special[] values = ["", "りんご", "a|b", "a[b]", " delegate("];
-        values[0] = "C:\fruit\new";
+        values[0] = "C:\\fruit\\new";
         alias Key = "a]b[";
         int[Key] counts; counts["a]b["] = 2;
         return text == values[0] && counts["a]b["] == 2;

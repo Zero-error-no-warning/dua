@@ -29,9 +29,12 @@ struct ModuleExportInfo
     bool exported;
     string declarationKind;
     string[string] fields;
+    string[] defaultFields; // 式自体は公開・実行せず、省略可能なフィールドだけ記述します。
+    string[] fieldOrder;
     string[] alternatives;
     string[] baseTypes;
     string[] parameterTypes;
+    bool[] parameterLazy;
     bool variadic;
     bool nominalValue;
     string sourceName;
@@ -234,6 +237,7 @@ final class ModuleAnalyzer
     private void visitStatementLambdas(Statement statement, void delegate(Statement[]) visit)
     {
         visitLambdas(statement.metatableReference,visit);
+        foreach (value; statement.memberDefaults) visitLambdas(value, visit);
         foreach (value; statement.parameterDefaults) visitLambdas(value, visit);
         if (statement.expressions.length) foreach (expression; statement.expressions) visitLambdas(expression, visit);
         else visitLambdas(statement.expression, visit);
@@ -354,6 +358,7 @@ final class ModuleAnalyzer
         }
         bindExpression(statement.expression, unit);
         bindExpression(statement.metatableReference,unit);
+        foreach (value; statement.memberDefaults) bindExpression(value, unit);
         foreach (value; statement.parameterDefaults) bindExpression(value, unit);
         foreach (expression; statement.expressions) bindExpression(expression, unit);
         bindExpression(statement.target, unit);
@@ -484,12 +489,18 @@ final class ModuleAnalyzer
                 else
                 {
                     info.baseTypes = statement.names;
-                    foreach (i, field; statement.parameters) info.fields[field] = statement.parameterTypes[i];
+                    info.fieldOrder = statement.parameters.dup;
+                    foreach (i, field; statement.parameters) {
+                        info.fields[field] = statement.parameterTypes[i];
+                        if (i < statement.memberDefaults.length && statement.memberDefaults[i] !is null)
+                            info.defaultFields ~= field;
+                    }
                 }
             }
             else if (statement.kind == Statement.Kind.functionDecl)
             { info.kind = "function"; info.type = statement.returnType; info.displayType = statement.returnType;
                 info.parameterTypes = statement.parameterTypes; info.variadic = statement.variadic;
+                info.parameterLazy = statement.parameterLazy;
                 info.requiredParameterCount = dua.ast.requiredParameterCount(statement.parameters.length,
                     statement.parameterDefaults, statement.variadic); }
             else

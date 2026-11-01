@@ -43,7 +43,7 @@ function fixture(run) {
 test('literal loaders and aliases select asset-specific names in each argument', () => fixture(({ complete }) => {
   const start = 'auto a = makeActor(canvas, resource("hero.asset")); auto b = a; ';
   assert.deepEqual(complete(start + 'b.morph("').map(e => e.label), ['Walk', 'Walk 2']);
-  assert.deepEqual(complete(start + 'b.part("').map(e => e.label), ['Arm', String.raw`Hand\x`]);
+  assert.deepEqual(complete(start + 'b.part("').map(e => e.label), ['Arm', String.raw`Hand\x`, 'Hand "x"', 'bad\nname']);
   assert.deepEqual(complete(start + 'b.morphParts("Arm", "').map(e => e.label), ['Walk', 'Walk 2']);
   assert.deepEqual(complete('makeActor("enemy.asset", canvas).morph("').map(e => e.label), ['Run']);
   assert.deepEqual(complete('outer(1, makeActor(canvas, resource("hero.asset")).morphParts("Arm", "').map(e => e.label), ['Walk', 'Walk 2']);
@@ -55,21 +55,25 @@ test('comments, nested calls, non-name arguments and interpolation stay untouche
   for (const text of ['# a.morph("', '// a.morph("', '/+ a.morph("', 'auto text = "a.morph(', 'a.morph(i"', 'a.morph(other("', 'a.morphParts("Arm", nested(1, 2), "', 'a.morph("Walk", "']) assert.deepEqual(complete(text), [], text);
   assert.ok(complete('a.morphParts("Arm, (x)", /+ /+ nested +/ +/ "').length);
 }));
-test('raw strings preserve backslashes, omit unrepresentable names and replace the suffix', () => fixture(({ complete }) => {
+test('escaped strings represent all names and replace the suffix', () => fixture(({ complete }) => {
   const source = 'a.part("HaOLD")', offset = source.indexOf('OLD');
   const entry = complete(source, offset).find(e => e.label === String.raw`Hand\x`);
-  assert.equal(source.slice(0, entry.start) + entry.insertText + source.slice(entry.end), String.raw`a.part("Hand\x")`);
-  assert.ok(complete(source, offset).every(e => !/["\r\n]/.test(e.label)));
+  assert.equal(source.slice(0, entry.start) + entry.insertText + source.slice(entry.end), String.raw`a.part("Hand\\x")`);
+  assert.equal(complete(source, offset).find(e => e.label === 'Hand "x"').insertText, String.raw`Hand \"x\"`);
+  assert.equal(complete(source, offset).find(e => e.label === 'bad\nname').insertText, String.raw`bad\nname`);
+  const escapedSuffix = String.raw`a.part("Ha\"OLD")`;
+  const replacement = complete(escapedSuffix, escapedSuffix.indexOf('OLD')).find(e => e.label === 'Arm');
+  assert.equal(escapedSuffix.slice(0, replacement.start) + replacement.insertText + escapedSuffix.slice(replacement.end), 'a.part("Arm")');
 }));
 
 test('Windows literal paths and typed shadows never reuse an outer asset', () => fixture(({ complete, catalog }) => {
   catalog.assets[0].path = path.join('res', 'hero.asset');
-  // A real nested source, with backslashes in the Dua literal (no escape syntax).
+  // A real nested source, with escaped backslashes in the Dua literal.
   const root = catalog.root; fs.mkdirSync(path.join(root, 'res')); fs.writeFileSync(path.join(root, 'res', 'hero.asset'), 'fixture');
   catalog.assets[0].modifiedMs = Math.trunc(fs.statSync(path.join(root, 'res', 'hero.asset')).mtimeMs);
-  assert.equal(require('../hostCompletion').tokens(String.raw`"res\hero.asset"`).tokens[0].value, String.raw`res\hero.asset`);
-  if (process.platform === 'win32') assert.deepEqual(complete(String.raw`auto a = makeActor(canvas, "res\hero.asset"); a.morph("`).map(e => e.label), ['Walk', 'Walk 2']);
-  const outer = String.raw`auto a = makeActor(canvas, "res\hero.asset"); `;
+  assert.equal(require('../hostCompletion').tokens(String.raw`"res\\hero.asset"`).tokens[0].value, String.raw`res\hero.asset`);
+  if (process.platform === 'win32') assert.deepEqual(complete(String.raw`auto a = makeActor(canvas, "res\\hero.asset"); a.morph("`).map(e => e.label), ['Walk', 'Walk 2']);
+  const outer = String.raw`auto a = makeActor(canvas, "res\\hero.asset"); `;
   for (const body of ['void update(Actor a) { a.morph("', '{ Actor a; a.morph("', '{ Actor[] a; a.morph("', '(Actor a) { a.morph("',
     'void update(Actor a, int[] values) { a.morph("', 'void update(Actor[] a) { a.morph("', '{ Actor[string] a; a.morph("']) {
     const result = complete(outer + body);
@@ -105,4 +109,16 @@ test('catalog replacements invalidate cached API data; malformed entries are ign
   fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, symbols: { newApi: { kind: 'function' }, bad: null }, types: { bad: null } }));
   assert.deepEqual(Object.keys(loadCatalog(root).symbols), ['newApi']);
   fs.unlinkSync(file); assert.deepEqual(Object.keys(loadCatalog(root).symbols), []);
+}));
+
+
+test('module roots are independent from asset roots with legacy compatibility', () => fixture(({catalog, root, scene}) => {
+  catalog.contexts = [{ script: 'actor.dua', assetDirectory: '.', moduleDirectory: 'scripts', sources: [scene], bindings: {} }];
+  let context = createContext(catalog, path.join(root, 'actor.dua'));
+  assert.deepEqual(context.directories, [root]);
+  assert.deepEqual(context.moduleDirectories, [path.join(root, 'scripts')]);
+  delete catalog.contexts[0].moduleDirectory;
+  catalog.contexts[0].assetDirectory = 'legacy';
+  context = createContext(catalog, path.join(root, 'actor.dua'));
+  assert.deepEqual(context.moduleDirectories, [path.join(root, 'legacy')]);
 }));

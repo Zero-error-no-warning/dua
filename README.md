@@ -77,6 +77,8 @@ void main()
 
 HTML版は外部依存のない単体ファイルです。原稿を更新したら `node docs/build-reference.mjs` で再生成できます。
 
+- [メンバー初期値](docs/member-defaults-ja.md) — table/structの生成時の省略、評価順、宣言元環境
+
 ## エディターサポート
 
 - [Visual Studio Code 拡張](editors/vscode-dua/README.md) — `.dua` のハイライト、入力補完、スニペット、構文・型エラー表示。Windows x64用VSIXを作成してインストールできます

@@ -260,11 +260,14 @@ unittest
     expectLocation(engine.runFile(path), 4, "<global>", path, 2);
     write(path, "export any call() {\nreturn locate(8);\n}");
     auto fileModule = engine.loadModuleFile(path);
-    expectLocation(fileModule.call("call"), 8, path, path, 2);
-    // Imported name and the resolved file name are distinct.
+    import dua.module_resolver : canonicalModulePath;
+    auto canonical = canonicalModulePath(path);
+    expectLocation(fileModule.call("call"), 8, canonical, canonical, 2);
+    // 別名は束縛名で、既にロードしたファイルのidentityや発生元を変えません。
     engine.run(`package.path = ["__dua_?_callsite_test.dua"];`);
-    expectLocation(engine.loadModule("native").call("call"), 8, "native", path, 2);
-    expectLocation(engine.instantiateModule("native").call("call"), 8, "native", path, 2);
+    assert(engine.loadModule("native") is fileModule);
+    expectLocation(engine.loadModule("native").call("call"), 8, canonical, canonical, 2);
+    expectLocation(engine.instantiateModule("native").call("call"), 8, canonical, canonical, 2);
 }
 
 unittest
@@ -322,8 +325,8 @@ unittest
     engine.bindAuto("scene", scene);
     engine.registerModule("factory.module", "export any make() { scene.record(1); return scene; }");
     engine.run("import factory.module as Factory;\nFactory.make().record(\nscene.record(2));");
-    assert(scene.received == [Received(2, "<global>", "<global>", 3),
-        Received(1, "factory.module", "factory.module", 1),
+    assert(scene.received == [Received(1, "factory.module", "factory.module", 1),
+        Received(2, "<global>", "<global>", 3),
         Received(2, "<global>", "<global>", 2)]);
 }
 

@@ -289,6 +289,9 @@ final class ModuleHandle
     {
         if (engine.completionRegistry_ !is null)
             engine.completionRegistry_.value(completionPath(name), value);
+        if (value.isFieldAggregate)
+            foreach (type; value.typeChain)
+                engine.nativeTypeNames[type.toHostString()] = true;
         if (value.isClassReference)
             foreach (type; value.typeChain)
                 engine.nativeClassTypes[type.toHostString()] = true;
@@ -432,7 +435,10 @@ unittest
             hostModule.loadFileSafe(path), engine.loadModuleFileSafe(path)])
         {
             assert(!outcome.ok);
-            assert(outcome.errorMessage.canFind(path), outcome.errorMessage);
+            // ファイルimportはWindowsでも同じcanonical identityを使います。
+            assert(canonicalModulePath(outcome.diagnostic.sourceName) == canonicalModulePath(path), outcome.errorMessage);
+            assert(outcome.errorMessage.canFind(outcome.diagnostic.sourceName), outcome.errorMessage);
+            assert(outcome.diagnostic.hasSourceText && outcome.diagnostic.sourceText == source);
         }
     }
 
@@ -481,6 +487,9 @@ unittest
         auto outcome = engine.runSafe("import outer;");
         assert(!outcome.ok);
         assert(outcome.errorMessage.canFind("@ inner"), outcome.errorMessage);
+        assert(outcome.diagnostic.sourceName == "inner");
+        assert(outcome.diagnostic.hasSourceText && outcome.diagnostic.sourceText == source);
+        assert(outcome.diagnostic.line > 0 && outcome.diagnostic.column > 0);
         assert(!outcome.errorMessage.canFind("@ outer"), outcome.errorMessage);
     }
 
@@ -711,6 +720,120 @@ unittest
     assert(!engine.runSafe(`auto value = 2; return value.missing();`).ok);
 }
 
+// メンバーの既定式は値をキャッシュせず、定義元の文脈と寿命を保持します。
+private final class MemberDefaultCallable : CallableValue
+{
+    private ScriptEngine engine;
+    private Environment closure;
+    private ModuleContext context;
+    private Expression expression;
+    private string fieldType, sourceName, sourceText, moduleName;
+    private bool hasSourceText;
+
+    this(ScriptEngine engine, Environment closure, Expression expression, string name, string fieldType)
+    {
+        super(name);
+        this.engine = engine; this.closure = closure; this.expression = expression; this.fieldType = fieldType;
+        context = engine.currentModuleContext();
+        sourceName = engine.evaluatorContext.sourceName; sourceText = engine.evaluatorContext.sourceText;
+        hasSourceText = engine.evaluatorContext.hasSourceText; moduleName = engine.evaluatorContext.moduleName;
+    }
+
+    override size_t expectedArity() const { return 0; }
+    override Value invoke(Value[] args)
+    {
+        auto previousSource = engine.evaluatorContext.sourceName;
+        auto previousText = engine.evaluatorContext.sourceText;
+        auto previousHasText = engine.evaluatorContext.hasSourceText;
+        auto previousModule = engine.evaluatorContext.moduleName;
+        engine.evaluatorContext.sourceName = sourceName; engine.evaluatorContext.sourceText = sourceText;
+        engine.evaluatorContext.hasSourceText = hasSourceText; engine.evaluatorContext.moduleName = moduleName;
+        scope(exit) {
+            engine.evaluatorContext.sourceName = previousSource; engine.evaluatorContext.sourceText = previousText;
+            engine.evaluatorContext.hasSourceText = previousHasText; engine.evaluatorContext.moduleName = previousModule;
+        }
+        try {
+            auto scope_ = engine.enterModuleContext(context);
+            scope(exit) engine.leaveModuleContext(scope_);
+            closure.validateModuleLifetime();
+            // 呼出し元のthisや生成途中のフィールドはこの環境へ追加しません。
+            auto value = engine.prepareContainerValue(engine.evaluate(expression, closure), fieldType);
+            enforce(engine.valueMatchesType(value, fieldType),
+                engine.typeMismatchMessage(fieldType, "Default member '" ~ debugName ~ "' expected " ~ fieldType));
+            return value;
+        } catch (Exception error) {
+            throw engine.withSourceContext(error, sourceName, "", "member default", expression.line, expression.column);
+        }
+    }
+}
+
+// ASTと呼出し元のheap環境を保持し、読み出すたび同じ文脈で評価します。
+private final class ExpressionArgument : DeferredArgument
+{
+    ScriptEngine engine;
+    Environment closure;
+    Expression expression;
+    ModuleContext context;
+    string sourceName, sourceText, moduleName;
+    bool hasSourceText;
+    Value[] thisStack;
+    override string resultType() const {
+        auto self=cast(ExpressionArgument)this; return self.engine.unevaluatedType(self.expression,self.closure);
+    }
+    this(ScriptEngine engine, Environment closure, Expression expression)
+    {
+        this.engine=engine; this.closure=closure; this.expression=expression;
+        context=engine.currentModuleContext();
+        sourceName=engine.evaluatorContext.sourceName;
+        sourceText=engine.evaluatorContext.sourceText;
+        hasSourceText=engine.evaluatorContext.hasSourceText;
+        moduleName=engine.evaluatorContext.moduleName;
+        thisStack=engine.evaluatorContext.thisContextStack.snapshot();
+    }
+    override Value invoke(Value[] args)
+    {
+        closure.validateModuleLifetime();
+        auto scope_=engine.enterModuleContext(context);
+        scope(exit) engine.leaveModuleContext(scope_);
+        auto oldName=engine.evaluatorContext.sourceName;
+        auto oldText=engine.evaluatorContext.sourceText;
+        auto oldHas=engine.evaluatorContext.hasSourceText;
+        auto oldModule=engine.evaluatorContext.moduleName;
+        auto oldThis=engine.evaluatorContext.thisContextStack;
+        engine.evaluatorContext.sourceName=sourceName;
+        engine.evaluatorContext.sourceText=sourceText;
+        engine.evaluatorContext.hasSourceText=hasSourceText;
+        engine.evaluatorContext.moduleName=moduleName;
+        engine.evaluatorContext.thisContextStack=typeof(oldThis).init;
+        foreach(value;thisStack) engine.evaluatorContext.thisContextStack.push(value);
+        scope(exit) {
+            engine.evaluatorContext.sourceName=oldName;
+            engine.evaluatorContext.sourceText=oldText;
+            engine.evaluatorContext.hasSourceText=oldHas;
+            engine.evaluatorContext.moduleName=oldModule;
+            engine.evaluatorContext.thisContextStack=oldThis;
+        }
+        try return engine.evaluate(expression,closure);
+        catch(Exception error)
+            throw engine.withSourceContext(error,sourceName,"","lazy argument",expression.line,expression.column);
+    }
+}
+
+private final class CheckedLazyArgument : DeferredArgument
+{
+    ScriptEngine engine;
+    Value argument;
+    string type;
+    this(ScriptEngine engine,Value argument,string type) {
+        this.engine=engine;this.argument=argument;this.type=type;
+    }
+    override string resultType() const { return type; }
+    override Value invoke(Value[] args) {
+        auto value=engine.prepareContainerValue(forceArgument(argument),type);
+        enforce(engine.valueMatchesType(value,type),"Lazy argument expected "~type);
+        return value;
+    }
+}
 final class ScriptCallable : CallableValue
 {
     private ScriptEngine engine;
@@ -718,9 +841,11 @@ final class ScriptCallable : CallableValue
     private ModuleContext moduleContext;
     private string[] parameters;
     private bool variadic;
+    private bool repeatedParameterNames;
     private Statement[] body;
     private string[] parameterTypes;
     private Expression[] parameterDefaults;
+    private bool[] parameterLazy;
     private size_t requiredArguments;
     private string returnType;
     private string sourceName;
@@ -738,7 +863,7 @@ final class ScriptCallable : CallableValue
 
     package(dua) this(string name, ScriptEngine engine, Environment closure, string[] parameters,
         bool variadic, Statement[] body, string[] parameterTypes, string returnType, ScopeLayout scopeLayout,
-        size_t declarationLine = 0, size_t declarationColumn = 0, Expression[] parameterDefaults = null)
+        size_t declarationLine = 0, size_t declarationColumn = 0, Expression[] parameterDefaults = null, bool[] parameterLazy = null)
     {
         super(name);
         this.engine = engine;
@@ -749,6 +874,10 @@ final class ScriptCallable : CallableValue
         this.body = body.dup;
         this.parameterTypes = parameterTypes.dup;
         this.parameterDefaults = parameterDefaults.dup;
+        this.parameterLazy = parameterLazy.dup;
+        if (this.parameterDefaults.length)
+            foreach (index, parameter; this.parameters)
+                if (canFind(this.parameters[0 .. index], parameter)) { repeatedParameterNames = true; break; }
         requiredArguments = requiredParameterCount(parameters.length, parameterDefaults, variadic);
         this.returnType = returnType;
         this.declarationLine = declarationLine;
@@ -760,6 +889,10 @@ final class ScriptCallable : CallableValue
         this.scopeLayout = scopeLayout is null ? planScope(this.body, ["this"] ~ this.parameters) : scopeLayout;
     }
 
+    override bool lazyParameter(size_t index) const {
+        return index < parameterLazy.length && parameterLazy[index];
+    }
+    override string resultType() const { return returnType; }
     override Value invoke(Value[] args)
     {
         auto contextScope=engine.enterModuleContext(moduleContext);
@@ -811,7 +944,9 @@ final class ScriptCallable : CallableValue
         }
 
         auto environment = new Environment(closure, scopeLayout);
-        if (parameterDefaults.length)
+        // 全指定なら既定式は実行しません。重複名の既存エラーは予約経路で維持します。
+        if (parameterDefaults.length && (repeatedParameterNames
+            || suppliedCount < (variadic ? parameters.length - 1 : parameters.length)))
         {
             // 自身/後続引数は外側の同名変数へfallbackせず、未初期化として拒否します。
             environment.pendingBindingLabel = "Parameter";
@@ -823,6 +958,12 @@ final class ScriptCallable : CallableValue
         }
         foreach (index, parameter; parameters)
         {
+            if (lazyParameter(index)) {
+                enforce(index < suppliedCount, "Lazy default arguments are not supported");
+                environment.define(parameter, Value.fromFunction(new CheckedLazyArgument(engine,args[index],parameterTypes[index])));
+                environment.declareType(parameter,parameterTypes[index]);
+                continue;
+            }
             if (variadic && index + 1 == parameters.length)
             {
                 auto rest = Value.from(args[index .. $].dup);
@@ -846,8 +987,8 @@ final class ScriptCallable : CallableValue
             {
                 args[index] = engine.prepareContainerValue(args[index], parameterTypes[index]);
                 enforce(engine.valueMatchesType(args[index], parameterTypes[index]),
-                    format("Function '%s' argument '%s' expected %s but got %s",
-                        debugName, parameter, parameterTypes[index], args[index].kind));
+                    engine.typeMismatchMessage(parameterTypes[index], format("Function '%s' argument '%s' expected %s but got %s",
+                        debugName, parameter, parameterTypes[index], args[index].kind)));
             }
             string elementType, keyType;
             if (index < parameterTypes.length && (splitContainerType(
@@ -857,6 +998,7 @@ final class ScriptCallable : CallableValue
                 environment.define(parameter, args[index], engine.containerValidator(parameterTypes[index]));
             else
                 environment.define(parameter, args[index]);
+            if(index<parameterTypes.length) environment.declareType(parameter,parameterTypes[index]);
         }
 
         auto result = engine.executeStatements(body, environment);
@@ -865,8 +1007,8 @@ final class ScriptCallable : CallableValue
         {
             returnValue = engine.prepareContainerValue(returnValue, returnType);
             enforce(engine.valueMatchesType(returnValue, returnType),
-                format("Function '%s' expected return type %s but got %s",
-                    debugName, returnType, returnValue.kind));
+                engine.typeMismatchMessage(returnType, format("Function '%s' expected return type %s but got %s",
+                    debugName, returnType, returnValue.kind)));
         }
         return returnValue;
     }
@@ -935,6 +1077,7 @@ final class ScriptEngine
     }
     private ModuleHandle globalModule_;
     private bool[string] nativeClassTypes;
+    private bool[string] nativeTypeNames;
     private CompletionRegistry completionRegistry_;
     private bool completionMetadataOnly;
 
@@ -962,6 +1105,7 @@ final class ScriptEngine
         {
             static if (isMaterializedHostRange!T)
                 registerHostType!(ForeachType!T, Seen, T)();
+            static if (isAggregateType!T) nativeTypeNames[hostReflectedTypeName!T] = true;
             static if (isAggregateType!T)
                 if (completionRegistry_ !is null) completionRegistry_.registerType!T();
             static if (is(T == class))
@@ -1028,6 +1172,7 @@ final class ScriptEngine
     void bindType(T)(string name)
         if (isAggregateType!T)
     {
+        nativeTypeNames[name] = true;
         if (completionRegistry_ !is null) completionRegistry_.registerType!T();
         if (completionMetadataOnly)
         {
@@ -1394,7 +1539,7 @@ final class ScriptEngine
         // 前の実行で同名tableやaliasが定義された場合も、現在の型定義を優先します。
         try
         {
-            return analyzeModule(source, sourceName).diagnostics;
+            return analyzeModuleState(source, sourceName, null, null, globalModule_.boundModule).diagnostics;
         }
         catch (Exception error)
         {
@@ -1451,7 +1596,7 @@ final class ScriptEngine
             {
                 ModuleAnalysis analysis;
                 analysis.root = bound; analysis.modules = analyzer.modules;
-                auto typeDiagnostics = checkModuleGraph(analysis, nullableHostClassTypes());
+                auto typeDiagnostics = checkModuleGraph(analysis, nullableHostClassTypes(), nativeTypeNames.keys);
                 if (typeDiagnostics.length)
                 {
                     auto diagnostic = typeDiagnostics[0];
@@ -1512,6 +1657,8 @@ final class ScriptEngine
         {
             definition["isTable"] = Value.from(true);
             Value[string] fields;
+            Value[string] defaults;
+            Value[] defaultOrder;
             Value[] typeChain = [Value.from(statement.name)];
             foreach (baseName; statement.names)
             {
@@ -1525,6 +1672,10 @@ final class ScriptEngine
                         format("Inherited field '%s' conflicts in type '%s'", fieldName, statement.name));
                     fields[fieldName] = fieldType;
                 }
+                if (auto inherited = "fieldDefaults" in base.tableValue) {
+                    foreach (name, factory; inherited.tableValue) defaults[name] = factory;
+                    defaultOrder ~= base.tableValue["defaultOrder"].arrayValue;
+                }
                 foreach (chainName; base.tableValue["chain"].arrayValue)
                 {
                     if (!typeChain.canFind(chainName)) typeChain ~= chainName;
@@ -1535,6 +1686,15 @@ final class ScriptEngine
                 enforce((fieldName in fields) is null,
                     format("Field '%s' conflicts in type '%s'", fieldName, statement.name));
                 fields[fieldName] = Value.from(statement.parameterTypes[index]);
+                if (index < statement.memberDefaults.length && statement.memberDefaults[index] !is null) {
+                    defaults[fieldName] = Value.fromFunction(new MemberDefaultCallable(this, environment,
+                        statement.memberDefaults[index], statement.publicTypeName ~ "." ~ fieldName, statement.parameterTypes[index]));
+                    defaultOrder ~= Value.from(fieldName);
+                }
+            }
+            if (defaults.length) {
+                definition["fieldDefaults"] = Value.from(defaults);
+                definition["defaultOrder"] = Value.from(defaultOrder);
             }
             definition["fields"] = Value.from(fields);
             definition["chain"] = Value.from(typeChain);
@@ -1575,25 +1735,30 @@ final class ScriptEngine
         auto typeName = statement.name;
         auto names = statement.parameters.dup;
         auto types = statement.parameterTypes.dup;
+        Value[string] defaults;
+        foreach (index, name; names)
+            if (index < statement.memberDefaults.length && statement.memberDefaults[index] !is null)
+                defaults[name] = Value.fromFunction(new MemberDefaultCallable(this, evaluationEnvironment,
+                    statement.memberDefaults[index], statement.publicTypeName ~ "." ~ name, types[index]));
         auto constructor = Value.fromFunction(new NativeCallable(typeName, (scope const(Value)[] args) {
-            enforce(args.length == names.length || (args.length == 1 && args[0].kind == ValueKind.table),
-                format("%s expects %s field arguments or one initializer table", typeName, names.length));
-            Value[string] entries;
-            if (args.length == 1 && args[0].kind == ValueKind.table)
-            {
-                foreach (index, fieldName; names)
-                {
-                    auto field = fieldName in args[0].tableValue;
-                    enforce(field !is null, format("%s initializer is missing '%s'", typeName, fieldName));
-                    auto prepared = prepareContainerValue(cast(Value) *field, types[index]);
-                    enforce(valueMatchesType(prepared, types[index]), format("%s.%s expected %s", typeName, fieldName, types[index]));
-                    entries[fieldName] = prepared.valueCopy();
-                }
+            auto tableForm = args.length == 1 && args[0].kind == ValueKind.table;
+            enforce(tableForm || args.length <= names.length,
+                format("%s expects at most %s field arguments or one initializer table", typeName, names.length));
+            // 必須不足では既定式の副作用を起こさず、明示nullは欠落と区別します。
+            foreach (index, name; names) {
+                auto supplied = tableForm ? (name in args[0].tableValue) !is null : index < args.length;
+                enforce(supplied || (name in defaults) !is null, format("%s initializer is missing '%s'", typeName, name));
             }
-            else foreach (index, fieldName; names)
+            Value[string] entries;
+            foreach (index, fieldName; names)
             {
-                auto prepared = prepareContainerValue(cast(Value) args[index], types[index]);
-                enforce(valueMatchesType(prepared, types[index]), format("%s.%s expected %s", typeName, fieldName, types[index]));
+                auto field = tableForm ? fieldName in args[0].tableValue : null;
+                auto supplied = tableForm ? field !is null : index < args.length;
+                auto value = supplied ? (tableForm ? cast(Value)*field : cast(Value)args[index])
+                    : invokeFunctionValue(defaults[fieldName], []);
+                auto prepared = prepareContainerValue(value, types[index]);
+                enforce(valueMatchesType(prepared, types[index]),
+                    typeMismatchMessage(types[index], format("%s.%s expected %s", typeName, fieldName, types[index])));
                 entries[fieldName] = prepared.valueCopy();
             }
             auto result = Value.fromStruct(entries);
@@ -1692,7 +1857,7 @@ final class ScriptEngine
         string nonNullInner;
         if (splitNonNullType(typeName, nonNullInner))
         {
-            enforce(!value.isNullReference, "Non-nullable type expected " ~ typeName ~ " but got null");
+            enforce(!value.isNullReference, typeMismatchMessage(typeName, "Non-nullable type expected " ~ typeName ~ " but got null"));
             return prepareContainerValue(value, nonNullInner);
         }
         if (value.kind == ValueKind.null_)
@@ -1723,7 +1888,8 @@ final class ScriptEngine
             {
                 if (value.arrayUnionType == typeName)
                 {
-                    enforce(valueMatchesType(value, typeName), "Array expected " ~ typeName);
+                    enforce(valueMatchesType(value, typeName),
+                        typeMismatchMessage(typeName, "Array expected " ~ typeName));
                     return value;
                 }
                 return prepareUnionArray(copyUnionArray(value), typeName);
@@ -1741,7 +1907,8 @@ final class ScriptEngine
             foreach (index, element; value.arrayValue)
             {
                 auto prepared = prepareContainerValue(element, elementType);
-                enforce(valueMatchesType(prepared, elementType), "Array element expected " ~ elementType);
+                enforce(valueMatchesType(prepared, elementType),
+                    typeMismatchMessage(elementType, "Array element expected " ~ elementType));
                 elements[index] = prepared;
             }
             return Value.fromOwnedArray(elements, elementType);
@@ -1761,8 +1928,10 @@ final class ScriptEngine
         {
             auto key = prepareContainerValue(cast(Value) entry.key, keyType);
             auto element = prepareContainerValue(cast(Value) entry.value, elementType);
-            enforce(valueMatchesType(key, keyType), "Associative array key expected " ~ keyType);
-            enforce(valueMatchesType(element, elementType), "Associative array value expected " ~ elementType);
+            enforce(valueMatchesType(key, keyType),
+                typeMismatchMessage(keyType, "Associative array key expected " ~ keyType));
+            enforce(valueMatchesType(element, elementType),
+                typeMismatchMessage(elementType, "Associative array value expected " ~ elementType));
             result.associativeSet(key, element);
         }
         return result;
@@ -1988,19 +2157,62 @@ final class ScriptEngine
         }
         auto structFlag = "isStruct" in definition.tableValue;
         enforce(structFlag is null || !structFlag.truthy(), "Named table construction requires table, not struct: " ~ typeName);
+        if (auto defaults = "fieldDefaults" in definition.tableValue) {
+            foreach (name; definition.tableValue["fields"].tableValue.byKey)
+                enforce((name in value.tableValue) !is null || (name in defaults.tableValue) !is null,
+                    "Named table '" ~ typeName ~ "' initializer is missing '" ~ name ~ "'");
+            foreach (entry; definition.tableValue["defaultOrder"].arrayValue) {
+                auto name = entry.toHostString();
+                if ((name in value.tableValue) is null)
+                    value.tableValue[name] = invokeFunctionValue(defaults.tableValue[name], []).valueCopy();
+            }
+        }
         foreach (fieldName, fieldType; definition.tableValue["fields"].tableValue)
         {
             auto field = fieldName in value.tableValue;
             enforce(field !is null, "Named table '" ~ typeName ~ "' initializer is missing '" ~ fieldName ~ "'");
             auto prepared = prepareContainerValue(*field, fieldType.toHostString());
             enforce(valueMatchesType(prepared, fieldType.toHostString()),
-                "Named table field '" ~ fieldName ~ "' expected " ~ fieldType.toHostString());
+                typeMismatchMessage(fieldType.toHostString(), "Named table field '" ~ fieldName ~ "' expected " ~ fieldType.toHostString()));
             *field = prepared.valueCopy();
         }
         value.setExplicitTableType(target, definition.tableValue["chain"].arrayValue);
         value.inheritDeclaredMetatable(*definition);
         attachNonNullFields(value, *definition);
         return value;
+    }
+
+    // 成功する型判定には介入せず、不一致が確定した境界でだけ未解決名を説明します。
+    private string unknownRuntimeType(string name, size_t depth = 0)
+    {
+        if (depth >= 64 || name.length == 0 || isBuiltinTypeName(name) || isStringLiteralType(name)) return "";
+        string inner, element, key;
+        if (splitNonNullType(name, inner)) return unknownRuntimeType(inner, depth + 1);
+        if (splitContainerType(name, element, key))
+        {
+            auto unknown = unknownRuntimeType(element, depth + 1);
+            return unknown.length ? unknown : unknownRuntimeType(key, depth + 1);
+        }
+        // delegate の署名は呼出し時の各境界で検査し、ここでは値種別の不一致を維持します。
+        if (canFind(name, " delegate(")) return "";
+        if (auto definition = findTypeDefinition(name))
+        {
+            if (!definition.tableValue["isTable"].truthy())
+                foreach (alternative; definition.tableValue["alternatives"].arrayValue)
+                {
+                    auto unknown = unknownRuntimeType(alternative.toHostString(), depth + 1);
+                    if (unknown.length) return unknown;
+                }
+            return "";
+        }
+        if ((name in nativeClassTypes) !is null || (name in nativeTypeNames) !is null) return "";
+        return name;
+    }
+
+    private string typeMismatchMessage(string name, string fallback)
+    {
+        auto unknown = unknownRuntimeType(name);
+        return unknown.length ? "Unknown type '" ~ unknown ~ "'" : fallback;
     }
 
     private bool valueMatchesType(Value value, string typeName)
@@ -2602,7 +2814,8 @@ unittest
     assert(!ambiguous.ok);
     assert(ambiguous.errorMessage.canFind("multiple matching overloads"));
     assert(!engine.runSafe("return total([100, 80]);").ok);
-    assert(!engine.runSafe("return total(null);").ok);
+    // DのAAはnullable。nullを受ける安全なcalleeで変換を検証します。
+    assert(engine.run("return countEntries(null);").toInt() == 0);
     assert(!engine.runSafe("return total({ alice = \"wrong\", bob = 80 });").ok);
     assert(!engine.runSafe("return nested({ team = [100] });").ok);
 
@@ -3053,7 +3266,11 @@ unittest
         return player;
     });
     assert(!missingField.ok);
-    assert(missingField.errorMessage.canFind("expected Player"));
+    // module-scopedな型IDの綴りには依存せず、対象変数と必要型の診断を保ちます。
+    assert(missingField.errorMessage.canFind("Variable 'player' expected")
+        && missingField.errorMessage.canFind("Player"), missingField.errorMessage);
+    auto validPlayer = new ScriptEngine;
+    assert(validPlayer.run("table Player { string name; int hp; } Player player = {name=\"hero\",hp=10}; return player.hp;").toInt() == 10);
 }
 
 unittest

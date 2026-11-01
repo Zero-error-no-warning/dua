@@ -63,7 +63,7 @@ table Owner { Item child; RequiredItem required; }
 auto owner = Owner { child = null, required = Item { count = 1 } };
 ```
 
-nullable field も initializer 内の指定は必須。`Owner { required = ... }` は child 不足のエラー。
+既定式のないnullable field も initializer 内の指定は必須。`Owner { required = ... }` は child 不足のエラー。
 nullable 化を理由に不足 field を自動的に null で補完しない。
 
 明示非 nullable を含む field は、通常の `.field`、`["field"]`、`rawset` に制約を残す。

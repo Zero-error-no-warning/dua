@@ -5,7 +5,7 @@ const { analyzeSource } = require('../checker');
 const intelligence = require('../moduleIntelligence');
 const host = require('../hostCompletion');
 const { diagnosticPosition } = require('../language');
-const executable = path.resolve(__dirname, '../bin/dua-check.exe');
+const executable = path.resolve(__dirname, '../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check');
 const empty = { symbols: {}, types: {} };
 async function fixture(run) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dua-import-extension-'));

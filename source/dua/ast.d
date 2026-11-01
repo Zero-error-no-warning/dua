@@ -98,12 +98,14 @@ final class Statement : AstNode
     bool isInstanceBlock;
     Expression expression;
     Expression metatableReference; // 型宣言時に一度だけ解決する共通meta。
+    Expression[] memberDefaults; // 欠落メンバーだけを生成ごとに宣言元環境で評価します。
     Expression[] expressions;
     Expression target;
     Expression[] targets;
     string assignmentOperator; // Empty for plain assignment; otherwise the binary operator.
     string[] parameters;
     string[] parameterTypes;
+    bool[] parameterLazy;
     Expression[] parameterDefaults; // 省略時に呼出しごと評価する式。既定値なしはnull。
     bool variadic;
     Statement[] body;
@@ -280,6 +282,7 @@ final class FunctionExpression : Expression
     package(dua) ScopeLayout scopeLayout;
     string[] parameters;
     string[] parameterTypes;
+    bool[] parameterLazy;
     Expression[] parameterDefaults; // 省略時に呼出しごと評価する式。既定値なしはnull。
     bool variadic;
     Statement[] body;

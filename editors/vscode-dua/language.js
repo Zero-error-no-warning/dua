@@ -2,7 +2,7 @@
 const {readType}=require('./typeSyntax');
 const {tokens}=require('./hostCompletion');
 
-const keywords = 'auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new table with'.split(' ');
+const keywords = 'auto lazy delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new table with'.split(' ');
 const types = 'any void bool byte ubyte short ushort int uint long ulong float double real string'.split(' ');
 const builtins = {
   error: ['error(value, level?)', 'スクリプトエラーを送出します。'],
@@ -39,33 +39,9 @@ const libraries = {
   package: { require: 'name', addPath: 'pattern', addLoader: 'loader', clearLoaders: '' }
 };
 
-// Preserve UTF-16 offsets while masking strings and nested block comments.
-// Dua strings have no backslash escapes. A newline ends an incomplete string.
-function maskSource(source) {
-  const result = source.split('');
-  let state = 'code', depth = 0;
-  for (let i = 0; i < source.length; i++) {
-    const pair = source.slice(i, i + 2), char = source[i];
-    if (state === 'code') {
-      if (pair === '/+') { state = 'block'; depth = 1; }
-      else if (pair === '//' || char === '#') state = 'line';
-      else if (char === '"') state = 'string';
-      else continue;
-      result[i] = ' ';
-      if (pair === '/+' || pair === '//') result[++i] = ' ';
-    } else {
-      if (char !== '\n' && char !== '\r') result[i] = ' ';
-      if (state === 'block') {
-        if (pair === '/+') { depth++; result[++i] = ' '; }
-        else if (pair === '+/') {
-          result[++i] = ' ';
-          if (--depth === 0) state = 'code';
-        }
-      } else if (char === '\n' || (state === 'string' && char === '"')) state = 'code';
-    }
-  }
-  return { text: result.join(''), state };
-}
+// UTF-16位置を保ち、補間式のコードだけを残す。
+const { maskStringsAndComments } = require('./stringSyntax');
+function maskSource(source) { return maskStringsAndComments(source); }
 
 function documentNames(source) {
   const text = maskSource(source).text;

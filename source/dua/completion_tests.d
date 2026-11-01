@@ -51,7 +51,7 @@ unittest
     engine.bindFunc("rawIdentity", (Value input) => input);
     auto data = engine.completionRegistry.toJson();
     assert(data["symbols"]["rawIdentity"]["signatures"].array[0]["parameters"].array[0]["type"].str == "any");
-    assert(engine.run(`return rawIdentity("raw\path");`).to!string == `raw\path`);
+    assert(engine.run(`return rawIdentity("raw\\path");`).to!string == `raw\path`);
     assert(engine.run(`return rawIdentity({name=42}).name;`).to!int == 42);
     auto reflected = Value.reflect(new RawCompletionFixture);
     engine.bind("extracted",reflected["echo"]);

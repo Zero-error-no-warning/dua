@@ -1,4 +1,5 @@
 module dua.parser;
+import dua.string_literal;
 
 import dua.execution : locatedException, scriptDiagnostic;
 import dua.ast;
@@ -315,7 +316,7 @@ private struct Parser
                 statement.returnType = declaredType;
                 statement.name = nameToken.lexeme;
                 parseTypedFunctionSignature(statement.parameterTypes, statement.parameters,
-                    statement.variadic, statement.body, statement.parameterDefaults);
+                    statement.variadic, statement.body, statement.parameterDefaults, statement.parameterLazy);
                 return statement;
             }
 
@@ -568,6 +569,7 @@ private struct Parser
         consume(TokenKind.leftBrace, "Expected '{' after aggregate name");
         auto fieldNames = appender!(string[])();
         auto fieldTypes = appender!(string[])();
+        auto defaults = appender!(Expression[])();
         auto bases = appender!(string[])();
         while (!check(TokenKind.rightBrace))
         {
@@ -580,6 +582,7 @@ private struct Parser
             {
                 fieldTypes.put(parseTypeName());
                 fieldNames.put(consume(TokenKind.identifier, "Expected aggregate field name").lexeme);
+                defaults.put(match(TokenKind.equal) ? parseExpression() : null);
             }
             consume(TokenKind.semicolon, "Expected ';' after aggregate member");
         }
@@ -587,6 +590,7 @@ private struct Parser
         match(TokenKind.semicolon);
         statement.parameters = fieldNames.data;
         statement.parameterTypes = fieldTypes.data;
+        statement.memberDefaults = defaults.data;
         statement.names = bases.data;
         return statement;
     }
@@ -1004,7 +1008,8 @@ private struct Parser
             string[] parameterTypes;
             string[] parameters;
             Expression[] defaults;
-            parseTypedLambdaParameters(parameterTypes, parameters, defaults);
+            bool[] lazyParameters;
+            parseTypedLambdaParameters(parameterTypes, parameters, defaults, lazyParameters);
             Statement[] body;
             string returnType;
             if (match(TokenKind.leftBrace))
@@ -1027,6 +1032,7 @@ private struct Parser
             auto functionNode = new FunctionExpression(parameters, false, body, returnType);
             functionNode.parameterTypes = parameterTypes;
             functionNode.parameterDefaults = defaults;
+            functionNode.parameterLazy = lazyParameters;
             return locatedExpression(functionNode, startToken);
         }
         if (check(TokenKind.identifier)
@@ -1099,30 +1105,44 @@ private struct Parser
         auto parts = appender!(Expression[])();
         auto literalBuffer = appender!(char[])();
 
+        size_t sourceLine = stringToken.line;
+        size_t sourceColumn = stringToken.column + 1;
         size_t cursor = 0;
         while (cursor < stringToken.lexeme.length)
         {
             auto current = stringToken.lexeme[cursor];
+            if (current == '\\')
+            {
+                literalBuffer.put(readStringEscape(stringToken.lexeme, cursor, sourceLine, sourceColumn));
+                sourceColumn += 2;
+                continue;
+            }
             if (current == '$')
             {
                 if (peekChar(stringToken.lexeme, cursor + 1) == '$')
                 {
                     literalBuffer.put('$');
                     cursor += 2;
+                    sourceColumn += 2;
                     continue;
                 }
                 if (peekChar(stringToken.lexeme, cursor + 1) != '(')
                 {
                     literalBuffer.put('$');
                     ++cursor;
+                    ++sourceColumn;
                     continue;
                 }
 
                 flushLiteralPart(parts, literalBuffer, prefixToken);
 
-                auto end = findInterpolationEnd(stringToken.lexeme, cursor + 2, prefixToken);
+                auto end = cursor + 2;
+                auto expressionLine = sourceLine;
+                auto expressionColumn = sourceColumn + 2;
+                sourceColumn += 2;
+                scanInterpolationEnd(stringToken.lexeme, end, sourceLine, sourceColumn);
                 auto embedded = stringToken.lexeme[cursor + 2 .. end];
-                auto embeddedExpressions = parseInterpolationExpressionSequence(embedded, prefixToken, stringToken.line, stringToken.column + cursor + 3);
+                auto embeddedExpressions = parseInterpolationExpressionSequence(embedded, prefixToken, expressionLine, expressionColumn);
                 foreach (expression; embeddedExpressions)
                 {
                     // Convert each value before concatenation, including a lone
@@ -1130,11 +1150,12 @@ private struct Parser
                     parts.put(locatedExpression(new CastExpression("string", expression, true), prefixToken));
                 }
                 cursor = end + 1;
+                ++sourceColumn;
                 continue;
             }
 
             literalBuffer.put(current);
-            ++cursor;
+            advanceStringPosition(stringToken.lexeme, cursor, sourceLine, sourceColumn);
         }
 
         flushLiteralPart(parts, literalBuffer, prefixToken);
@@ -1190,65 +1211,6 @@ private struct Parser
                 unexpected.line, unexpected.column), unexpected.line, unexpected.column);
         }
         return expressions;
-    }
-
-    size_t findInterpolationEnd(string source, size_t start, Token token)
-    {
-        size_t depth = 1;
-        size_t cursor = start;
-        bool inString;
-        char quote;
-        bool escaped;
-
-        while (cursor < source.length)
-        {
-            auto current = source[cursor];
-            if (inString)
-            {
-                if (escaped)
-                {
-                    escaped = false;
-                }
-                else if (current == '\\')
-                {
-                    escaped = true;
-                }
-                else if (current == quote)
-                {
-                    inString = false;
-                }
-                ++cursor;
-                continue;
-            }
-
-            if (current == '"' || current == '\'')
-            {
-                inString = true;
-                quote = current;
-                ++cursor;
-                continue;
-            }
-            if (current == '(')
-            {
-                ++depth;
-                ++cursor;
-                continue;
-            }
-            if (current == ')')
-            {
-                --depth;
-                if (depth == 0)
-                {
-                    return cursor;
-                }
-                ++cursor;
-                continue;
-            }
-            ++cursor;
-        }
-
-        throw locatedException(format("Unterminated interpolation sequence at %s:%s", token.line, token.column), token.line, token.column);
-        assert(0);
     }
 
     char peekChar(string source, size_t index) const
@@ -1338,30 +1300,35 @@ private struct Parser
     }
 
     void parseTypedFunctionSignature(out string[] parameterTypes, out string[] parameters,
-        out bool variadic, out Statement[] body, out Expression[] defaults)
+        out bool variadic, out Statement[] body, out Expression[] defaults, out bool[] lazyParameters)
     {
-        parseFunctionParameters(parameterTypes, parameters, defaults, variadic, true);
+        parseFunctionParameters(parameterTypes, parameters, defaults, variadic, true, lazyParameters);
         consume(TokenKind.leftBrace, "Expected '{' before function body");
         body = parseBlockTail();
     }
 
     void parseFunctionParameters(out string[] types, out string[] names, out Expression[] defaults,
-        out bool variadic, bool allowVariadic)
+        out bool variadic, bool allowVariadic, out bool[] lazyParameters)
     {
         consume(TokenKind.leftParen, "Expected '(' before function parameters");
         bool seenDefault;
         Expression[] values;
         if (!check(TokenKind.rightParen)) do
         {
+            bool isLazy = check(TokenKind.identifier) && peek().lexeme == "lazy";
+            if (isLazy) advance();
+            lazyParameters ~= isLazy;
             types ~= parseTypeName();
             auto name = consume(TokenKind.identifier, "Expected parameter name");
             names ~= name.lexeme;
             bool rest = match(TokenKind.ellipsis);
+            requireLocated(!isLazy || !rest, "Lazy variadic parameters are not supported", name.line, name.column);
             requireLocated(!rest || allowVariadic, "Variadic lambdas are not supported", name.line, name.column);
             Expression value;
             if (match(TokenKind.equal))
             {
                 requireLocated(!rest, "A variadic parameter cannot have a default", name.line, name.column);
+                requireLocated(!isLazy, "Lazy default arguments are not supported", name.line, name.column);
                 value = parseExpression();seenDefault = true;
             }
             else requireLocated(!seenDefault || rest,
@@ -1428,10 +1395,10 @@ private struct Parser
     }
 
     void parseTypedLambdaParameters(out string[] parameterTypes, out string[] parameters,
-        out Expression[] defaults)
+        out Expression[] defaults, out bool[] lazyParameters)
     {
         bool variadic;
-        parseFunctionParameters(parameterTypes, parameters, defaults, variadic, false);
+        parseFunctionParameters(parameterTypes, parameters, defaults, variadic, false, lazyParameters);
     }
 
 
@@ -1578,6 +1545,7 @@ private struct Parser
         {
             while (cursor < tokens.length)
             {
+                if (tokens[cursor].kind == TokenKind.identifier && tokens[cursor].lexeme == "lazy") ++cursor;
                 if (!scanType(cursor)) return false;
                 if (cursor >= tokens.length || tokens[cursor].kind != TokenKind.identifier) return false;
                 ++cursor;

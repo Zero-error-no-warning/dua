@@ -1,9 +1,24 @@
 module dua.attributes;
 
-/// Exclude a D function, method or constructor from Dua's automatic bindings.
+/// Exclude a D field, function, method or constructor from Dua's automatic bindings.
 /// Explicit declaration-based bindFunc registration rejects marked overload sets.
 /// Converting a declaration to a function pointer/delegate erases its UDAs.
 struct NoBind {}
+
+// 自動公開では、テンプレートの呼出元に関係なく宣言自身の可視性を尊重します。
+package(dua) template isPublicBinding(alias declaration) {
+    enum visibility = __traits(getVisibility, declaration);
+    enum isPublicBinding = visibility == "public" || visibility == "export";
+}
+package(dua) template isBindableField(T, string name) {
+    static if (__traits(compiles, __traits(getMember, T, name))) {
+        alias declaration = __traits(getMember, T, name);
+        enum isBindableField = isPublicBinding!declaration && !isNoBind!declaration;
+    } else {
+        // Tuple等の合成fieldには宣言UDAがなく、通常のアクセス可否で判定します。
+        enum isBindableField = __traits(compiles, mixin("T.init." ~ name));
+    }
+}
 
 /// lengthがカーソルの列挙や副作用を伴わず件数を返す、ホストrangeの明示的な契約。
 /// 自動配列化自体に指定は不要。指定した型だけlengthによる事前確保を許可する。

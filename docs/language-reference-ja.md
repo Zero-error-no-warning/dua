@@ -20,7 +20,7 @@ auto empty = null;
 
 - 識別子は英字または `_` で始まり、続きには英数字と `_` を使えます。
 - 数値は10進整数か小数です。小数点以下は省略でき、`1.` は `1.0` と同じ浮動小数点値です。負数はリテラルではなく単項 `-` を適用した式です。
-- 文字列はダブルクォートで1行に記述します。現在、文字列リテラル内のエスケープシーケンスは提供しません。
+- 文字列はダブルクォートで1行に記述します。エスケープと補間式の詳細は [文字列仕様](string-literals-ja.md) を参照してください。
 - 文は原則 `;` で終わり、ブロックは `{ ... }` で囲みます。
 - キーワードは `auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new with` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。`.new` などのメンバー名には引き続きアクセスできます。
 
@@ -212,7 +212,7 @@ string[int] identity(string[int] value) { return value; }
 - キーを文字列化しません。型注釈のないリテラルは `any[any]` で、`auto mixed = [7: "number", "7": "text"];` は別々の2要素を保持します。型を固定するには宣言または `cast` を使います。
 - 連想配列は参照型です。同じ型の代入や `auto alias = names;` は内容を共有します。型のないリテラルを型付き連想配列へ変換するときは、新しいコンテナを作ります。
 - `typeof(names).kind` は `"associativeArray"` です。`keyType` と `valueType` でも宣言型を確認でき、`names is string[int]` で型を検査できます。
-- 現在のキー検索は線形です。列挙順序に依存しないでください。テーブル専用のメタテーブル操作、spread、`map` / `filter`、`json.encode` は型付き連想配列には対応していません。
+- 現在のキー検索は線形です。列挙順序に依存しないでください。テーブル専用のメタテーブル操作、spread、`map` / `filter`、`json.encode` は型付き連想配列には対応していません。 `json.encode` はnull状態・空・非空のいずれの型付き連想配列も拒否します。通常配列のnullはJSONのnullとして扱います。
 - 数値の内部表現は従来と同じ符号付き64ビット整数と倍精度浮動小数です。D に渡す整数キーは変換先の範囲を検査します。D の `ulong` 全域など、内部表現を超える値は扱えません。
 
 ## 6. 型、alias、Union
@@ -260,7 +260,7 @@ if (hero is Named) {
 - `table Name { ... }` は参照セマンティクスの名前付きaggregateです。
 - `alias Name = T` と `alias Name = A | B` は純粋な型別名とUnion型に使用します。aggregateは宣言しません。
 
-- 名前付きテーブル型は宣言したフィールドを要求しますが、余分なフィールドは許可します。
+- 名前付きテーブル型は既定式のないフィールドを要求し、余分なフィールドは許可します。table/structのメンバーへ `int hp = 100;` と初期値を書けます。named table生成とstructコンストラクタでは省略分だけ生成ごとに評価します。[メンバー初期値](member-defaults-ja.md)を参照してください。
 - table 型内の `...BaseType;` は基底型のフィールドと型チェーンを取り込みます。struct 宣言内の型 spread は未対応です。
 - 基底型同士または派生型との同名フィールドは、同じ型でもエラーです。
 - `A | B` は Union、`T | null` は Optional 型として使えます。
@@ -280,7 +280,7 @@ if (hero is Named) {
   連想配列を含むUnionは従来どおり連想配列の型情報を照合します。例えば `Fruit[string] | null` へ渡す
   値は、まず `Fruit[string] typed = ["key":"Apple"];` と型付きで作成してください。未注釈のAAリテラルは自動変換しません。
   リテラル型の文字列は通常の文字列と同じ字句規則です。日本語・空文字・記号を使用でき、
-  バックスラッシュはそのままの文字です。エスケープ構文、数値・bool のリテラル型は未対応です。
+  文字列リテラル型も通常文字列と同じエスケープを解釈します。数値・bool のリテラル型は未対応です。
 - `value is Type` は名前付き型とその基底型を判定します。
 - `typeinfo(value)` / `typeof(value)` は `{ kind, chain, aliasThisChain }` を返します。`chain` は名前付き型の型チェーン、`aliasThisChain` は D reflection の alias this に関する情報です。
 - 事前型検査は保守的です。`any`、動的プロパティ、ネイティブ関数の結果などは実行時検査に残ります。

@@ -47,7 +47,7 @@ mixin template ModuleImplementation()
 
     ModuleContext createModuleContext(string[] paths=null,ModuleContext parent=null,Object owner=null){
         auto context=new ModuleContext;
-        context.parent=parent;context.owner=owner;
+        context.parent=parent;context.owner=owner;context.validateSource=parent is null ? null : parent.validateSource;
         context.paths=paths.length ? paths.dup : parent is null ? effectiveModulePaths().dup : parent.paths.dup;
         context.loaders=parent is null ? effectiveModuleLoaders().dup : parent.loaders.dup;
         context.globals=new Environment(parent is null ? globals : parent.globals);
@@ -76,6 +76,11 @@ mixin template ModuleImplementation()
         enforce(name !in context.modules,"Context module already exists: "~name);
         auto result=new ModuleHandle(this,name,new Environment(context.globals),ModuleVisibility.explicitExports,true);
         context.modules[name]=result;return result;
+    }
+    /// 所有者ごとのcontext内で同じモジュールを再利用し、余分なinstanceを生成しません。
+    ModuleHandle loadModule(string name,ModuleContext context){
+        auto scope_=enterModuleContext(context);scope(exit)leaveModuleContext(scope_);
+        return requireModuleHandle(name);
     }
     ModuleHandle instantiateModule(string name,ModuleContext context){
         auto scope_=enterModuleContext(context);scope(exit)leaveModuleContext(scope_);
@@ -142,6 +147,7 @@ mixin template ModuleImplementation()
         }
         auto result = resolveFileImport(request, importer, pathImport, effectiveModulePaths(),
             path => (path in overlays) !is null);
+        if(result.key.length)if(auto context=currentModuleContext())if(context.validateSource !is null)context.validateSource(result.sourceName);
         if (result.key.length && ((result.key in moduleSources) !is null || (result.key in modules) !is null))
             result.registered = true;
         return result;
@@ -187,6 +193,13 @@ mixin template ModuleImplementation()
     ModuleAnalysis analyzeModule(string source, string sourceName = "", string[] hostClassTypes = null,
         string[string] sourceOverlays = null)
     {
+        return analyzeModuleState(source, sourceName, hostClassTypes, sourceOverlays);
+    }
+
+    // checkはrun/loadと同じglobal scopeの続き、editor解析は独立sourceとして扱います。
+    private ModuleAnalysis analyzeModuleState(string source, string sourceName, string[] hostClassTypes,
+        string[string] sourceOverlays, BoundModule previous = null)
+    {
         ModuleAnalysis result;
         string[string] overlays;
         foreach (path, text; sourceOverlays) overlays[canonicalModulePath(path)] = text;
@@ -194,10 +207,10 @@ mixin template ModuleImplementation()
         auto analyzer = moduleAnalyzer(false, overlays);
         try
         {
-            auto key = sourceName.length ? canonicalModulePath(sourceName) : "";
-            result.root = analyzer.bind(source, sourceName, key);
+            auto key = previous !is null ? previous.key : sourceName.length ? canonicalModulePath(sourceName) : "";
+            result.root = analyzer.bind(source, sourceName, key, previous);
             result.modules = analyzer.modules;
-            result.diagnostics = checkModuleGraph(result, nullableHostClassTypes() ~ hostClassTypes);
+            result.diagnostics = checkModuleGraph(result, nullableHostClassTypes() ~ hostClassTypes, nativeTypeNames.keys);
         }
         catch (Exception error)
         {

@@ -203,8 +203,7 @@ unittest
 unittest
 {
     foreach (name; ["byte", "ubyte", "short", "ushort", "int", "uint", "long", "ulong",
-        "float", "double", "real", "bool", "string", "array", "table", "associativeArray",
-        "function", "int[]", "int[string]", "int delegate(int)"])
+        "float", "double", "real", "bool", "string", "function", "int delegate(int)"])
     {
         auto engine = new ScriptEngine;
         try { engine.bindType!NativeItem(name); }
@@ -223,6 +222,24 @@ unittest
             assert(!result.ok, source);
         }
         assert(engine.run("NativeItem value = null; return value == null;").truthy());
+    }
+    // コンテナは現行仕様でnullable。classを同名bindしてもこの規則は変わりません。
+    foreach (name; ["array", "table", "associativeArray", "int[]", "int[string]"])
+    {
+        auto engine = new ScriptEngine;
+        try engine.bindType!NativeItem(name);
+        catch (Exception error) { assert(error.msg.canFind("already defined"), error.msg); }
+        auto source = name ~ " value = null; return value is null;";
+        assert(engine.check(source).length == 0, source);
+        foreach (checked; [false, true])
+        {
+            RunOptions options; options.typeCheck = checked;
+            auto result = engine.runSafe(source, options);
+            assert(result.ok && result.value.truthy(), result.errorMessage);
+            auto required = "alias Required = " ~ name ~ " & !null; Required value = null;";
+            assert(engine.check(required).length > 0, required);
+            assert(!engine.runSafe(required, options).ok, required);
+        }
     }
     foreach (name; ["null", "void", "any"])
     {
@@ -245,15 +262,19 @@ unittest
         engine.bindAuto("native", cast(NativeItem) null);
         return engine;
     };
-    // checkは検査開始時の型状態を見る。同一ソースで解決が変わる名前は実行時へ委ねる。
+    // 同一scopeの宣言はhost同名型から独立したnominal typeとして正確に検査します。
     foreach (declaration; ["table NativeItem { int number; }", "struct NativeItem { int number; }"])
     {
         auto source = declaration ~ " NativeItem value = null;";
         auto engine = createEngine();
-        assert(engine.check(source).length == 0, source);
+        auto tableNullable = declaration[0 .. 5] == "table";
+        assert((engine.check(source).length == 0) == tableNullable, source);
         assert(engine.check("NativeItem value = null;").length == 0); // checkは登録しない。
         engine.run(declaration);
-        auto tableNullable = declaration[0 .. 5] == "table";
+        assert((engine.check("NativeItem value = null;").length == 0) == tableNullable);
+        // editor用の独立解析がglobalの継続scopeを変更しないことも確認します。
+        auto independent = engine.analyzeModule("table NativeItem { int x; } NativeItem value = null;", "independent.dua");
+        assert(independent.diagnostics.length == 0);
         assert((engine.check("NativeItem value = null;").length == 0) == tableNullable);
         foreach (checked; [false, true])
         {
@@ -284,8 +305,7 @@ unittest
         "for (auto i = 0; i < 1; i += 1) { continue; table NativeItem { int number; } } NativeItem value = null; return value == null;",
         "void early() { return; table NativeItem { int number; } } early(); NativeItem value = null; return value == null;",
         "try {} catch (err) { table NativeItem { int number; } } NativeItem value = null; return value == null;",
-        "void install(int x) { table NativeItem { int number; } } try { install(); } catch (err) {} NativeItem value = null; return value == null;",
-        "NativeItem value = null; alias NativeItem = int; return value == null;",
+        "void install(int x) { table NativeItem { int number; } } any indirect() { return install; } try { indirect()(); } catch (err) {} NativeItem value = null; return value == null;",
         "alias NativeItem = string; NativeItem value = \"text\"; return value == \"text\";",
         "any expose() { table NativeItem { int number; } return { x = 0 }; } int consume(NativeItem value) { return 1; } expose().x = consume(null); return true;"
     ])
@@ -298,13 +318,24 @@ unittest
             assert(result.ok && result.value.truthy(), source ~ "\n" ~ result.errorMessage);
         }
     }
-    // structは型情報登録後のconstructor名衝突でも、実行時に残る型情報を尊重する。
+    // 直接の必須引数不足は既定引数対応の静的検査で引き続き拒否します。
+    assert(createEngine().check("void install(int x) {} install();").length > 0);
+    // try内のstructは外側host型へ漏れず、同名constructorも字句scopeに閉じます。
     auto partial = "void use() { try { struct NativeItem { int number; } return; } catch (err) {} NativeItem value = null; } use();";
     assert(itemEngine().check(partial).length == 0);
     foreach (checked; [false, true])
     {
         RunOptions options; options.typeCheck = checked;
-        assert(!itemEngine().runSafe(partial, options).ok);
+        assert(itemEngine().runSafe(partial, options).ok);
+        auto nonNullable = "void use() { struct NativeItem { int number; } NativeItem value = null; } use();";
+        assert(!itemEngine().runSafe(nonNullable, options).ok);
+    }
+    // 後置の宣言も同じlexical scopeで名前を隠すため、前方の使用はhostへ逃がしません。
+    auto forward = "NativeItem value = null; alias NativeItem = int; return value == null;";
+    assert(createEngine().check(forward).length > 0);
+    foreach (checked; [false, true]) {
+        RunOptions options; options.typeCheck = checked;
+        assert(!createEngine().runSafe(forward, options).ok);
     }
     // 委譲は影響する公開型名だけ。組込み型・別クラス等の既存診断を緩めない。
     foreach (source; ["int value = \"bad\";", "OtherItem value = 1;",

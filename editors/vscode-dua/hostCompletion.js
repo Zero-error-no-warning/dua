@@ -1,4 +1,5 @@
 'use strict';
+const { scanQuotedString, decodeStringContent } = require('./stringSyntax');
 const fs = require('node:fs');
 const path = require('node:path');
 const {readType,withoutNullExclusion,splitContainer}=require('./typeSyntax');
@@ -29,17 +30,17 @@ function tokens(source) {
       continue;
     }
     if (c === '"' || (c === 'i' && source[i + 1] === '"')) {
-      const interpolated = c === 'i';
+      let interpolated = c === 'i', stringStart = start;
       if (interpolated) i++;
-      const quote = i++;
-      let closed = false;
-      while (i < source.length && source[i] !== '\n' && source[i] !== '\r') {
-        if (source[i++] === '"') { closed = true; break; }
+      else if (result.at(-1)?.kind === 'identifier' && result.at(-1).text === 'i') {
+        interpolated = true; stringStart = result.pop().start;
       }
-      let value;
-      if (closed && !interpolated) value = source.slice(quote + 1, i - 1);
-      result.push({ text: source.slice(start, i), kind: 'string', value, start, end: i, quote, closed, interpolated });
-      if (!closed && i === source.length) state = 'string';
+      const quote = i, scanned = scanQuotedString(source, quote, interpolated);
+      i = scanned.end;
+      const closed = scanned.closed;
+      const value = closed && !interpolated ? decodeStringContent(source.slice(quote + 1, i - 1)) : undefined;
+      result.push({ text: source.slice(stringStart, i), kind: 'string', value, start: stringStart, end: i, quote, closed, interpolated });
+      if (!closed && i === source.length) state = scanned.state;
       continue;
     }
     const number = source.slice(i).match(/^(?:\d+\.\d+|\d+)/);
@@ -297,6 +298,7 @@ function environmentAt(input, catalog, initial = new Map(), context = {}) {
           for (let p of splitArguments(input.slice(open + 1, close))) {
             const equal = p.findIndex(t => t.text === '=');
             if (equal >= 0) p = p.slice(0, equal);
+            if (p[0]?.text === 'lazy') p = p.slice(1);
             const name = p.at(-1), type = p.slice(0, -1).map(t => t.text).join('');
             const resolved = catalogTypeName(type, catalog);
             if (name?.kind === 'identifier') set(name.text, resolved ? declaredValue(resolved) : {types:[],assets:null}, true);
@@ -325,11 +327,13 @@ function environmentAt(input, catalog, initial = new Map(), context = {}) {
             let declaration=equal<0?group:group.slice(0,equal);
             const variadic=declaration.slice(-3).every(token=>token.text==='.') && declaration.length>=4;
             if(variadic)declaration=declaration.slice(0,-3);
+            const lazy=declaration[0]?.text === 'lazy';
+            if(lazy)declaration=declaration.slice(1);
             const name=declaration.at(-1);
             const rawType=declaration.slice(0,-1).map(token=>token.text).join('');
             const type=catalogTypeName(rawType,catalog);
             return name?.kind==='identifier' && (type || !rawType || rawType==='auto')
-              ? {name:name.text,type:type || 'any',optional:equal>=0,variadic} : null;
+              ? {name:name.text,type:type || 'any',optional:equal>=0,variadic,lazy} : null;
           });
           if(parameters.every(Boolean))set(input[next].text,entryValue({kind:'function',signatures:[{returnType:resolved || 'any',parameters}]},input[next].text),true);
           else set(input[next].text,entryValue({kind:'function'},input[next].text),true);
@@ -391,7 +395,7 @@ function receiverTokens(input) {
   return input.slice(start);
 }
 function detail(label, entry) {
-  return (entry.signatures || []).map(s => `${label}(${(s.parameters || []).map(p => `${p.displayType || p.type} ${p.name}${p.optional ? ' = …' : ''}${p.variadic ? '...' : ''}`).join(', ')}) → ${entry.displayType || s.returnType}`).join('\n') || `${label}${entry.type ? ': ' + (entry.displayType || entry.type) : ''}`;
+  return (entry.signatures || []).map(s => `${label}(${(s.parameters || []).map(p => `${p.lazy ? 'lazy ' : ''}${p.displayType || p.type} ${p.name}${p.optional ? ' = …' : ''}${p.variadic ? '...' : ''}`).join(', ')}) → ${entry.displayType || s.returnType}`).join('\n') || `${label}${entry.type ? ': ' + (entry.displayType || entry.type) : ''}`;
 }
 
 // 完成前の式でも、括弧・引数・文境界を越えてwith対象を漏らさない。

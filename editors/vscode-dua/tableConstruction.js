@@ -78,8 +78,8 @@ function fieldCompletions(source, offset, catalog) {
   while (end<source.length && /[A-Za-z_0-9]/.test(source[end])) end++;
   const suffix = /^\s*=/.test(source.slice(end)) ? '' : ' = ';
   return Object.entries(description.members || {}).filter(([name])=>!assigned.has(name) && !name.startsWith('__'))
-    .map(([label,entry])=>({label,kind:'property',detail:`${label}: ${entry.displayType || entry.type}`,
-      documentation:'named table field',start:partial?.start ?? offset,end,insertText:label + suffix}));
+    .map(([label,entry])=>({label,kind:'property',detail:`${label}: ${entry.displayType || entry.type}${entry.hasDefault ? ' (既定値あり・省略可)' : ''}`,
+      documentation:entry.hasDefault ? 'named table field: 省略時は宣言元の既定式を生成ごとに評価' : 'named table field',start:partial?.start ?? offset,end,insertText:label + suffix}));
 }
 
 module.exports = {constructionContext,completionProjection,fieldCompletions};

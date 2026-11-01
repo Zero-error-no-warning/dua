@@ -77,7 +77,7 @@ test('extension debounces checks, drops stale responses, clears closed files and
   assert.equal(values.get(uri.toString())[0].message, 'current');
   listeners.close(document);
   assert.equal(values.size, 0);
-  config.checkerPath = path.resolve(__dirname, '../bin/dua-check.exe');
+  config.checkerPath = path.resolve(__dirname, '../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check');
   listeners.open(document);
   await tick();
   assert.deepEqual(requests[2].options.hostClassTypes, [], 'custom checker keeps the legacy input protocol');

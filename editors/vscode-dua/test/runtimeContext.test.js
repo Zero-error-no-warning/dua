@@ -4,7 +4,7 @@ const fs = require('node:fs'), os = require('node:os'), path = require('node:pat
 const { createContext } = require('../assetCompletion');
 const intelligence = require('../moduleIntelligence');
 const { analyzeSource } = require('../checker');
-const executable = path.resolve(__dirname, '../bin/dua-check.exe');
+const executable = path.resolve(__dirname, '../bin', process.platform === 'win32' ? 'dua-check.exe' : 'dua-check');
 
 test('validated runtime contexts preserve native module kinds and known member types', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dua-runtime-context-'));

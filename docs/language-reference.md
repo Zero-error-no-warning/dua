@@ -45,8 +45,7 @@ candidates, and array element types (`Fruit[]`) are supported. Initialization, r
 arguments/results, and typed array elements are checked at runtime; obvious incompatible literals
 are also diagnosed statically. Dynamic `string` and `any` values are validated at runtime.
 Ordinary inferred or annotated strings remain unrestricted. Literal types use the same string lexer
-as expressions: Unicode and empty strings are allowed, backslashes remain literal, and escape
-sequences are not introduced. Numeric/bool literal types are not supported.
+as expressions: Unicode, empty strings, and the escapes described in [string literals](string-literals-ja.md) are supported. Numeric/bool literal types are not supported.
 
 An `auto copy = fruit` scalar binding does not inherit the original binding's literal constraint;
 `copy = "Banana"` remains valid. An array `auto copy = values` shares the array and its element constraints.
