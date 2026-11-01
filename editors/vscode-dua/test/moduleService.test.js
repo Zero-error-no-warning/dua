@@ -95,9 +95,14 @@ test('missing, cyclic and private-type diagnostics retain their own file snapsho
 test('native module metadata is passed through while host class null and real value-type errors remain', () => fixture(async ({analyze}) => {
   const catalog = {symbols: { ui: {kind:'module'}, 'ui.newListView': {kind:'function', signatures:[{returnType:'ListView', parameters:[]}]},
     Vec2: {kind:'type', type:'Vec2'}}, types:{ListView:{kind:'class', members:{}}, Vec2:{kind:'struct', members:{}}}};
-  const result = await analyze('import ui; ListView view = null; Vec2 point = null;', {hostModules: intelligence.hostModules(catalog)});
+  // Completion-only struct metadata does not declare a diagnostic type.
+  const options = {hostModules: intelligence.hostModules(catalog), hostClassTypes: host.diagnosticHostTypes(catalog)};
+  assert.deepEqual(options.hostClassTypes, ['ListView']);
+  const source = 'import ui; struct Vec2 { int x; } ListView view = null; Vec2 point = Vec2(0);';
+  assert.deepEqual((await analyze(source, options)).diagnostics, []);
+  const result = await analyze(source.replace('Vec2(0)', 'null'), options);
   assert.equal(result.diagnostics.length, 1);
-  assert.match(result.diagnostics[0].message, /point/);
+  assert.match(result.diagnostics[0].message, /point.*expects .*Vec2 but expression has type null/);
 }));
 
 test('incomplete member completion uses a virtual input and the same service graph', () => fixture(async ({analyze}) => {
