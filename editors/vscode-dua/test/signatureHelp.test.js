@@ -71,7 +71,7 @@ test('lazy, variadic, optional and standard-library signatures reuse existing me
 });
 
 test('unfinished-call service projection keeps declarations after cursor and never changes original source',async()=>{
-  const executable=path.resolve(__dirname,'../bin/dua-check.exe');
+  const executable=path.resolve(__dirname,'../bin',process.platform==='win32'?'dua-check.exe':'dua-check');
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'dua-signature-'));
   const imported=path.join(root,'values.dua'), sourceName=path.join(root,'main.dua');
   fs.writeFileSync(imported,'export alias Count = uint; export Count read(Count amount, string label = "x") { return amount; }');
@@ -98,7 +98,7 @@ test('unfinished-call service projection keeps declarations after cursor and nev
 });
 
 test('native module aliases retain all reflected overloads instead of an unknown zero-argument summary',async()=>{
-  const executable=path.resolve(__dirname,'../bin/dua-check.exe');
+  const executable=path.resolve(__dirname,'../bin',process.platform==='win32'?'dua-check.exe':'dua-check');
   const catalog={symbols:{native:{kind:'module'},'native.overload':{kind:'function',signatures:[
     {returnType:'int',parameters:[{type:'int',name:'number'}]},
     {returnType:'string',parameters:[{type:'string',name:'text'}]}

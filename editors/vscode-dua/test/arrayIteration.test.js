@@ -5,7 +5,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {checkSource}=require('../checker');
 const {completions,documentNames}=require('../language');
-const executable=path.resolve(__dirname,'../bin/dua-check.exe');
+const executable=path.resolve(__dirname,'../bin',process.platform==='win32'?'dua-check.exe':'dua-check');
 
 test('checker accepts resize/reverse in ordinary and suspended functions',async()=>{
   for(const source of [

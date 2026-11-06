@@ -5,7 +5,7 @@ const path=require('node:path');
 const {checkSource}=require('../checker');
 const {apiCompletions}=require('../hostCompletion');
 const {signatureHelp}=require('../signatureHelp');
-const executable=path.resolve(__dirname,'../bin/dua-check.exe');
+const executable=path.resolve(__dirname,'../bin',process.platform==='win32'?'dua-check.exe':'dua-check');
 
 test('checker accepts language additions and implicit floating conversion',async()=>{
   for(const source of [
