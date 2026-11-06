@@ -22,7 +22,7 @@ auto empty = null;
 - 数値は10進整数か小数です。小数点以下は省略でき、`1.` は `1.0` と同じ浮動小数点値です。負数はリテラルではなく単項 `-` を適用した式です。
 - 文字列はダブルクォートで1行に記述します。エスケープと補間式の詳細は [文字列仕様](string-literals-ja.md) を参照してください。
 - 文は原則 `;` で終わり、ブロックは `{ ... }` で囲みます。
-- キーワードは `auto delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new with` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。`.new` などのメンバー名には引き続きアクセスできます。
+- キーワードは `auto delegate alias struct is cast try catch return if else while for foreach foreach_reverse switch case default break continue yield true false null this import export as instance new with` です。`table` は宣言先頭では文脈キーワードですが、標準の `table.map` などでは通常の識別子です。`int` などの型名、`any`、`void` は構文上は識別子として型位置に現れます。`.new` などのメンバー名には引き続きアクセスできます。
 
 ### 1.2 値の種類と真偽
 
@@ -120,6 +120,10 @@ default:
 
 - `foreach (value; collection)` は値だけ、`foreach (key, value; collection)` は配列の添字またはテーブルのキーと値を受け取ります。
 - `foreach (idx; a .. b)` は整数 `a` から `b` 未満までを反復します。境界は開始時に左から一度だけ評価し、`a >= b` なら0回です。負数・変数式も使えます。配列は生成せず、反復変数は各回のローカル変数です。範囲では変数は1個だけで、整数以外の境界はエラーになります。
+- `foreach_reverse (value; array)` / `foreach_reverse (index, value; array)` は末尾から先頭へ走査し、添字は元の配列の0始まりの値です。
+- `foreach_reverse (i; a .. b)` は `b-1, b-2, ..., a` の順です。開始時の境界評価、空範囲、反復ごとのスコープ、break/continue/return、yieldの規則はforeachと共通です。配列は開始時のハンドルと長さを保持し、未訪問の要素の変更は見えます。
+- 逆順走査は配列と整数範囲のみです。Dの連想配列と同様に、Duaの連想配列とtableには対応しません。文字列・任意の反映オブジェクトは既存foreachでも対象外です。D側から通常配列へ実体化済みのrangeは使えます。型付き反復変数、ref、opApplyReverseを新たに導入するものではありません。
+- `foreach_reverse` は予約語になります。
 - `break` / `continue` はループで使用します。`switch` の分岐を終えるときも `break` を使用できます。
 - 三項演算子 `condition ? whenTrue : whenFalse` も利用できます。
 - 現在の `switch` は最初に選ばれた節だけを実行し、次の節へフォールスルーしません。`default` は最後に置いてください。
@@ -128,7 +132,7 @@ default:
 
 ```D
 auto values = [10, 20, 30];
-auto count = values.length; # 読み取り専用の配列長。空配列は0
+auto count = values.length; # 配列長。空配列は0
 foreach (idx; 0 .. values.length) { values[idx] += 1; }
 auto indices = iota(10);   # [0, 1, ..., 9]
 auto section = iota(5, 9); # [5, 6, 7, 8]
@@ -148,13 +152,48 @@ auto user = {
 user.hp = user.hp - 1;
 ```
 
-配列とテーブルは参照型なので、通常の代入は同じ内容を共有します。spread は新しいコンテナを作る浅いコピーです。
+配列とテーブルは参照型なので、通常の代入は同じ内容を共有します。スライスも元配列の要素領域を共有し、どちらからの要素更新も他方に反映します。struct要素もスライス作成時にはコピーしません。spread は新しいコンテナを作る浅いコピーです。
+
+### 配列長への代入と確保
+
+```D
+int[] buffer;
+buffer.length = 100;   // intの0を100要素確保
+buffer[0] = 7;
+buffer.length += 20;   // 既存要素を保持し、新規要素を既定値で初期化
+buffer.length = 1;     // [7]へ縮小
+buffer.length = 0;     // 空配列
+```
+
+- 書戻し可能な配列変数・フィールド・添字に対応します。`rows[i].length = n` や書込可能なホスト配列プロパティも使えます。関数の戻り値そのもの、配列リテラル、スライス式のlengthへの代入は拒否します。文字列・連想配列のlengthは読取専用です。独自のホストopIndexAssign経由の配列ハンドル伸縮、固定長ホスト配列のサイズ変更には対応しません。
+- 長さは0以上の整数です。負値、浮動小数、bool、文字列、null、アドレス可能な確保サイズを超える値を拒否します。実際に確保できる量はメモリに依存します。容量だけを予約する機能ではありません。
+- 伸縮は代入先のハンドルだけを変更し、別名変数の長さは変えません。縮小では残した要素の領域を共有します。拡張は新しい領域を確保するため、以前の領域との要素変更の共有は切れます。ただし要素内の参照は浅く共有され、struct要素は値としてコピーします。Dでは拡張時に領域を再利用する場合もありますが、Duaでは確定前の失敗から元の配列を保護するため毎回新規確保します。スライスも縮小時と同様に要素領域を共有します。
+- 通常代入は右辺→対象→添字、複合代入は対象→添字→右辺の順で、それぞれ一度だけ評価します。複合代入は右辺が変数を入れ替えても、確定した場所へ伸縮後のハンドルを書き戻します。yieldを挟む場合も同じです。代入は従来どおり文であり、入れ子の代入式は追加しません。DMD 2.113の `target()[index()].length = rhs()` / `+= rhs()` は実測でindex→target→rhsでした。Duaでは他の既存代入と共通の順序を維持するため、この点はDと異なります。
+
+| 要素型 | 拡張時の既定値 |
+| --- | --- |
+| 整数型 | 0 |
+| float / double / real | NaN（Dの既定値に合わせる） |
+| bool | false |
+| string | 空文字列（Duaのstringはnullを持たない） |
+| 配列・連想配列 | 型を保ったnull/空ハンドル |
+| table・ホストclass・nullを許すunion | null |
+| 単一の文字列リテラル型 | その文字列 |
+| Dua struct | 宣言順に明示されたメンバー既定式を評価し、それ以外はメンバー型の既定値。要素ごとに独立 |
+| 登録されたホストstruct | DのT.init。コンストラクタは呼ばない |
+| 型注釈のないDua配列 / any | null |
+
+型注釈のない `auto a = [1]` も動的な配列なので、新規要素はnullです。数値を確保する場合は `int[]` などを明記してください。ホスト配列・実体化したrangeは元の要素型を初期値のヒントとして保持しますが、既存の動的な要素代入へ新たな型制約は課しません。
+
+既定値がnullになるnull禁止型、nullを許さない複数候補のunion、delegateなど既定値を決められない型の拡張は実行時エラーです。配列全体のunion制約（例: `alias Values = int[] | string[];`）の拡張も分岐を選ばず拒否します。これらも縮小・ゼロ・同じ長さへの代入は可能です。型の既定値が作れない場合、元の長さと要素は保ちますが、すでに評価した右辺・既定式・ホストコピーの副作用は巻き戻しません。Dua structのメンバー既定式は既存の構築経路と同じく同期実行であり、その式内のyieldには対応しません。
+
+Dとの比較根拠: [動的配列のlength](https://dlang.org/spec/arrays.html#resize)、[foreach_reverse](https://dlang.org/spec/statement.html#foreach-statement)。
 
 `$` は現在評価している添字の対象長です。入れ子の添字では内側の対象長になり、内側の評価後に外側へ戻ります。
 通常の添字代入は右辺→対象配列→添字の順に各式を一度だけ評価します。複合代入は対象配列→添字→右辺の順です。
 右辺には代入先の `$` スコープを持ち込みません。空配列の `$-1`、範囲外・負の添字、添字の外の `$` は実行時エラーです。
 型付き配列は宣言・引数・戻り値の検証に加え、添字代入と連結でも要素型を検証します。autoの別名とスライスに要素型を保持し、
-連結結果には左辺の明示された要素型を保持します。整数型の範囲検査は実行時に行い、整数をdouble要素へ暗黙変換しません。
+連結結果には左辺の明示された要素型を保持します。整数型の範囲検査は実行時に行い、整数はdouble要素へ暗黙変換します。
 
 ```D
 auto arrayCopy = [...values, 40];
@@ -226,7 +265,7 @@ string[int] identity(string[int] value) { return value; }
 | `any` | 任意の種類の値 |
 | `void` | 値を返さない関数の注釈。実行時の対応値は `null` |
 
-型付き宣言の数値型は値の種類を区別します。`double rate = 1.0;` または `double rate = cast(double) 1;` と記述してください。整数リテラル `1` が型注釈だけで自動的に double に変換されるわけではありません。配列・table・function の種類を確認して受け取る明示キャストは、後述の `cast(array)` などを使います。
+型付き宣言では、整数から浮動小数点数へ暗黙変換します。`double rate = 1;` はdoubleの値になります。`int | double` のように整数へ直接一致する型では整数を保持し、ref引数の型違いはエラーです。配列・table・function の種類を確認して受け取る明示キャストは、後述の `cast(array)` などを使います。
 
 ```D
 struct Vec2 {
@@ -274,7 +313,7 @@ if (hero is Named) {
   `alias Items = Fruit[] | string[];` は配列全体がどれかの分岐に合えば受理します。
   最初に一致した分岐へ固定せず、`Items values = ["Apple"]; values[0] = "Banana";` も可能です。
   `Fruit[] | int[]` の文字列と整数が混在する配列は拒否します。入れ子・共有配列の要素変更も全体で検査し、
-  不適合な書込みは元の値を保持します。slice・連結は独立した外配列ですが、共有する内配列には両方の制約が残ります。
+  不適合な書込みは元の値を保持します。スライスは元配列の要素領域と検査を共有します。連結は独立した外配列ですが、共有する内配列には両方の制約が残ります。
   親の要素を置き換えて内配列を切り離しても、その内配列自身の候補型とslice・連結先の制約は維持します。
   `T rest...` の残り引数はそれぞれ `T` として検査し、関数内では `T[]` として扱います。
   連想配列を含むUnionは従来どおり連想配列の型情報を照合します。例えば `Fruit[string] | null` へ渡す
@@ -313,7 +352,7 @@ auto count = cast(Count) value;         // 3
 - `array` / `table` / `function` は対応する種類の値を受け付けます。`any` は任意の値を受け付けます。参照型の共有とstructのコピー規則は通常の代入と同じです。
 - 変換できない値や不正な数値文字列は、キャスト位置付きの実行時エラーになります。
 
-Union / Optional、名前付き型、delegate 型、コンテナの検査は両構文で共通です。コンテナ要素を個別に数値変換したり、メモリを再解釈したりはしません。delegate 型は現在、関数値であることだけを検査します。
+Union / Optional、名前付き型、delegate 型、コンテナの検査は両構文で共通です。コンテナ要素は型注釈と同じ準備処理を通り、整数から浮動小数点数へは変換します。逆向きの暗黙変換やメモリの再解釈はしません。delegate 型は現在、関数値であることだけを検査します。
 
 D との互換範囲: Dua の整数の保存形式は符号付き64ビットのままで、`int` / `long` はともに64ビットです。`ulong` の結果も `long.max` を超えるとエラーです。浮動小数点値は double で保存し、`cast(float)` は一度 float 精度に丸めます。`real` は double と同じ扱いです。通常の `cast` による範囲外の浮動小数点数から整数への変換結果は保証しません。ポインタ、型修飾子の変更、`opCast`、D のクラスダウンキャストは追加していません。
 
@@ -417,7 +456,7 @@ try {
 | `value` | `error(value)` の元の値。通常の実行時失敗は `null` |
 | `stack` | 関数呼び出しスタックの配列 |
 
-`return` / `break` / `continue` / `yield` は捕捉しません。ステップ数・呼び出し深度の超過も安全制御を迂回できないよう捕捉しません。`finally` と try 式はありません。
+`return` / `break` / `continue` / `yield` は捕捉しません。ステップ数・呼び出し深度の超過も安全制御を迂回できないよう捕捉しません。`finally` による後始末に対応します。try 式はありません。
 
 `pcall(function, args...)` は `[成功bool, 値またはメッセージ]`、`xpcall(function, handler, args...)` は失敗メッセージを handler で変換した同形式の配列を返します。配列の分配代入と組み合わせられます。
 
@@ -436,6 +475,9 @@ auto state = coroutine.status(co); # "dead"
 - `yield expr;` は実行を中断して値を返します。コルーチン外では使えません。
 - `coroutine.create(fn)`、`resume(co, ...)`、`status(co)`、`running()`、`isyieldable()`、`wrap(fn)` を提供します。
 - `resume` は `[成功bool, 値]` 形式です。`wrap` は成功フラグを外し、失敗時にエラーにします。
+- 普通のDua関数の入れ子呼出しもheap上の実行フレームで中断し、コルーチンごとのD Fiberは生成しません。
+- 同期Dコールバック（map/filter/pcall等）の内部を跨ぐyieldは実行時エラーです。Duaのtry/catchは中断できます。
+- 詳細な対応範囲、終了処理、比較計測は[軽量コルーチン](stackless-coroutines-ja.md)を参照してください。
 
 ## 11. モジュール
 
@@ -586,4 +628,11 @@ auto hp = saved();          // player の hp
 
 ## 13. 現在提供しないもの
 
-Dua は組み込み用途を優先します。クラス構文、`async` / `await`、`finally`、try 式、旧 `let` / `fn` 構文は提供しません。OS やライブラリの大きな機能は D 側で実装し、必要最小限だけをバインドしてください。
+Dua は組み込み用途を優先します。クラス構文、`async` / `await`、try 式、旧 `let` / `fn` 構文は提供しません。OS やライブラリの大きな機能は D 側で実装し、必要最小限だけをバインドしてください。
+
+
+## 言語・標準ライブラリの追加（2026-11-06）
+
+`json.decode`、`string.split/join`、安定した非破壊の `sorted`、`reduce`、`utf8.chars`、`??`、`?.`、Dua関数の名前付き引数、変数へのref引数、`try/finally` を追加しました。整数はdoubleを要求する初期化・再代入・通常引数・戻り値・コンテナ要素で暗黙変換します。Unionは直接一致を優先し、`is double` は整数に対してfalseのままです。refの型は厳密一致します。
+
+ZsDの汎用的な数学・乱数・書式化関数をDua標準へ移しました。構文例、互換性、精度、制限と移行対象は[追加仕様](language-additions-2026-11-06-ja.md)を参照してください。

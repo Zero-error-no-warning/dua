@@ -1,177 +1,174 @@
 module dua.coroutine;
 
-/**
- * Internal coroutine lifecycle and Fiber integration for ScriptEngine.
- *
- * The owning runtime supplies function invocation and global registration.  The
- * evaluator crosses this boundary only through `yieldFromScript`.
- */
 import dua.binding : NativeCallable;
 import dua.value;
-import dua.evaluator : ModuleContext;
-import core.thread : Fiber;
+import dua.ast : AstNode;
+import dua.evaluator : ModuleContext, EvaluatorContext;
+import dua.execution;
+import dua.coroutineExecution : CoroutineFrame;
 import std.exception : enforce;
+import std.format : format;
+import core.thread : Fiber;
 
-package final class CoroutineState
-{
+package(dua) CoroutineState executingCoroutine;
+package(dua) void* executingHostFiber;
+package(dua) bool inStacklessExecution(){
+    return executingCoroutine !is null&&executingHostFiber==cast(void*)Fiber.getThis();
+}
+
+// 各実行の続きはheap上に保存し、ネイティブスタックは所有しません。
+package final class CoroutineState {
     ModuleContext context;
+    EvaluatorContext evaluation;
     Value entryFunction;
-    Fiber fiber;
-    Value[] pendingArgs;
-    Value[] yieldedValues;
-    Value[] returnValues;
-    bool started;
-    bool dead;
-    bool failed;
+    Value[] pendingArgs, yieldedValues, returnValues;
+    bool started, dead, failed, running, suspended, abandoned;
+    size_t nativeDepth;
     string errorMessage;
     Exception failure;
-    string sourceName;
-    string sourceText;
-    bool hasSourceText;
-    string moduleName;
+    AstNode node;
+    string role;
+    private CoroutineFrame[] frames;
+    private size_t frameCount;
+    void push(CoroutineFrame frame){
+        if(frameCount==frames.length)frames.length=frameCount==0?8:frameCount*2;
+        frames[frameCount++]=frame;
+    }
+    CoroutineFrame pop(){
+        assert(frameCount>0);
+        auto frame=frames[--frameCount];frames[frameCount]=CoroutineFrame.init;return frame;
+    }
+    bool hasFrames(){return frameCount!=0;}
+    void releaseExecution(){
+        frames=null;frameCount=0;entryFunction=Value.init;pendingArgs=null;
+        node=null;role=null;evaluation=EvaluatorContext.init;
+    }
 }
 
-package Fiber createFiber(void delegate() body)
-{
-    return new Fiber(body, 1024 * 1024);
-}
-
-package bool fiberIsSuspended(CoroutineState state)
-{
-    return state.fiber.state == Fiber.State.HOLD;
-}
-
-package void suspendFiber()
-{
-    Fiber.yield();
-}
-
-package mixin template CoroutineImplementation()
-{
-    private size_t nextCoroutineId = 1;
+package mixin template CoroutineImplementation() {
+    private size_t nextCoroutineId=1;
     private CoroutineState[size_t] coroutines;
+    private CallableValue coroutineYieldable;
+    private EvaluatorContext* stacklessContext;
+    private void* stacklessHostFiber;
     private CoroutineState activeCoroutine(){return cast(CoroutineState)evaluatorContext.activeCoroutine;}
-    private void activeCoroutine(CoroutineState state){evaluatorContext.activeCoroutine=state;}
-
-    private Value createCoroutine(Value functionValue)
-    {
-        enforce(functionValue.kind == ValueKind.function_, "coroutine.create(callback) expects function");
-        auto state = new CoroutineState();
-        state.context=currentModuleContext();
-        state.entryFunction = functionValue;
-
-        state.fiber = createFiber({
-            activeCoroutine = state;
-            scope (exit) activeCoroutine = null;
-            try
-            {
-                auto result = invokeFunctionValue(state.entryFunction, state.pendingArgs.dup);
-                state.returnValues = [result];
+    package(dua) Value createCoroutine(Value fn){
+        enforce(fn.kind==ValueKind.function_,"coroutine.create(callback) expects function");
+        auto state=new CoroutineState;
+        state.context=currentModuleContext();state.entryFunction=fn;
+        state.evaluation.moduleContext=state.context;
+        state.evaluation.activeCoroutine=state;
+        auto id=nextCoroutineId++;coroutines[id]=state;return coroutineHandle(id);
+    }
+    private Value coroutineHandle(size_t id){
+        auto handle=Value.from(cast(Value[string])null);handle.setCoroutineId(id);return handle;
+    }
+    package(dua) CoroutineState requireCoroutineState(Value handle){
+        enforce(handle.kind==ValueKind.table,"Coroutine handle must be a table");
+        size_t id;enforce(handle.getCoroutineId(id),"Invalid coroutine handle");
+        auto state=id in coroutines;enforce(state !is null,"Unknown coroutine handle");return *state;
+    }
+    private void closeCoroutines(ModuleContext ended){
+        foreach(state;coroutines){
+            if(state.context !is null&&state.context.belongsTo(ended)&&!state.running){
+                state.dead=true;state.failed=true;state.errorMessage="Module context is closed";
+                state.releaseExecution();
             }
-            catch (Exception error)
-            {
-                state.failed = true;
-                state.errorMessage = error.msg;
-                state.failure = error;
+        }
+    }
+    // Scene.exit用。実行中の自己exitは次のyield/returnまで進み、その後だけを破棄します。
+    package(dua) void discardCoroutine(Value handle){
+        auto state=requireCoroutineState(handle);state.abandoned=true;
+        if(!state.running){
+            state.dead=true;state.releaseExecution();state.context=null;
+            size_t id;handle.getCoroutineId(id);coroutines.remove(id);
+        }
+    }
+    package(dua) Value resumeCoroutine(Value handle,Value[] args){
+        auto state=requireCoroutineState(handle);
+        if(state.running)return Value.from([Value.from(false),Value.from("cannot resume running coroutine")]);
+        if(state.context !is null&&!state.context.alive){
+            state.dead=true;state.failed=true;state.errorMessage="Module context is closed";state.releaseExecution();
+        }
+        if(state.dead)return Value.from([Value.from(false),Value.from(state.failed?state.errorMessage:"cannot resume dead coroutine")]);
+        auto previous=stacklessContext;auto previousFiber=stacklessHostFiber;
+        auto previousExecution=executingCoroutine;auto previousExecutionFiber=executingHostFiber;
+        auto options=evaluatorContext.currentRunOptions;
+        stacklessContext=&state.evaluation;stacklessHostFiber=cast(void*)Fiber.getThis();
+        executingCoroutine=state;executingHostFiber=stacklessHostFiber;
+        state.evaluation.currentRunOptions=options;state.evaluation.executedSteps=0;
+        state.evaluation.lastErrorStack=null;
+        state.running=true;state.suspended=false;state.pendingArgs=args.dup;state.yieldedValues=null;
+        scope(exit){
+            state.running=false;stacklessContext=previous;stacklessHostFiber=previousFiber;
+            executingCoroutine=previousExecution;executingHostFiber=previousExecutionFiber;
+            if(state.abandoned){
+                state.dead=true;state.releaseExecution();state.context=null;
+                size_t id;handle.getCoroutineId(id);coroutines.remove(id);
             }
-            state.dead = true;
-        });
-
-        auto id = nextCoroutineId++;
-        coroutines[id] = state;
-        return coroutineHandle(id);
-    }
-
-    private Value coroutineHandle(size_t id)
-    {
-        auto handle = Value.from(cast(Value[string]) null);
-        handle.setCoroutineId(id);
-        return handle;
-    }
-
-    private CoroutineState requireCoroutineState(Value handle)
-    {
-        enforce(handle.kind == ValueKind.table, "Coroutine handle must be a table");
-        size_t id;
-        enforce(handle.getCoroutineId(id), "Invalid coroutine handle");
-        auto state = id in coroutines;
-        enforce(state !is null, "Unknown coroutine handle");
-        return *state;
-    }
-
-    private Value resumeCoroutine(Value handle, Value[] args)
-    {
-        auto state = requireCoroutineState(handle);
-        if(state.context !is null && !state.context.alive){state.dead=true;return Value.from([Value.from(false),Value.from("Module context is closed")]);}
-        if (state.dead)
-        {
-            auto message = state.failed && state.errorMessage.length > 0
-                ? state.errorMessage : "cannot resume dead coroutine";
-            return Value.from([Value.from(false), Value.from(message)]);
         }
-
-        state.pendingArgs = args.dup;
-        state.yieldedValues.length = 0;
-        state.started = true;
-        auto previousSource = evaluatorContext.sourceName;
-        auto previousText = evaluatorContext.sourceText;
-        auto previousHasText = evaluatorContext.hasSourceText;
-        auto previousModule = evaluatorContext.moduleName;
-        evaluatorContext.sourceName = state.sourceName;
-        evaluatorContext.sourceText = state.sourceText;
-        evaluatorContext.hasSourceText = state.hasSourceText;
-        evaluatorContext.moduleName = state.moduleName;
-        scope (exit)
-        {
-            state.sourceName = evaluatorContext.sourceName;
-            state.sourceText = evaluatorContext.sourceText;
-            state.hasSourceText = evaluatorContext.hasSourceText;
-            state.moduleName = evaluatorContext.moduleName;
-            evaluatorContext.sourceName = previousSource;
-            evaluatorContext.sourceText = previousText;
-            evaluatorContext.hasSourceText = previousHasText;
-            evaluatorContext.moduleName = previousModule;
+        if(!state.started){
+            state.started=true;
+            coInvokeCallable(state,state.entryFunction,state.pendingArgs.dup,(Value result){state.returnValues=[result];});
         }
-        state.fiber.call();
-        if(state.dead)fiberEvaluatorContexts.remove(cast(void*)state.fiber);
-
-        if (state.failed)
-        {
-            state.dead = true;
-            return Value.from([Value.from(false), Value.from(state.errorMessage)]);
+        while(state.hasFrames()&&!state.suspended){
+            auto frame=state.pop();state.node=frame.node;state.role=frame.role;
+            try frame.advance();
+            catch(Exception error){
+                auto node=state.node;
+                error=withSourceContext(error,evaluatorContext.sourceName,node is null?"":format("%s:%s",node.line,node.column),state.role.length?state.role:"coroutine",
+                    node is null?0:node.line,node is null?0:node.column);
+                evaluatorContext.lastErrorStack=evaluatorContext.callStack.snapshot();
+                bool caught;
+                while(state.hasFrames()){
+                    auto pending=state.pop();
+                    if(pending.unwind !is null)
+                    {
+                        auto previousUnwinding = evaluatorContext.unwindingException;
+                        evaluatorContext.unwindingException = error;
+                        try pending.unwind();
+                        catch (Exception cleanup)
+                        {
+                            if (cast(ExecutionLimitException) error is null)
+                            {
+                                if (cleanup !is error) cleanup.next = error;
+                                error = cleanup;
+                            }
+                        }
+                        finally evaluatorContext.unwindingException = previousUnwinding;
+                    }
+                    if(pending.rescue !is null&&cast(ExecutionLimitException)error is null){
+                        // catch本体の開始も次の実行フレームへ戻し、そこでの例外を
+                        // 外側のtryで捕捉できるようにします。
+                        auto rescue=pending.rescue;auto caughtError=error;
+                        coPush(state,(){rescue(caughtError);});caught=true;break;
+                    }
+                }
+                if(!caught){state.failed=true;state.failure=error;state.errorMessage=error.msg;state.dead=true;break;}
+            }
         }
-        Value[] values = [Value.from(true)];
-        values ~= state.dead ? state.returnValues : state.yieldedValues;
-        return Value.from(values);
+        if(!state.hasFrames())state.dead=true;
+        if(state.dead)state.releaseExecution();
+        if(state.failed)return Value.from([Value.from(false),Value.from(state.errorMessage)]);
+        return Value.from([Value.from(true)]~(state.dead?state.returnValues:state.yieldedValues));
     }
-
-    private Value coroutineStatus(Value handle)
-    {
-        auto state = requireCoroutineState(handle);
-        if (state.dead) return Value.from("dead");
-        if (!state.started) return Value.from("suspended");
-        return Value.from(fiberIsSuspended(state) ? "suspended" : "running");
+    private Value coroutineStatus(Value handle){
+        auto state=requireCoroutineState(handle);
+        // 既存の公開status文字列とresumeの成功boolを保持します。
+        return Value.from(state.dead?"dead":state.running?"running":"suspended");
     }
-
-    private Value currentCoroutineHandle()
-    {
-        if (activeCoroutine is null) return Value.nullValue();
-        foreach (id, state; coroutines)
-            if (state is activeCoroutine) return coroutineHandle(id);
+    private Value currentCoroutineHandle(){
+        if(activeCoroutine is null)return Value.nullValue();
+        foreach(id,state;coroutines)if(state is activeCoroutine)return coroutineHandle(id);
         return Value.nullValue();
     }
-
-    // The sole evaluator-facing coroutine hook: publish values, suspend, and
-    // translate the next resume arguments back to the script's yield expression.
-    private Value yieldFromScript(Value[] values)
-    {
-        enforce(activeCoroutine !is null, "yield can only be used inside a running coroutine");
-        activeCoroutine.yieldedValues = values;
-        suspendFiber();
-        return activeCoroutine.pendingArgs.length > 0
-            ? activeCoroutine.pendingArgs[0] : Value.nullValue();
+    private Value yieldFromScript(Value[] values){
+        enforce(evaluatorContext.finallyDepth == 0, "Cannot yield during finally cleanup");
+        enforce(activeCoroutine !is null,"yield can only be used inside a running coroutine");
+        // 同期DコールバックのDスタックを暗黙に中断・再実行してはいけません。
+        enforce(false,"Cannot yield across a synchronous native callback boundary");
+        assert(0);
     }
-
     private void installCoroutineLibrary()
     {
         Value[string] library;
@@ -195,8 +192,10 @@ package mixin template CoroutineImplementation()
         }));
         library["isyieldable"] = Value.fromFunction(new NativeCallable("coroutine.isyieldable", (scope const(Value)[] args) {
             enforce(args.length == 0, "coroutine.isyieldable() takes no arguments");
-            return Value.from(activeCoroutine !is null);
+            // 同期Dからの再入では中断できません。直接のDua呼出しはcoInvokeが扱います。
+            return Value.from(false);
         }));
+        coroutineYieldable=library["isyieldable"].functionValue;
         library["wrap"] = Value.fromFunction(new NativeCallable("coroutine.wrap", (scope const(Value)[] args) {
             enforce(args.length == 1, "coroutine.wrap(callback) expects one argument");
             auto handle = createCoroutine(cast(Value) args[0]);
@@ -219,4 +218,5 @@ package mixin template CoroutineImplementation()
         }));
         globals.define("coroutine", Value.from(library));
     }
+
 }

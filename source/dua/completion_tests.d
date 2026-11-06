@@ -95,3 +95,50 @@ unittest
     assert(data["symbols"]["Host.maxCount"]["signatures"].array.length == 1);
     assert(calls == 0);
 }
+
+
+unittest
+{
+    import std.exception : assertThrown;
+    auto engine = new ScriptEngine;
+    engine.enableCompletionMetadata(true);
+    engine.bindFunc("original", (long input) => input + 1);
+    auto before = engine.completionRegistry.toJson().toString();
+    assertThrown!Exception(engine.bindAuto("original", 42));
+    assert(engine.completionRegistry.toJson().toString() == before);
+    assertThrown!Exception(engine.bindFunc("original", (string text) => text));
+    assert(engine.completionRegistry.toJson().toString() == before);
+    assert(engine.run("return original(4);").toInt() == 5);
+
+    auto moduleHandle = engine.newModule("catalog");
+    moduleHandle.bindFunc("operation", (long input) => input);
+    before = engine.completionRegistry.toJson().toString();
+    assertThrown!Exception(moduleHandle.bindFunc("operation", (string text) => text));
+    assert(engine.completionRegistry.toJson().toString() == before);
+
+    // Registry updates remove both staged signatures and obsolete descendants.
+    engine.completionRegistry.value("original", Value.from(3));
+    auto entry = engine.completionRegistry.toJson()["symbols"]["original"];
+    assert(entry["kind"].str == "variable" && "signatures" !in entry.object);
+    engine.completionRegistry.value("catalog", Value.from(3));
+    assert("catalog.operation" !in engine.completionRegistry.toJson()["symbols"].object);
+}
+
+
+unittest
+{
+    auto engine = new ScriptEngine;
+    engine.enableCompletionMetadata(true);
+    engine.bindFunc!loadFixture("factory");
+    auto before = engine.completionRegistry.toJson().toString();
+    auto snapshot = engine.completionRegistry.toJson();
+    snapshot["symbols"]["factory"]["kind"] = JSONValue("corrupted");
+    snapshot["symbols"]["factory"]["signatures"].array[0]["parameters"].array[0]["type"] = JSONValue("wrong");
+    snapshot["types"]["HostFixture"]["members"]["count"]["kind"] = JSONValue("wrong");
+    snapshot["types"].object.remove("HostFixture");
+    assert(engine.completionRegistry.toJson().toString() == before);
+    auto stable = engine.completionRegistry.toJson();
+    engine.bindAuto("later", 42);
+    assert("later" !in stable["symbols"].object);
+    assert("later" in engine.completionRegistry.toJson()["symbols"].object);
+}

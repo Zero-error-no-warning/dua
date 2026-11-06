@@ -64,14 +64,25 @@ function createContext(catalog, documentPath) {
   for (const name of names) if (!name.includes('.')) initial.set(name, { ...symbols[name], symbol: name });
   const directories = [...new Set(contexts.map(c => path.resolve(root, c.assetDirectory || '.')))];
   const moduleDirectories = [...new Set(contexts.map(c => path.resolve(root, c.moduleDirectory || c.assetDirectory || '.')))];
-  const context = { catalog: effective, assets, initial, directories, moduleDirectories, shared: contexts.length > 1 };
+  const projectContexts = (catalog.projectContexts || []).filter(c => c?.sourceBoundary
+    && typeof c.sourceBoundary.root === 'string' && inside(path.resolve(root,c.sourceBoundary.root),documentPath));
+  // 複数カタログでは最も内側の明示projectを選び、親projectの探索規則を継承しません。
+  projectContexts.sort((a,b) => path.resolve(root,b.sourceBoundary.root).length - path.resolve(root,a.sourceBoundary.root).length);
+  const project = projectContexts[0];
+  if (project && (!Array.isArray(project.sources) || !project.sources.length || !project.sources.every(s => validSource(root,s))))
+    throw new Error('Project completion context is stale; regenerate the catalog from the project.');
+  const sourceBoundary = project ? {...project.sourceBoundary, root:path.resolve(root,project.sourceBoundary.root)} : undefined;
+  const context = { catalog: effective, assets, initial,
+    directories: project ? [path.resolve(root,project.assetDirectory)] : directories,
+    moduleDirectories: project ? [path.resolve(root,project.moduleDirectory)] : moduleDirectories,
+    sourceBoundary, shared: contexts.length > 1 };
   context.resolveCall = (value, args) => {
     const loader = (catalog.assetLoaders || []).find(l => l && typeof l.returnType === 'string' && l.function === value?.symbol
       && (Array.isArray(l.pathArguments) || Number.isInteger(l.pathArgument)));
     if (!loader) return null;
     const literal = (loader.pathArguments || [loader.pathArgument]).map(index => literalPath(args[index] || [], loader.pathWrappers))
       .find(item => typeof item.value === 'string') || {};
-    const dirs = literal.wrapped && directories.length ? directories : [root];
+    const dirs = literal.wrapped && context.directories.length ? context.directories : [root];
     return { types: [loader.returnType],
       assets: typeof literal.value === 'string' ? dirs.map(dir => key(path.resolve(dir, literal.value))) : null,
       uncertain: literal.wrapped && dirs.length > 1 };

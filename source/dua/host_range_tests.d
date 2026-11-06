@@ -49,8 +49,8 @@ unittest {
             int[] a=filtered(); auto b=a[0..$]; b[0]=99;
             int total=0; foreach(i,v;a) total+=i+v;
             auto m=mapped(); auto z=emptyRange();
-            return a.length==2 && a[0]==2 && a[$-1]==4 && b[0]==99
-                && total==7 && m.length==3 && m[2]==9 && z.length==0;
+            return a.length==2 && a[0]==99 && a[$-1]==4 && b[0]==99
+                && total==104 && m.length==3 && m[2]==9 && z.length==0;
         },options);
         assert(outcome.ok,outcome.errorMessage);assert(outcome.value.truthy());
         assert(predicates==5,"filter predicate was evaluated more than once");

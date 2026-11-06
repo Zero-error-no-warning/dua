@@ -3,6 +3,7 @@ module vscode_check;
 import dua;
 import dua.module_analysis;
 import std.array : join;
+import std.exception : enforce;
 import std.json : JSONValue, JSONType, parseJSON;
 import std.stdio : stdin, writeln;
 import std.string : stripLeft;
@@ -11,8 +12,32 @@ private JSONValue text(string value) { return JSONValue(value); }
 private JSONValue position(size_t value) { return JSONValue(cast(ulong)value); }
 private string field(JSONValue value, string name, string fallback = "")
 {
+    enforce(value.type == JSONType.object, "Expected an object containing field '" ~ name ~ "'");
     auto found = name in value.object;
-    return found !is null && found.type == JSONType.string ? found.str : fallback;
+    if (found is null) return fallback;
+    enforce(found.type == JSONType.string, "Field '" ~ name ~ "' must be a string");
+    return found.str;
+}
+private JSONValue[] arrayItems(JSONValue value, string name)
+{
+    enforce(value.type == JSONType.array, "Field '" ~ name ~ "' must be an array");
+    return value.array;
+}
+private string[] stringItems(JSONValue value, string name)
+{
+    string[] result;
+    foreach (item; arrayItems(value, name))
+    {
+        enforce(item.type == JSONType.string, "Field '" ~ name ~ "' must contain strings");
+        result ~= item.str;
+    }
+    return result;
+}
+private bool booleanValue(JSONValue value, string name)
+{
+    enforce(value.type == JSONType.true_ || value.type == JSONType.false_,
+        "Field '" ~ name ~ "' must be a boolean");
+    return value.boolean;
 }
 private JSONValue strings(string[] values)
 {
@@ -34,6 +59,7 @@ private JSONValue describeExport(ModuleExportInfo value)
         "fields": JSONValue(fields), "defaultFields": strings(value.defaultFields), "fieldOrder": strings(value.fieldOrder),
         "alternatives": strings(value.alternatives), "parameterTypes": strings(value.parameterTypes),
         "parameterLazy": JSONValue(lazyParameters),
+        "parameterNames": strings(value.parameterNames),
         "variadic": JSONValue(value.variadic),
         "requiredParameterCount": value.requiredParameterCount==size_t.max ? JSONValue(null) : position(value.requiredParameterCount),
         "nominalValue": JSONValue(value.nominalValue),
@@ -56,9 +82,10 @@ void main()
         catch (Exception) {}
     auto engine = new ScriptEngine;
     JSONValue[] diagnostics, modules, imports, exports, completions;
+    string sourceName;
     try
     {
-        string sourceName;
+        ModuleContext context;
         string[] hostClassTypes;
         string[string] overlays;
         if (structured)
@@ -67,38 +94,47 @@ void main()
             sourceName = field(request, "sourceName");
             if (auto paths = "modulePaths" in request.object)
             {
-                string[] values;
-                foreach (path; paths.array) values ~= path.str;
-                engine.setModulePaths(values);
+                engine.setModulePaths(stringItems(*paths, "modulePaths"));
             }
             if (auto types = "hostClassTypes" in request.object)
-                foreach (type; types.array) hostClassTypes ~= type.str;
+                hostClassTypes = stringItems(*types, "hostClassTypes");
             if (auto hosts = "hostModules" in request.object)
-                foreach (host; hosts.array)
+                foreach (host; arrayItems(*hosts, "hostModules"))
                 {
+                    enforce(host.type == JSONType.object, "Field 'hostModules' must contain objects");
                     ModuleExportInfo[] members;
                     if (auto values = "exports" in host.object)
-                        foreach (value; values.array)
+                        foreach (value; arrayItems(*values, "exports"))
                         {
                             ModuleExportInfo info;
                             info.name = field(value, "name"); info.kind = field(value, "kind", "variable");
                             info.type = field(value, "type", "any");
                             info.runtimeValue = info.kind == "type";
-                            if (auto runtimeValue = "runtimeValue" in value.object) info.runtimeValue = runtimeValue.boolean;
-                            if (auto variadic = "variadic" in value.object) info.variadic = variadic.boolean;
+                            if (auto runtimeValue = "runtimeValue" in value.object) info.runtimeValue = booleanValue(*runtimeValue, "runtimeValue");
+                            if (auto variadic = "variadic" in value.object) info.variadic = booleanValue(*variadic, "variadic");
                             if (auto parameters = "parameterTypes" in value.object)
-                                foreach (parameter; parameters.array) info.parameterTypes ~= parameter.str;
+                                info.parameterTypes = stringItems(*parameters, "parameterTypes");
                             if (auto parameters = "parameterLazy" in value.object)
-                                foreach (parameter; parameters.array) info.parameterLazy ~= parameter.boolean;
+                                foreach (parameter; arrayItems(*parameters, "parameterLazy")) info.parameterLazy ~= booleanValue(parameter, "parameterLazy");
                             members ~= info;
                         }
                     auto complete = "exportsComplete" in host.object;
-                    engine.declareAnalysisModule(field(host, "name"), members, complete !is null && complete.boolean);
+                    engine.declareAnalysisModule(field(host, "name"), members, complete !is null && booleanValue(*complete, "exportsComplete"));
                 }
             if (auto values = "overlays" in request.object)
-                foreach (overlay; values.array) overlays[field(overlay, "sourceName")] = field(overlay, "source");
+                foreach (overlay; arrayItems(*values, "overlays")) overlays[field(overlay, "sourceName")] = field(overlay, "source");
         }
-        auto analysis = engine.analyzeModule(source, sourceName, hostClassTypes, overlays);
+        if(structured)if(auto boundary = "sourceBoundary" in request.object){
+            import dua.module_resolver : validateModuleSourceBoundary;
+            auto root = field(*boundary, "root");
+            auto marker = field(*boundary, "markerExtension");
+            import std.path : isAbsolute;
+            import std.exception : enforce;
+            enforce(isAbsolute(root), "Source boundary root must be absolute");
+            context=engine.createModuleContext();
+            context.validateSource=(string path){validateModuleSourceBoundary(root,path,marker);};
+        }
+        auto analysis = engine.analyzeModule(source, sourceName, hostClassTypes, overlays, context);
         foreach (diagnostic; analysis.diagnostics)
             diagnostics ~= JSONValue([
                 "line": position(diagnostic.line), "column": position(diagnostic.column),
@@ -131,7 +167,7 @@ void main()
             if (unit is analysis.root) { imports = unitImports; exports = unitExports; }
         }
         if (structured && ("importPathPrefix" in request.object) !is null)
-            foreach (candidate; engine.importPathCompletions(field(request, "importPathPrefix"), sourceName, overlays))
+            foreach (candidate; engine.importPathCompletions(field(request, "importPathPrefix"), sourceName, overlays, context))
                 completions ~= JSONValue([
                     "label": text(candidate.label), "sourceName": text(candidate.sourceName),
                     "key": text(candidate.key), "directory": JSONValue(candidate.directory)]);
@@ -139,7 +175,7 @@ void main()
     catch (Exception error)
     {
         diagnostics ~= JSONValue(["line": position(0), "column": position(0), "message": text(error.msg),
-            "sourceName": text(structured ? field(request, "sourceName") : ""), "sourceText": text(source)]);
+            "sourceName": text(sourceName), "sourceText": text(source)]);
     }
     writeln(JSONValue([
         "schemaVersion": JSONValue(1), "diagnostics": JSONValue(diagnostics), "modules": JSONValue(modules),

@@ -353,3 +353,26 @@ unittest
     assert(checked>=3);
 }
 
+
+unittest {
+    import std.file : tempDir,mkdirRecurse,rmdirRecurse,write;
+    import std.path : buildPath;
+    import std.uuid : randomUUID;
+    import dua.module_resolver : validateModuleSourceBoundary;
+    auto root=buildPath(tempDir,"dua-analysis-boundary-"~randomUUID().toString);
+    auto a=buildPath(root,"a"),b=buildPath(root,"b");mkdirRecurse(a);mkdirRecurse(b);scope(exit)rmdirRecurse(root);
+    write(buildPath(a,"value.dua"),"export int answer=1;");write(buildPath(b,"value.dua"),"export int answer=2;");
+    auto engine=new ScriptEngine;
+    auto allowed=engine.createModuleContext([buildPath(b,"?.dua")]);
+    assert(engine.analyzeModule("import value;",buildPath(b,"main.dua"),null,null,allowed).diagnostics.length==0);
+    engine.loadModule("value",allowed);
+    auto guarded=engine.createModuleContext([buildPath(b,"?.dua")]);
+    guarded.validateSource=(string path){validateModuleSourceBoundary(a,path,".zproject");};
+    assert(engine.analyzeModule("import value;",buildPath(a,"main.dua"),null,null,guarded).diagnostics.length>0);
+    auto child=engine.createModuleContext(null,guarded);
+    assert(engine.analyzeModule("import value;",buildPath(a,"main.dua"),null,null,child).diagnostics.length>0);
+    assert(engine.importPathCompletions("../b/",buildPath(a,"main.dua"),null,guarded).length==0);
+    assert(engine.analyzeModule("import value;",buildPath(b,"main.dua"),null,null,allowed).diagnostics.length==0);
+    auto own=engine.createModuleContext([buildPath(a,"?.dua")]);own.validateSource=guarded.validateSource;
+    assert(engine.analyzeModule("import value;",buildPath(a,"main.dua"),null,null,own).diagnostics.length==0);
+}

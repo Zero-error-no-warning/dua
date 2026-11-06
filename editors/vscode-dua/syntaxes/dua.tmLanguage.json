@@ -100,7 +100,7 @@
       "patterns": [
         {
           "name": "keyword.control.dua",
-          "match": "\\b(?:try|catch|return|if|else|while|for|foreach|switch|case|default|break|continue|yield|import|export|as|with)\\b"
+          "match": "\\b(?:try|catch|return|if|else|while|for|foreach|foreach_reverse|switch|case|default|break|continue|yield|import|export|as|with)\\b"
         },
         {
           "name": "storage.type.dua",

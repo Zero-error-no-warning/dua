@@ -1,5 +1,6 @@
 module dua.value;
 import dua.attributes;
+version(DuaValueProfile) import dua.valueProfile;
 
 import std.algorithm : map;
 import std.array : array;
@@ -10,6 +11,7 @@ import std.string : indexOf, join;
 import std.meta : AliasSeq, staticIndexOf, staticMap;
 import std.traits : ParameterStorageClassTuple, ParameterStorageClass, BaseClassesTuple, FieldNameTuple, ForeachType, fullyQualifiedName, hasUDA, KeyType, OriginalType, ParameterDefaults, Parameters, ReturnType, Unqual, ValueType, Variadic, isAggregateType, isAssociativeArray, isCallable, isDelegate, isDynamicArray, isFloatingPoint, isIntegral, isInstanceOf, isSomeString, isStaticArray, variadicFunctionStyle;
 import std.typecons : Tuple;
+import std.sumtype : SumType;
 import std.range.primitives : isForwardRange, isInfinite, hasLength;
 import std.math : isFinite;
 import dua.type_syntax;
@@ -34,10 +36,11 @@ abstract class CallableValue
 
     /// 呼出し式はこのマスクを参照し、必要な引数だけを遅延します。
     bool lazyParameter(size_t index) const { return false; }
+    bool refParameter(size_t index) const { return false; }
     string resultType() const { return ""; }
 
     Value[] prepareArguments(Value[] args) {
-        foreach(index,ref arg;args) if(!lazyParameter(index)) arg=forceArgument(arg);
+        foreach(index,ref arg;args) if(!lazyParameter(index) && !refParameter(index)) arg=forceArgument(arg);
         return args;
     }
 
@@ -378,8 +381,10 @@ private final class ClassReceiverCallable : CallableValue
     {
         return target.invokeOn(receiver, args, caller);
     }
+    override bool acceptsArity(size_t count) const { return target.acceptsArity(count); }
     override Value[] prepareArguments(Value[] args) { return target.prepareArguments(args); }
     override bool lazyParameter(size_t index) const { return target.lazyParameter(index); }
+    override bool refParameter(size_t index) const { return target.refParameter(index); }
     override string resultType() const { return target.resultType(); }
     override size_t expectedArity() const { return target.expectedArity(); }
     override size_t minimumArity() const { return target.minimumArity(); }
@@ -506,10 +511,128 @@ private struct ReflectedMemberBinding
     Value setter;
 }
 
+// 新しく変換したfield snapshotは、再反射に観測可能な処理がなければそのまま所有できます。
+// nativeのコピー/代入/破棄、alias getter、独自range、Valueのcopierは従来の順序を保ちます。
+private template reusableHostSnapshot(T, Seen...)
+{
+    import std.traits : hasElaborateCopyConstructor, hasElaborateAssign, hasElaborateDestructor;
+    alias U = Unqual!T;
+    static if (is(U == Value)) enum reusableHostSnapshot = false;
+    else static if (isSomeString!U || is(U == class)) enum reusableHostSnapshot = true;
+    else static if (isAssociativeArray!U) enum reusableHostSnapshot = false;
+    else static if (isDynamicArray!U || isStaticArray!U)
+        enum reusableHostSnapshot = reusableHostSnapshot!(ForeachType!U, Seen);
+    else static if (is(U == struct))
+    {
+        static if (staticIndexOf!(U, Seen) >= 0 || hasElaborateCopyConstructor!U
+            || hasElaborateAssign!U || hasElaborateDestructor!U || isMaterializedHostRange!U
+            || hasAggregateAliasThis!U)
+            enum reusableHostSnapshot = false;
+        else enum reusableHostSnapshot = () {
+            static if (__traits(getAliasThis, U).length)
+            {
+                enum aliasName = __traits(getAliasThis, U)[0];
+                static if (__traits(compiles, __traits(getOverloads, U, aliasName)))
+                    static if (__traits(getOverloads, U, aliasName).length) return false;
+            }
+            static foreach (name; FieldNameTuple!U)
+                static if (isBindableField!(U, name)
+                    && __traits(compiles, convertToValue(mixin("(*cast(U*) null)." ~ name))))
+                    static if (!reusableHostSnapshot!(typeof(mixin("(*cast(U*) null)." ~ name)), Seen, U))
+                        return false;
+            return true;
+        }();
+    }
+    else enum reusableHostSnapshot = !isAggregateType!U;
+}
+
+private template shallowHostSnapshot(T, Seen...)
+{
+    import std.traits : FieldTypeTuple, hasElaborateCopyConstructor, hasElaborateDestructor, isPointer, functionAttributes, FunctionAttribute;
+    alias U = Unqual!T;
+    static if (is(U == Value) || isAssociativeArray!U) enum shallowHostSnapshot = false;
+    else static if (isSomeString!U) enum shallowHostSnapshot = is(ForeachType!U == immutable);
+    else static if (isDynamicArray!U || isPointer!U || is(U == class) || is(U == interface) || is(U == union)) enum shallowHostSnapshot = false;
+    // pure関数でもpointerやpure delegateのcontext経由で外部可変値を読めるため、遅延しません。
+    else static if (isDelegate!U) enum shallowHostSnapshot = !(functionAttributes!U & FunctionAttribute.pure_);
+    else static if (isStaticArray!U) enum shallowHostSnapshot = shallowHostSnapshot!(ForeachType!U, Seen);
+    else static if (isInstanceOf!(SumType, U))
+        enum shallowHostSnapshot = () {
+            static foreach (F; U.Types)
+                static if (!shallowHostSnapshot!(F, Seen, U)) return false;
+            return true;
+        }();
+    else static if (is(U == struct))
+    {
+        static if (staticIndexOf!(U, Seen) >= 0 || hasElaborateCopyConstructor!U || hasElaborateDestructor!U)
+            enum shallowHostSnapshot = false;
+        else enum shallowHostSnapshot = () {
+            static foreach (F; FieldTypeTuple!U)
+                static if (!shallowHostSnapshot!(F, Seen, U)) return false;
+            return __traits(compiles, (ref U target, ref const(U) source) pure nothrow { target = source; });
+        }();
+    }
+    else enum shallowHostSnapshot = !isAggregateType!U;
+}
+
+// 反射に副作用がなく、値のsnapshotをネイティブのまま固定できるfieldだけを遅延します。
+// 未知のcopy/alias/rangeは従来通りその場で展開します。
+private template deferredHostSnapshot(T, Seen...)
+{
+    alias U = Unqual!T;
+    static if (is(U == Value) || isAssociativeArray!U) enum deferredHostSnapshot = false;
+    else static if (isSomeString!U) enum deferredHostSnapshot = shallowHostSnapshot!U;
+    else static if (isDynamicArray!U || isStaticArray!U)
+        enum deferredHostSnapshot = shallowHostSnapshot!(ForeachType!U) && deferredHostSnapshot!(ForeachType!U, Seen);
+    else static if (isInstanceOf!(SumType, U))
+        enum deferredHostSnapshot = () {
+            static foreach (F; U.Types)
+                static if (!deferredHostSnapshot!(F, Seen, U) || !shallowHostSnapshot!F) return false;
+            return true;
+        }();
+    else static if (is(U == struct))
+    {
+        static if (!shallowHostSnapshot!U || isMaterializedHostRange!U || staticIndexOf!(U, Seen) >= 0)
+            enum deferredHostSnapshot = false;
+        else enum deferredHostSnapshot = () {
+            static if (__traits(getAliasThis, U).length && !isInstanceOf!(Tuple, U))
+            {
+                enum aliasName = __traits(getAliasThis, U)[0];
+                alias A = typeof(mixin("(*cast(U*) null)." ~ aliasName));
+                static if (isCallable!A && !isAggregateType!A)
+                {
+                    static if (!__traits(compiles, (ref const(U) value) pure nothrow { return mixin("value." ~ aliasName); })) return false;
+                    alias Next = Unqual!(ReturnType!A);
+                }
+                else alias Next = Unqual!A;
+                static if (!deferredHostSnapshot!(Next, Seen, U)) return false;
+            }
+            static foreach (name; FieldNameTuple!U)
+                static if (isBindableField!(U, name) && __traits(compiles, convertToValue(mixin("(*cast(U*) null)." ~ name))))
+                    static if (!deferredHostSnapshot!(typeof(mixin("(*cast(U*) null)." ~ name)), Seen, U)) return false;
+            return true;
+        }();
+    }
+    else enum deferredHostSnapshot = shallowHostSnapshot!U;
+}
+
+private Value delegate() deferHostField(T)(auto ref T source)
+{
+    // mutable arrayの内容は今固定し、ownerの後日の変更やhost側の上書きを混ぜません。
+    static if (isDynamicArray!T && !isSomeString!T) T snapshot = source.dup;
+    else T snapshot = source;
+    return () {
+        auto result = convertToValue(snapshot);
+        static if (!reusableHostSnapshot!T) result = result.valueCopy();
+        return result;
+    };
+}
+
 private struct ReflectedMemberPlan
 {
     size_t field = size_t.max;
     ReflectedMemberBinding function(Object) bind;
+    bool reuseFreshSnapshot;
 }
 
 // A type's member names, binders and hash insertion order contain no receiver.
@@ -525,6 +648,7 @@ private final class ReflectedMembers
     ReflectedLayout layout;
     Object owner;
     Value[] fields;
+    Value delegate()[] deferredFields;
     Value[string] boundMembers;
     bool[string] bound;
     bool materialized;
@@ -550,7 +674,15 @@ private final class ReflectedMembers
         if (materialized) return name in storage.entries;
         auto plan = name in layout.members;
         if (plan is null) return null;
-        if (plan.field != size_t.max) return &fields[plan.field];
+        if (plan.field != size_t.max)
+        {
+            if (deferredFields.length && deferredFields[plan.field] !is null)
+            {
+                fields[plan.field] = deferredFields[plan.field]();
+                deferredFields[plan.field] = null;
+            }
+            return &fields[plan.field];
+        }
         bind(name, storage);
         return name in boundMembers;
     }
@@ -558,8 +690,8 @@ private final class ReflectedMembers
     void materialize(TableStorage storage)
     {
         if (materialized) return;
-        // Public tableValue access still presents the original complete map,
-        // including its iteration order. The fields were already value-copied.
+        // tableValueの全件・列挙順を維持します。遅延fieldも反射時のsnapshotを使い、
+        // 後から変更されたownerをここで読み直しません。
         foreach (name; layout.copyOrder) storage.entries[name] = *find(name, storage);
         materialized = true;
     }
@@ -758,7 +890,8 @@ private ReflectedLayout reflectedLayout(T)()
     {{
         // Ordinary access preserves field visibility; getMember bypasses it.
         static if (isBindableField!(T, name) && __traits(compiles, convertToValue(mixin("(*cast(T*) null)." ~ name))))
-            result.members[name] = ReflectedMemberPlan(result.fieldCount++, &bindReflectedField!(T, name));
+            result.members[name] = ReflectedMemberPlan(result.fieldCount++, &bindReflectedField!(T, name),
+                reusableHostSnapshot!(typeof(mixin("(*cast(T*) null)." ~ name))));
     }}
     static if (__traits(getAliasThis, T).length && !isInstanceOf!(Tuple, T))
         registerStructAliasLayout!(T, T, "root", T)(result);
@@ -840,6 +973,9 @@ private void registerClassOperators(Root, Target, string expression = "receiver"
                                 candidates ~= makeClassCallable!(overload!(op, R), Root, expression)(method ~ op);
                         }}
                     }}
+                    // A method template can exist without supporting this operator.
+                    // Do not shadow built-in array concatenation with an empty dispatcher.
+                    if (candidates.length)
                     layout.entries[method ~ op] = Value.fromFunction(new ReflectedCallable(method ~ op, 2,
                         null, null, null, size_t.max, false, null,
                         (const(Object) instance, Value[] args, CallSite caller) {
@@ -1131,6 +1267,8 @@ struct Value
     private bool nullArrayHandle;
     // Explicit script array annotations survive aliases, slices and concatenation.
     package(dua) string arrayElementType;
+    // ホスト配列の初期値の型。既存の動的な要素代入には新しい型制約を課しません。
+    package(dua) string arrayDefaultType;
     package(dua) string arrayUnionType;
     package(dua) ArrayValidation arrayValidation;
     private TableStorage tableStorage;
@@ -1162,6 +1300,24 @@ struct Value
     {
         auto result = associativeArray(valueType, keyType);
         result.associativeStorage.nullHandle = true;
+        return result;
+    }
+
+    // スライスは要素と検査を共有し、structのコピー処理も呼びません。
+    package(dua) Value slicedArrayHandle(size_t lower, size_t upper)
+    {
+        auto result = this;
+        result.arrayValue = arrayValue[lower .. upper];
+        return result;
+    }
+
+    // 縮小では共有領域の検査も保持し、拡張で領域が変わったときだけ登録し直します。
+    package(dua) Value resizedArrayHandle(Value[] elements)
+    {
+        auto result = this;
+        result.arrayValue = elements;
+        result.nullArrayHandle = nullArrayHandle && elements.length == 0;
+        if (elements.ptr !is arrayValue.ptr) result.arrayValidation = null;
         return result;
     }
 
@@ -1727,7 +1883,9 @@ struct Value
         {
             converted[index] = convertToValue(value);
         }
-        return Value.fromOwnedArray(converted);
+        auto result = Value.fromOwnedArray(converted);
+        result.arrayDefaultType = hostCompletionName!(ForeachType!T);
+        return result;
     }
 
     static Value from(T)(T entries)
@@ -1971,7 +2129,11 @@ struct Value
             result.kind = ValueKind.struct_;
             auto owner = reflectedTarget;
             result.tableStorage.nativeOwner = owner;
-            result.tableStorage.copier = () => Value.reflect(owner.value);
+            result.tableStorage.copier = () {
+            version(DuaValueProfile) auto profiling=beginValueProfile("copy:"~T.stringof);
+            version(DuaValueProfile) scope(exit)if(profiling)endValueProfile();
+            return Value.reflect(owner.value);
+        };
             static if (!hasNoBindOverload!(T, "toString") && __traits(hasMember, T, "toString")
                 && __traits(compiles, format("%s", owner.value)))
                 result.tableStorage.stringifier = () => format("%s", owner.value);
@@ -1994,6 +2156,8 @@ struct Value
 
     private static Value reflectWithLayout(T)(auto ref T value)
     {
+        version(DuaValueProfile) auto profiling=beginValueProfile("reflect:"~T.stringof);
+        version(DuaValueProfile) scope(exit)if(profiling)endValueProfile();
         auto owner = new ReflectedStructStorage!T(value);
         auto data = new ReflectedMembers;
         data.layout = reflectedLayout!T();
@@ -2016,7 +2180,18 @@ struct Value
         static foreach (name; FieldNameTuple!T)
         {{
             static if (isBindableField!(T, name) && __traits(compiles, convertToValue(mixin("value." ~ name))))
-                data.fields[index++] = convertToValue(mixin("owner.value." ~ name));
+            {
+                alias Field = typeof(mixin("owner.value." ~ name));
+                version(DuaEagerFieldSnapshots) enum deferField = false;
+                else enum deferField = deferredHostSnapshot!Field && !isSomeString!Field
+                    && (isAggregateType!Field || isDynamicArray!Field || isStaticArray!Field);
+                static if (deferField)
+                {
+                    if (!data.deferredFields.length) data.deferredFields.length = data.layout.fieldCount;
+                    data.deferredFields[index++] = deferHostField(mixin("owner.value." ~ name));
+                }
+                else data.fields[index++] = convertToValue(mixin("owner.value." ~ name));
+            }
         }}
         Value[] aliasTargets;
         auto aliasChain = ReflectedTypeMetadata!T.aliasChain;
@@ -2032,12 +2207,14 @@ struct Value
         static if (hasAggregateAliasThis!T)
             if (auto equality = "__eq" in data.layout.members)
                 if (equality.field == size_t.max) data.bind("__eq", storage);
-        // Preserve conversion/copy callbacks and their original hash order.
-        // Only the creation of side-effect-free bound callables is deferred.
+        // 即時変換したfieldの二重生成だけを省き、副作用のあるコピーは元の順序を保ちます。
+        // 遅延fieldは固定済みのnative snapshotから、観測時に同じ変換を行います。
         foreach (name; data.layout.copyOrder)
         {
-            auto field = data.layout.members[name].field;
-            if (field != size_t.max) data.fields[field] = data.fields[field].valueCopy();
+            auto plan = data.layout.members[name];
+            if (plan.field != size_t.max && !plan.reuseFreshSnapshot
+                && (!data.deferredFields.length || data.deferredFields[plan.field] is null))
+                data.fields[plan.field] = data.fields[plan.field].valueCopy();
         }
         Value result;
         result.kind = ValueKind.struct_;
@@ -2047,7 +2224,11 @@ struct Value
         result.tableStorage.aliasThisChain = aliasChain;
         result.tableStorage.aliasThisTargets = aliasTargets;
         result.tableStorage.nativeOwner = owner;
-        result.tableStorage.copier = () => Value.reflect(owner.value);
+        result.tableStorage.copier = () {
+            version(DuaValueProfile) auto profiling=beginValueProfile("copy:"~T.stringof);
+            version(DuaValueProfile) scope(exit)if(profiling)endValueProfile();
+            return Value.reflect(owner.value);
+        };
         static if (!hasNoBindOverload!(T, "toString") && __traits(hasMember, T, "toString")
             && __traits(compiles, format("%s", owner.value)))
             result.tableStorage.stringifier = () => format("%s", owner.value);
@@ -2379,6 +2560,28 @@ private void assignReflectedDefault(alias declaration, size_t index, T)(ref T ta
         target = evaluateParameterDefault!(declaration, index)();
 }
 
+private bool nativeReferenceMatches(C, size_t index, P)(const Value value)
+{
+    static if ((ParameterStorageClassTuple!C[index] & ParameterStorageClass.ref_) != 0)
+    {
+        static if (isFloatingPoint!P) return value.kind == ValueKind.floating;
+        else static if (is(Unqual!P == bool)) return value.kind == ValueKind.boolean;
+        else static if (isIntegral!P) return value.kind == ValueKind.integer;
+    }
+    return true;
+}
+
+private P convertNativeArgument(C, size_t index, P)(Value value)
+{
+    enforce(nativeReferenceMatches!(C,index,P)(value), "Native ref argument requires an exact numeric type");
+    return convertFromValue!P(value);
+}
+
+private int nativeParameterScore(C, size_t index, P)(const Value value)
+{
+    return nativeReferenceMatches!(C,index,P)(value) ? conversionScore!P(value) : -1;
+}
+
 private bool[] nativeLazyMask(C)() {
     bool[] mask;
     static foreach(storage;ParameterStorageClassTuple!C)
@@ -2448,7 +2651,7 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
             static if ((ParameterStorageClassTuple!C[index] & ParameterStorageClass.lazy_)!=0)
                 {} // 既定式もDが引数を読む時点で評価します。
             else if (index < args.length)
-                converted[index] = convertFromValue!(MutableParams[index])(args[index]);
+                converted[index] = convertNativeArgument!(C,index,MutableParams[index])(args[index]);
             else static if (parameterHasDefault!(declaration, index))
             {
                 // Inspect the declaration, since a bound delegate may have lost
@@ -2488,7 +2691,7 @@ private ReflectedCallable makeReflectedCallableWithDefaults(alias declaration, C
         {{
             if (index < args.length)
             {
-                auto parameterScore = conversionScore!(MutableParams[index])(args[index]);
+                auto parameterScore = nativeParameterScore!(C,index,MutableParams[index])(args[index]);
                 if (parameterScore < 0)
                     return -1;
                 score += parameterScore;
@@ -2525,7 +2728,7 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
         auto converted = Tuple!MutableParams();
         static foreach (index; 0 .. fixedArity){{
             static if ((ParameterStorageClassTuple!C[index] & ParameterStorageClass.lazy_)==0)
-                converted[index] = convertFromValue!(MutableParams[index])(args[index]);
+                converted[index] = convertNativeArgument!(C,index,MutableParams[index])(args[index]);
         }}
         static if (variadic)
         {
@@ -2546,7 +2749,7 @@ package(dua) ReflectedCallable makeReflectedCallable(C)(string debugName, auto r
         int score;
         static foreach (index; 0 .. fixedArity)
         {{
-            auto parameterScore = conversionScore!(MutableParams[index])(args[index]);
+            auto parameterScore = nativeParameterScore!(C,index,MutableParams[index])(args[index]);
             if (parameterScore < 0) return -1;
             score += parameterScore;
         }}
@@ -2794,19 +2997,47 @@ ReflectedCallable makeReflectedConstructor(alias constructor, T)(string debugNam
         null, Params.length, false, invoker);
 }
 
+// Use the same acceptance rule for the registration probe and actual binding.
+// Checking only whether the dispatcher compiles accepts an empty candidate list.
+private template isBoundBinaryCandidate(T, alias declaration)
+{
+    enum isBoundBinaryCandidate = !isNoBind!declaration && __traits(compiles, {
+        auto callable = &__traits(child, *cast(T*) null, declaration);
+        static assert(Parameters!(typeof(callable)).length == 1);
+        auto bound = makeReflectedCallable("operator", callable);
+    });
+}
+
+private template hasBoundBinaryCandidates(T, string methodName, string operatorSymbol)
+{
+    enum hasBoundBinaryCandidates = () {
+        bool found;
+        static foreach (overload; __traits(getOverloads, T, methodName, true))
+        {{
+            static if (__traits(compiles, &__traits(child, *cast(T*) null, overload!operatorSymbol)))
+                static if (isBoundBinaryCandidate!(T, overload!operatorSymbol)) found = true;
+            static foreach (R; AliasSeq!(long, double))
+            {{
+                static if (__traits(compiles, &__traits(child, *cast(T*) null, overload!(operatorSymbol, R))))
+                    static if (isBoundBinaryCandidate!(T, overload!(operatorSymbol, R))) found = true;
+            }}
+        }}
+        return found;
+    }();
+}
+
 private ReflectedCallable makeBoundBinaryOperator(T, string methodName, string operatorSymbol)(
     string debugName, auto ref T value, Object lifetimeOwner = null)
+    if (hasBoundBinaryCandidates!(T, methodName, operatorSymbol))
 {
     ReflectedCallable[] candidates;
 
     void registerCandidate(alias declaration)()
     {
-        static if (!isNoBind!declaration)
+        static if (isBoundBinaryCandidate!(T, declaration))
         {
             auto callable = &__traits(child, value, declaration);
-            static if (Parameters!(typeof(callable)).length == 1
-                && __traits(compiles, makeReflectedCallable(debugName, callable, lifetimeOwner)))
-                candidates ~= makeReflectedCallable(debugName, callable, lifetimeOwner);
+            candidates ~= makeReflectedCallable(debugName, callable, lifetimeOwner);
         }
     }
 
@@ -3189,7 +3420,9 @@ private Value convertToTypedValue(T)(auto ref T value)
         Value[] elements;
         elements.length = value.length;
         foreach (index, element; value) elements[index] = convertToTypedValue(element);
-        return Value.fromOwnedArray(elements);
+        auto result = Value.fromOwnedArray(elements);
+        result.arrayDefaultType = hostCompletionName!(ForeachType!T);
+        return result;
     }
     else
     {
@@ -3214,6 +3447,8 @@ private bool associativeKeyTypeMatches(T)(string name)
 
 private Value convertToValue(T)(auto ref T value)
 {
+    version(DuaValueProfile) auto profiling=beginValueProfile("toValue:"~T.stringof);
+    version(DuaValueProfile) scope(exit)if(profiling)endValueProfile();
     static if (is(T == Value))
     {
         return value;
@@ -3273,7 +3508,9 @@ private Value convertToValue(T)(auto ref T value)
                 cursor.popFront();
             }
         }
-        return Value.fromOwnedArray(converted);
+        auto result = Value.fromOwnedArray(converted);
+        result.arrayDefaultType = hostCompletionName!(ForeachType!T);
+        return result;
     }
     else static if (isAggregateType!T)
     {
@@ -3492,6 +3729,8 @@ private bool convertAliasThisTarget(T)(const(Value) value, out T result)
 
 private T convertFromValue(T)(const(Value) value)
 {
+    version(DuaValueProfile) auto profiling=beginValueProfile("fromValue:"~T.stringof);
+    version(DuaValueProfile) scope(exit)if(profiling)endValueProfile();
     static if (is(T == Value))
     {
         return value.valueCopy();

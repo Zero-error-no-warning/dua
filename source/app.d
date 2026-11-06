@@ -20,7 +20,7 @@ final class Player
     }
 }
 
-void main()
+int main()
 {
     auto engine = new Dua.ScriptEngine();
 
@@ -71,7 +71,7 @@ void main()
         auto chained = merged.suffix("-v1").suffix("-final");
         profile.rank = player.level + 10 + mod.rankBoost;
         profile.title = chained.name;
-        profile.debug = json.encode(profile);
+        profile.debug = json.encode({ label = profile.label, total = profile.total });
         return profile;
     };
 
@@ -83,9 +83,10 @@ void main()
         {
             writeln("Stack: ", outcome.stackTrace);
         }
-        return;
+        return 1;
     }
 
     writeln("Dua result: ", outcome.value.toScriptLiteral());
     writeln("Supports D arrays, D-style '~' concat, table operator overloads, UFCS, method chaining, and runSafe errors.");
+    return 0;
 }

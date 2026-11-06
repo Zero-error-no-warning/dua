@@ -1,0 +1,26 @@
+// 型を明記すると、拡張した要素もその型の既定値で初期化されます。
+int[] values;
+values.length = 4;
+foreach (i; 0 .. values.length) values[i] = i + 1;
+
+int[] reversed;
+reversed.length = values.length;
+int cursor = 0;
+foreach_reverse (index, value; values) {
+    reversed[cursor] = value;
+    cursor += 1;
+}
+
+// yieldで中断しても、次の逆順要素から再開します。
+auto worker = coroutine.create(() {
+    foreach_reverse (i; 0 .. values.length) yield values[i];
+    return 0;
+});
+int[] yielded;
+while (coroutine.status(worker) != "dead") {
+    auto result = coroutine.resume(worker);
+    if (!result[0]) error(result[1]);
+    yielded ~= result[1];
+}
+values.length = 2;
+return reversed == [4, 3, 2, 1] && values == [1, 2] && yielded == [4, 3, 2, 1, 0];

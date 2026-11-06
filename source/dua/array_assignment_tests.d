@@ -27,7 +27,7 @@ unittest
         "auto a = []; a ~= null; a ~= \"s\"; a ~= { x = 7 }; a ~= () => 8; return a.length == 4 && a[0] == null && a[2].x == 7 && a[3]() == 8;",
         "auto a = [1]; auto b = a ~ 2; b[0] = 9; return a[0] == 1 && b.length == 2 && b[1] == 2;",
         "int[] a = [1, 2]; auto b = a; b[$-1] = 4; return a[1] == 4;",
-        "int[] a = [1, 2]; auto b = a[0..$]; b[$-1] = 4; return a[1] == 2 && b[1] == 4;",
+        "int[] a = [1, 2]; auto b = a[0..$]; b[$-1] = 4; return a[1] == 4 && b[1] == 4;",
         "int[][] a = [[1, 2], [3]]; a[$-1][$-1] = 7; a[0][$-1] += 5; a ~= [[8]]; return a[0][1] == 7 && a[1][0] == 7 && a[2][0] == 8;",
         "int[][] a = [[1]]; int[] row = [2]; a[$-1] = row; row[0] = 3; auto b = a ~ [[4]]; b[0][0] = 5; return a[0][0] == 5 && row[0] == 5;",
         "auto a = [1, 2, 3]; auto indices = [0, 1]; a[indices[$-1] + $ - 3] = 8; return a[1] == 8;",
@@ -108,7 +108,7 @@ unittest
         "int[] a = [1]; auto aliasArray = a; aliasArray[$-1] = \"bad\";",
         "int[] a = [1]; a ~= \"bad\";",
         "int[] a = [1]; a = a ~ 2.0;",
-        "double[] a = [1.0]; a ~= 2;",
+
         "int[] a = [1]; auto b = a[0..$]; b[$-1] = true;",
         "int[] a = [1]; auto b = a ~ 2; b[$-1] = true;",
         "int[] get() { return [1]; } auto a = get(); a[$-1] = true;",

@@ -113,3 +113,17 @@ test('source table types and their aliases accept null independently of host cla
     'table Record { int n; } Record missing(){return null;}'
   ]) assert.deepEqual(await checkSource(executable,source,{hostClassTypes}).promise,[],source);
 });
+
+test('switch checks every branch with locations and isolated case scopes', async () => {
+  const source = 'error("must never execute");\nswitch(2){\ncase 1:\n  int x="wrong";\n  break;\ndefault:\n  int y="wrong";\n}';
+  const errors = await checkSource(executable, source).promise;
+  assert.deepEqual(errors.map(error => [error.line, error.column]), [[4, 3], [7, 3]]);
+  for (const error of errors) assert.match(error.message, /expects int/);
+  const analysis = await analyzeSource(executable, source, { sourceName: 'switch-regression.dua' }).promise;
+  assert.equal(analysis.diagnostics.length, 2);
+  assert.ok(analysis.diagnostics.every(error => error.sourceName.endsWith('switch-regression.dua')));
+  const scoped = 'int f(int n){return n;} int x=1; switch(2){'
+    + 'case 1: string f(string n){return n;} string x="a"; string s=f(x); break;'
+    + 'default: int n=f(x); } int after=f(x);';
+  assert.deepEqual(await checkSource(executable, scoped).promise, []);
+});

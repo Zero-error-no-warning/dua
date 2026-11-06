@@ -9,6 +9,7 @@ const { checkSource, analyzeSource } = require('./checker');
 const modules = require('./moduleIntelligence');
 const { importPathContext } = require('./importContext');
 const tables = require('./tableConstruction');
+const signatures = require('./signatureHelp');
 const { activateSceneDiagnostics } = require('./sceneDiagnostics');
 
 function activate(context) {
@@ -65,6 +66,7 @@ function activate(context) {
       options.moduleContexts = modules.modulePathContexts(root, contextual.moduleDirectories,
         config.get('modulePaths', ['?.dua', '?/init.dua']), explicit);
       options.modulePaths = options.moduleContexts[0];
+      options.sourceBoundary = contextual.sourceBoundary;
       options.hostModules = modules.hostModules(contextual.catalog);
       let size = 0;
       options.overlays = vscode.workspace.textDocuments.filter(d => fileDocument(d) && !d.isClosed).map(d => {
@@ -81,7 +83,9 @@ function activate(context) {
     const prepared = preparation(document);
     if (!prepared.service) return null;
     const version = document.version, epoch = generation;
-    const source = Number.isInteger(extra.completionOffset) ? modules.completionSource(prepared.source, extra.completionOffset) : prepared.source;
+    let source = prepared.source;
+    if (Number.isInteger(extra.signatureOffset)) source = signatures.analysisSource(source,signatures.callContext(source,extra.signatureOffset));
+    else if (Number.isInteger(extra.completionOffset)) source = modules.completionSource(source,extra.completionOffset);
     const request = analyzeSource(prepared.executable, source, { ...prepared.options, ...extra });
     queries.add(request);
     const cancellation = token?.onCancellationRequested(() => request.cancel());
@@ -105,7 +109,7 @@ function activate(context) {
   function watch() {
     if (watching || !vscode.workspace.isTrusted || !vscode.workspace.createFileSystemWatcher) return;
     watching = true;
-    const watcher = vscode.workspace.createFileSystemWatcher('**/*.dua');
+    const watcher = vscode.workspace.createFileSystemWatcher('**/*.{dua,zproject,json}');
     context.subscriptions.push(watcher, watcher.onDidCreate(() => refreshAll()), watcher.onDidChange(() => refreshAll()), watcher.onDidDelete(() => refreshAll()));
   }
 
@@ -224,6 +228,36 @@ function activate(context) {
     vscode.workspace.onDidGrantWorkspaceTrust(() => { watch(); refreshAll(); }),
     { dispose() { for (const request of queries) request.cancel(); for (const state of pending.values()) { clearTimeout(state.timer); state.request?.cancel(); } for (const subscriptions of dependencyWatchers.values()) for (const value of subscriptions) value.dispose(); dependencyWatchers.clear(); pending.clear(); ownedResults.clear(); } }
   );
+  if (vscode.languages.registerSignatureHelpProvider) context.subscriptions.push(vscode.languages.registerSignatureHelpProvider(selector, {
+    async provideSignatureHelp(document, position, token, helpContext) {
+      const source = document.getText(), offset = document.offsetAt(position);
+      if (!signatures.callContext(source,offset) || token?.isCancellationRequested) return null;
+      const version = document.version, epoch = generation;
+      const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+      const config = vscode.workspace.getConfiguration('dua', document.uri);
+      let catalog = folder?.uri.scheme === 'file' ? host.loadCatalog(folder.uri.fsPath,config.get('completion.metadataFiles',['.dua-completion.json']))
+        : {symbols:{},types:{},assets:[],contexts:[],root:''};
+      try {
+        const analysis = await query(document,{signatureOffset:offset},token);
+        if (analysis) catalog = modules.catalogWithImports(catalog,analysis,document.uri.fsPath);
+      } catch (error) { if (!token?.isCancellationRequested) output.appendLine(`Dua: ${error.message}`); }
+      if (token?.isCancellationRequested || document.version!==version || generation!==epoch || document.isClosed) return null;
+      try {
+        const contextual = assets.createContext(catalog,document.uri.fsPath);
+        const result = signatures.signatureHelp(source,offset,contextual.catalog,contextual,helpContext?.activeSignatureHelp);
+        if (!result) return null;
+        const help = new vscode.SignatureHelp();
+        help.activeSignature = result.activeSignature; help.activeParameter = result.activeParameter;
+        help.signatures = result.signatures.map(value=> {
+          const info = new vscode.SignatureInformation(value.label,value.documentation);
+          info.parameters = value.parameters.map(parameter=>new vscode.ParameterInformation(parameter.label));
+          info.activeParameter = value.activeParameter;
+          return info;
+        });
+        return help;
+      } catch (error) { output.appendLine(`Dua: ${error.message}`); return null; }
+    }
+  }, {triggerCharacters:['(',','],retriggerCharacters:[')']}));
   if (vscode.languages.registerDefinitionProvider) context.subscriptions.push(vscode.languages.registerDefinitionProvider(selector, {
     async provideDefinition(document, position, token) {
       try {

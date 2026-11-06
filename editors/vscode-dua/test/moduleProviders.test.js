@@ -18,16 +18,20 @@ async function fixture(run, checker) {
   fs.writeFileSync(path.join(root,'.dua-completion.json'),JSON.stringify({schemaVersion:1,symbols:{ListView:{kind:'type',type:'ListView'}},types:{ListView:{kind:'class',members:{}}}}));
   const values=new Map(), other=new Map([['keep','unchanged']]), events={open:signal(),change:signal(),close:signal(),config:signal(),trust:signal()}, watchers=[];
   const disposable=()=>({dispose(){}}), context={subscriptions:[],asAbsolutePath:f=>path.resolve(__dirname,'..',f)};
-  let completion, definition;
+  let completion, definition, signature, signatureMetadata;
   const vscode={Uri:{file:uri},CompletionItemKind:{},DiagnosticSeverity:{Error:0},
     Position:class{constructor(line,character){Object.assign(this,{line,character});}},
     Range:class{constructor(start,end){Object.assign(this,{start,end});}},
     Location:class{constructor(uri,range){Object.assign(this,{uri,range});}},
     RelativePattern:class{constructor(baseUri,pattern){Object.assign(this,{baseUri,pattern});}},
     Diagnostic:class{constructor(range,message){Object.assign(this,{range,message});}},
+    SignatureHelp:class{},
+    SignatureInformation:class{constructor(label,documentation){Object.assign(this,{label,documentation});}},
+    ParameterInformation:class{constructor(label){this.label=label;}},
     CompletionItem:class{constructor(label,kind){Object.assign(this,{label,kind});}},
     languages:{createDiagnosticCollection:name=>{assert.equal(name,'dua');return{set:(u,v)=>values.set(u.toString(),v),delete:u=>values.delete(u.toString()),clear:()=>values.clear(),dispose(){}};},
       registerCompletionItemProvider:(selector,provider)=>{completion=provider;return disposable();},
+      registerSignatureHelpProvider:(selector,provider,metadata)=>{signature=provider;signatureMetadata=metadata;return disposable();},
       registerDefinitionProvider:(selector,provider)=>{definition=provider;return disposable();}},
     window:{createOutputChannel:()=>({appendLine(){},dispose(){}}),showWarningMessage(){}},
     workspace:{isTrusted:true,textDocuments:[main],getWorkspaceFolder:value=>value.fsPath.toLowerCase().startsWith(root.toLowerCase()+path.sep)?{uri:uri(root)}:undefined,
@@ -41,7 +45,7 @@ async function fixture(run, checker) {
   finally {Module._load=original;}
   extension.activate(context);
   const update=(doc,source)=>{doc.source=source;doc.version++;events.change.fire({document:doc});};
-  try {await run({root,types,entry,main,values,events,watchers,vscode,completion,definition,update,other});}
+  try {await run({root,types,entry,main,values,events,watchers,vscode,completion,definition,signature,signatureMetadata,update,other});}
   finally {for(const value of context.subscriptions.toReversed())value?.dispose();delete require.cache[file];await new Promise(r=>setTimeout(r,30));fs.rmSync(root,{recursive:true,force:true});}
 }
 
@@ -166,3 +170,51 @@ test('registered completion provider retains array and AA element shapes across 
  const aa=await completion.provideCompletionItems(main,main.positionAt(main.source.length));
  assert.ok(aa.some(item=>item.label==='count'));
 }));
+
+test('registered signature provider uses project roots, parameter names and dirty imported declarations',()=>fixture(async({root,main,signature,signatureMetadata,vscode,update})=>{
+  assert.deepEqual(signatureMetadata,{triggerCharacters:['(',','],retriggerCharacters:[')']});
+  const scripts=path.join(root,'scripts');fs.mkdirSync(scripts);
+  const imported=path.join(scripts,'actions.dua');
+  fs.writeFileSync(imported,'export uint total(uint count, string label="ok"){return count;}');
+  fs.writeFileSync(path.join(root,'actions.dua'),'export string total(bool wrong){return "wrong";}');
+  fs.writeFileSync(path.join(root,'game.zproject'),'{}');
+  const stat=fs.statSync(path.join(root,'game.zproject'));
+  fs.writeFileSync(path.join(root,'.dua-completion.json'),JSON.stringify({schemaVersion:1,symbols:{},types:{},projectContext:{
+    moduleDirectory:'scripts',assetDirectory:'.',sourceBoundary:{root:'.',markerExtension:'.zproject'},
+    sources:[{path:'game.zproject',size:stat.size,modifiedMs:Math.trunc(stat.mtimeMs)}]
+  }}));
+  update(main,'import actions as a; a.total(1, ');
+  let help=await signature.provideSignatureHelp(main,main.positionAt(main.source.length));
+  assert.ok(help);assert.equal(help.activeParameter,1);assert.match(help.signatures[0].label,/uint count, string label = …/);
+  const dirty=document(imported,'export uint total(uint revised, bool flag=false){return revised;}');
+  vscode.workspace.textDocuments.push(dirty);update(dirty,dirty.source);
+  help=await signature.provideSignatureHelp(main,main.positionAt(main.source.length));
+  assert.match(help.signatures[0].label,/uint revised, bool flag = …/);
+  vscode.workspace.isTrusted=false;
+  update(main,'void local(int count){} local(');
+  help=await signature.provideSignatureHelp(main,main.positionAt(main.source.length));
+  assert.match(help.signatures[0].label,/local\(int count\)/);
+}));
+
+test('signature requests cancel on dependency edits and stale results never reappear',async()=>{
+  const requests=[];
+  const checker={analyzeSource:(executable,source,options)=>{
+    let resolve;const request={source,options,promise:new Promise(done=>{resolve=done;}),resolve:value=>resolve(value),cancel(){this.cancelled=true;}};
+    requests.push(request);return request;
+  }};
+  await fixture(async({main,signature,update})=>{
+    update(main,'void local(int count){} local(');
+    const querying=signature.provideSignatureHelp(main,main.positionAt(main.source.length));
+    const request=requests.at(-1);
+    update(main,'void local(string name){} local(');
+    assert.ok(request.cancelled);
+    const empty={schemaVersion:1,diagnostics:[],modules:[],imports:[],exports:[],pathCompletions:[]};
+    request.resolve(empty);assert.equal(await querying,null);
+    let onCancel;
+    const token={isCancellationRequested:false,onCancellationRequested(callback){onCancel=callback;return{dispose(){}};}};
+    const cancelled=signature.provideSignatureHelp(main,main.positionAt(main.source.length),token);
+    const last=requests.at(-1);token.isCancellationRequested=true;onCancel();assert.ok(last.cancelled);
+    last.resolve(empty);assert.equal(await cancelled,null);
+    for(const request of requests)request.resolve(empty);
+  },checker);
+});

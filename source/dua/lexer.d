@@ -36,6 +36,7 @@ enum TokenKind
     keywordWhile,
     keywordFor,
     keywordForeach,
+    keywordForeachReverse,
     keywordSwitch,
     keywordCase,
     keywordDefault,
@@ -79,6 +80,8 @@ enum TokenKind
     colon,
     colonGreater,
     question,
+    coalesce,
+    optionalDot,
     semicolon,
     amp,
     ampAmp,
@@ -95,9 +98,10 @@ enum TokenKind
 Token[] lex(string source)
 {
     auto tokens = appender!(Token[])();
-    size_t index;
+    // A UTF-8 signature belongs to the file encoding, not the first token.
+    size_t index = source.length >= 3 && source[0 .. 3] == "\xEF\xBB\xBF" ? 3 : 0;
     size_t line = 1;
-    size_t column = 1;
+    size_t column = index + 1; // Retain byte offsets in the original source.
 
     while (index < source.length)
     {
@@ -266,7 +270,21 @@ Token[] lex(string source)
                     kind = TokenKind.colon;
                 }
                 break;
-            case '?': kind = TokenKind.question; break;
+            case '?':
+                if (peek(source, index + 1) == '?')
+                {
+                    kind = TokenKind.coalesce;
+                    lexeme = source[index .. index + 2];
+                    ++index; ++column;
+                }
+                else if (peek(source, index + 1) == '.')
+                {
+                    kind = TokenKind.optionalDot;
+                    lexeme = source[index .. index + 2];
+                    ++index; ++column;
+                }
+                else kind = TokenKind.question;
+                break;
             case ';': kind = TokenKind.semicolon; break;
             case '&':
                 if (peek(source, index + 1) == '&')
@@ -418,6 +436,7 @@ private TokenKind keywordFor(string identifier)
         case "while": return TokenKind.keywordWhile;
         case "for": return TokenKind.keywordFor;
         case "foreach": return TokenKind.keywordForeach;
+        case "foreach_reverse": return TokenKind.keywordForeachReverse;
         case "switch": return TokenKind.keywordSwitch;
         case "case": return TokenKind.keywordCase;
         case "default": return TokenKind.keywordDefault;

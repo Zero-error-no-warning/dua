@@ -19,6 +19,11 @@
     "body": ["foreach (${1:value}; ${2:collection}) {", "\t$0", "}"],
     "description": "コレクションを走査"
   },
+  "Foreach reverse": {
+    "prefix": "foreach_reverse",
+    "body": ["foreach_reverse (${1:value}; ${2:collection}) {", "\t${0}", "}"],
+    "description": "配列または整数範囲を逆順に走査"
+  },
   "Try / catch": {
     "prefix": "try",
     "body": ["try {", "\t${1}", "} catch (${2:err}) {", "\t$0", "}"],

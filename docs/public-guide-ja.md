@@ -14,11 +14,12 @@ Dua は D 製アプリケーションに組み込む軽量スクリプトラン�
 
 ## 2. ビルドして動作を確認する
 
-必要なものは DUB と LDC (`ldc2`) です。リポジトリのルートで次を実行します。
+必要なものは DUB と DMD (`dmd`) または LDC (`ldc2`) です。リポジトリのルートで次を実行します。
 
 ```bash
-dub build --compiler=ldc2
-dub test --compiler=ldc2
+dub build --compiler=dmd
+dub test --compiler=dmd
+dub run --config=example --compiler=dmd
 ```
 
 ライブラリとして利用する場合は、DUB プロジェクトの依存関係に Dua を追加し、D コードから `import dua;` します。このリポジトリ自身は既定の `library` configuration でライブラリを生成します。

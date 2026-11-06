@@ -1,3 +1,26 @@
+## 0.6.11
+
+- 配列lengthへの代入・複合代入と、foreach_reverseの構文・型診断に対応。
+- foreach_reverseのキーワード、反復変数補完、スニペット、ハイライトを追加。
+- foreachとforeach_reverseの整数範囲で、long/uintなどの整数型注釈を受理。
+
+## 0.6.10
+
+- Support D-style UTF-8 byte indexing and string length diagnostics/inference.
+- Add Unicode count and charAt completion/signature help with declaration shadowing.
+
+## 0.6.9
+
+- Fix false same-type numeric return/assignment diagnostics (`uint` to `uint`, and other annotated integer/float types).
+- Add signature help on `(` and `,`, with active parameter tracking for nested and multiline calls.
+- Reuse project import resolution, unsaved overlays and host catalogs for local/imported functions, native overloads and methods.
+- Preserve imported parameter names and readable local type aliases; cancel stale signature requests after edits.
+## 0.6.8
+
+- Use explicit project script roots for imports while preserving asset roots.
+- Apply shared project source boundaries to diagnostics, definitions and import completions.
+- Reject stale project metadata and refresh analysis when project/catalog files change.
+
 ## 0.6.7
 
 - table/structメンバーの既定式と生成時の省略に対応。importを含む診断・補完に省略可能フィールドとstruct署名を反映。

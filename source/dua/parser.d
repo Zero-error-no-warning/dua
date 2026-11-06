@@ -316,7 +316,7 @@ private struct Parser
                 statement.returnType = declaredType;
                 statement.name = nameToken.lexeme;
                 parseTypedFunctionSignature(statement.parameterTypes, statement.parameters,
-                    statement.variadic, statement.body, statement.parameterDefaults, statement.parameterLazy);
+                    statement.variadic, statement.body, statement.parameterDefaults, statement.parameterLazy, statement.parameterRef);
                 return statement;
             }
 
@@ -382,14 +382,26 @@ private struct Parser
             auto statement = locatedStatement(Statement.Kind.try_, previous());
             consume(TokenKind.leftBrace, "Expected '{' after try");
             statement.body = parseBlockTail();
-            consume(TokenKind.keywordCatch, "Expected catch after try block");
-            consume(TokenKind.leftParen, "Expected '(' after catch");
-            statement.name = consume(TokenKind.identifier, "Expected catch error variable").lexeme;
-            consume(TokenKind.rightParen, "Expected ')' after catch variable");
-            consume(TokenKind.leftBrace, "Expected '{' before catch body");
-            auto catchBlock = locatedStatement(Statement.Kind.block, previous());
-            catchBlock.body = parseBlockTail();
-            statement.elseBranch = catchBlock;
+            if (match(TokenKind.keywordCatch))
+            {
+                consume(TokenKind.leftParen, "Expected '(' after catch");
+                statement.name = consume(TokenKind.identifier, "Expected catch error variable").lexeme;
+                consume(TokenKind.rightParen, "Expected ')' after catch variable");
+                consume(TokenKind.leftBrace, "Expected '{' before catch body");
+                auto catchBlock = locatedStatement(Statement.Kind.block, previous());
+                catchBlock.body = parseBlockTail();
+                statement.elseBranch = catchBlock;
+            }
+            if (isFinallyClause())
+            {
+                advance(); consume(TokenKind.leftBrace, "Expected '{' after finally");
+                auto finalBlock = locatedStatement(Statement.Kind.block, previous());
+                finalBlock.body = parseBlockTail();
+                validateFinallyBody(finalBlock.body);
+                statement.finallyBranch = finalBlock;
+            }
+            requireLocated(statement.elseBranch !is null || statement.finallyBranch !is null,
+                "Expected catch or finally after try block", peek().line, peek().column);
             return statement;
         }
 
@@ -458,9 +470,10 @@ private struct Parser
             return statement;
         }
 
-        if (match(TokenKind.keywordForeach))
+        if (match(TokenKind.keywordForeach, TokenKind.keywordForeachReverse))
         {
             auto statement = locatedStatement(Statement.Kind.foreach_, previous());
+            statement.reverseIteration = previous().kind == TokenKind.keywordForeachReverse;
             consume(TokenKind.leftParen, "Expected '(' after foreach");
             statement.iteratorName = consume(TokenKind.identifier, "Expected iterator variable").lexeme;
             if (match(TokenKind.comma))
@@ -689,7 +702,7 @@ private struct Parser
 
     Expression parseTernary()
     {
-        auto condition = parseLogicalOr();
+        auto condition = parseCoalescing();
         if (match(TokenKind.question))
         {
             auto whenTrue = parseExpression();
@@ -700,6 +713,18 @@ private struct Parser
             return node;
         }
         return condition;
+    }
+
+    // Between logical-or and the conditional operator; right associative.
+    Expression parseCoalescing()
+    {
+        auto left = parseLogicalOr();
+        if (match(TokenKind.coalesce))
+        {
+            auto token = previous();
+            return locatedExpression(new BinaryExpression(left, "??", parseCoalescing()), token);
+        }
+        return left;
     }
 
     Expression parseLogicalOr()
@@ -919,19 +944,33 @@ private struct Parser
             {
                 auto callToken = previous();
                 auto args = appender!(Expression[])();
+                string[] names;
+                bool named;
+                bool[string] seen;
                 if (!check(TokenKind.rightParen))
                 {
                     do
                     {
+                        string name;
+                        if (check(TokenKind.identifier) && peekAt(1).kind == TokenKind.colon)
+                        {
+                            auto token = advance(); advance(); name = token.lexeme; named = true;
+                            requireLocated((name in seen) is null, "Duplicate named argument: " ~ name, token.line, token.column);
+                            seen[name] = true;
+                        }
+                        else requireLocated(!named, "Positional arguments must precede named arguments", peek().line, peek().column);
+                        names ~= name;
                         args.put(parseExpression());
                     }
                     while (match(TokenKind.comma));
                 }
                 consume(TokenKind.rightParen, "Expected ')' after arguments");
-                expression = locatedExpression(new CallExpression(expression, args.data), callToken);
+                auto call = new CallExpression(expression, args.data);
+                if (named) call.argumentNames = names;
+                expression = locatedExpression(call, callToken);
                 continue;
             }
-            if (match(TokenKind.dot))
+            if (match(TokenKind.dot, TokenKind.optionalDot))
             {
                 auto getToken = previous();
                 auto memberName = match(TokenKind.keywordNew, TokenKind.keywordInstance)
@@ -939,6 +978,7 @@ private struct Parser
                     : consume(TokenKind.identifier, "Expected property name after '.'").lexeme;
                 auto member=new GetExpression(expression,memberName);
                 member.withMember=isLeadingWithPath(expression);
+                member.nullConditional=getToken.kind == TokenKind.optionalDot;
                 expression = locatedExpression(member, getToken);
                 continue;
             }
@@ -1009,7 +1049,8 @@ private struct Parser
             string[] parameters;
             Expression[] defaults;
             bool[] lazyParameters;
-            parseTypedLambdaParameters(parameterTypes, parameters, defaults, lazyParameters);
+            bool[] refParameters;
+            parseTypedLambdaParameters(parameterTypes, parameters, defaults, lazyParameters, refParameters);
             Statement[] body;
             string returnType;
             if (match(TokenKind.leftBrace))
@@ -1033,6 +1074,7 @@ private struct Parser
             functionNode.parameterTypes = parameterTypes;
             functionNode.parameterDefaults = defaults;
             functionNode.parameterLazy = lazyParameters;
+            functionNode.parameterRef = refParameters;
             return locatedExpression(functionNode, startToken);
         }
         if (check(TokenKind.identifier)
@@ -1046,9 +1088,13 @@ private struct Parser
         if (match(TokenKind.number))
         {
             auto token = previous();
-            auto value = canFind(token.lexeme, ".")
-                ? Value.from(token.lexeme.to!double)
-                : Value.from(token.lexeme.to!long);
+            Value value;
+            try
+                value = canFind(token.lexeme, ".")
+                    ? Value.from(token.lexeme.to!double)
+                    : Value.from(token.lexeme.to!long);
+            catch (Exception error)
+                throw locatedException(error.msg, token.line, token.column);
             return locatedExpression(new LiteralExpression(value), token);
         }
         if (match(TokenKind.string_))
@@ -1300,33 +1346,41 @@ private struct Parser
     }
 
     void parseTypedFunctionSignature(out string[] parameterTypes, out string[] parameters,
-        out bool variadic, out Statement[] body, out Expression[] defaults, out bool[] lazyParameters)
+        out bool variadic, out Statement[] body, out Expression[] defaults, out bool[] lazyParameters, out bool[] refParameters)
     {
-        parseFunctionParameters(parameterTypes, parameters, defaults, variadic, true, lazyParameters);
+        parseFunctionParameters(parameterTypes, parameters, defaults, variadic, true, lazyParameters, refParameters);
         consume(TokenKind.leftBrace, "Expected '{' before function body");
         body = parseBlockTail();
     }
 
     void parseFunctionParameters(out string[] types, out string[] names, out Expression[] defaults,
-        out bool variadic, bool allowVariadic, out bool[] lazyParameters)
+        out bool variadic, bool allowVariadic, out bool[] lazyParameters, out bool[] refParameters)
     {
         consume(TokenKind.leftParen, "Expected '(' before function parameters");
         bool seenDefault;
         Expression[] values;
         if (!check(TokenKind.rightParen)) do
         {
+            // Keep a type or variable named 'ref' valid; recognize the modifier
+            // only where another type and parameter name follow it.
+            bool isRef = isRefParameterModifier(position);
+            if (isRef) advance();
+            refParameters ~= isRef;
             bool isLazy = check(TokenKind.identifier) && peek().lexeme == "lazy";
+            requireLocated(!isRef || !isLazy, "ref and lazy cannot be combined", peek().line, peek().column);
             if (isLazy) advance();
             lazyParameters ~= isLazy;
             types ~= parseTypeName();
             auto name = consume(TokenKind.identifier, "Expected parameter name");
             names ~= name.lexeme;
             bool rest = match(TokenKind.ellipsis);
+            requireLocated(!isRef || !rest, "ref variadic parameters are not supported", name.line, name.column);
             requireLocated(!isLazy || !rest, "Lazy variadic parameters are not supported", name.line, name.column);
             requireLocated(!rest || allowVariadic, "Variadic lambdas are not supported", name.line, name.column);
             Expression value;
             if (match(TokenKind.equal))
             {
+                requireLocated(!isRef, "A ref parameter cannot have a default", name.line, name.column);
                 requireLocated(!rest, "A variadic parameter cannot have a default", name.line, name.column);
                 requireLocated(!isLazy, "Lazy default arguments are not supported", name.line, name.column);
                 value = parseExpression();seenDefault = true;
@@ -1395,10 +1449,10 @@ private struct Parser
     }
 
     void parseTypedLambdaParameters(out string[] parameterTypes, out string[] parameters,
-        out Expression[] defaults, out bool[] lazyParameters)
+        out Expression[] defaults, out bool[] lazyParameters, out bool[] refParameters)
     {
         bool variadic;
-        parseFunctionParameters(parameterTypes, parameters, defaults, variadic, false, lazyParameters);
+        parseFunctionParameters(parameterTypes, parameters, defaults, variadic, false, lazyParameters, refParameters);
     }
 
 
@@ -1456,6 +1510,8 @@ private struct Parser
     {
         foreach(target;targets)requireLocated(!isWithAssignment(target),
             "with member assignment is not supported",target.line,target.column);
+        foreach (target; targets) requireLocated(!hasNullConditionalAccess(target),
+            "Null-conditional access cannot be an assignment target", target.line, target.column);
         if (token.kind != TokenKind.compoundAssign) return;
         requireLocated(targets.length == 1,
             format("Compound assignment requires a single target at %s:%s", token.line, token.column), token.line, token.column);
@@ -1479,6 +1535,16 @@ private struct Parser
         if(target.kind==Expression.Kind.index)return isLeadingWithPath((cast(IndexExpression)target).target);
         if(target.kind==Expression.Kind.call)return isLeadingWithPath((cast(CallExpression)target).callee);
         return false;
+    }
+
+    bool isRefParameterModifier(size_t cursor) const
+    {
+        if (cursor >= tokens.length || tokens[cursor].kind != TokenKind.identifier
+            || tokens[cursor].lexeme != "ref") return false;
+        ++cursor;
+        // A type named ref (including ref[], ref[K], and ref delegate(...))
+        // remains a type when no complete following type/name pair exists.
+        return scanType(cursor) && cursor < tokens.length && tokens[cursor].kind == TokenKind.identifier;
     }
 
     bool scanType(ref size_t cursor) const
@@ -1536,6 +1602,50 @@ private struct Parser
             && cursor < tokens.length && tokens[cursor].kind == TokenKind.identifier;
     }
 
+    bool isFinallyClause() const
+    {
+        if (!check(TokenKind.identifier) || peek().lexeme != "finally" || peekAt(1).kind != TokenKind.leftBrace) return false;
+        size_t depth;
+        for (size_t cursor = position + 1; cursor < tokens.length; ++cursor)
+        {
+            if (tokens[cursor].kind == TokenKind.leftBrace) ++depth;
+            else if (tokens[cursor].kind == TokenKind.rightBrace && --depth == 0)
+            {
+                // A pre-existing named table construction `finally{...};`
+                // or its postfix/operator continuation keeps its old meaning.
+                auto next = cursor + 1 < tokens.length ? tokens[cursor + 1].kind : TokenKind.eof;
+                return ![TokenKind.semicolon, TokenKind.dot, TokenKind.optionalDot,
+                    TokenKind.leftParen, TokenKind.leftBracket, TokenKind.comma,
+                    TokenKind.question, TokenKind.coalesce, TokenKind.plus, TokenKind.minus,
+                    TokenKind.star, TokenKind.slash, TokenKind.percent, TokenKind.tilde,
+                    TokenKind.equalEqual, TokenKind.bangEqual, TokenKind.less, TokenKind.lessEqual,
+                    TokenKind.greater, TokenKind.greaterEqual, TokenKind.amp, TokenKind.pipe,
+                    TokenKind.caret, TokenKind.ampAmp, TokenKind.pipePipe, TokenKind.shiftLeft,
+                    TokenKind.shiftRight, TokenKind.keywordIs].canFind(next);
+            }
+        }
+        return true; // Let block parsing report an unterminated clause.
+    }
+
+    void validateFinallyBody(Statement[] body, size_t loops = 0, size_t breaks = 0)
+    {
+        foreach (statement; body)
+        {
+            if (statement.kind == Statement.Kind.functionDecl) continue;
+            requireLocated(statement.kind != Statement.Kind.return_ && statement.kind != Statement.Kind.yield_,
+                "return and yield cannot leave a finally block", statement.line, statement.column);
+            requireLocated(statement.kind != Statement.Kind.break_ || breaks > 0,
+                "break cannot leave a finally block", statement.line, statement.column);
+            requireLocated(statement.kind != Statement.Kind.continue_ || loops > 0,
+                "continue cannot leave a finally block", statement.line, statement.column);
+            bool loop = statement.kind == Statement.Kind.while_ || statement.kind == Statement.Kind.for_
+                || statement.kind == Statement.Kind.foreach_;
+            validateFinallyBody(statement.body, loops + loop, breaks + loop);
+            if (statement.elseBranch !is null) validateFinallyBody([statement.elseBranch], loops, breaks);
+            foreach (branch; statement.switchCases) validateFinallyBody(branch.body, loops, breaks + 1);
+        }
+    }
+
     bool isTypedLambdaExpressionWithParen() const
     {
         if (!check(TokenKind.leftParen)) return false;
@@ -1545,6 +1655,7 @@ private struct Parser
         {
             while (cursor < tokens.length)
             {
+                if (isRefParameterModifier(cursor)) ++cursor;
                 if (tokens[cursor].kind == TokenKind.identifier && tokens[cursor].lexeme == "lazy") ++cursor;
                 if (!scanType(cursor)) return false;
                 if (cursor >= tokens.length || tokens[cursor].kind != TokenKind.identifier) return false;

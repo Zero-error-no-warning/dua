@@ -57,6 +57,7 @@ mixin template ModuleImplementation()
         packageValue.tableValue["loaders"]=Value.from(context.loaders.dup);
         context.globals.define("package",packageValue);
         context.release=(ModuleContext ended){
+            closeCoroutines(ended);
             foreach(fiber;fiberEvaluatorContexts.keys){
                 auto state=fiberEvaluatorContexts[fiber];
                 if(fiber != cast(void*)Fiber.getThis() &&
@@ -134,6 +135,41 @@ mixin template ModuleImplementation()
         return result;
     }
 
+    /// Lazily create a standard module; explicit host/source modules keep priority.
+    ModuleHandle standardLibraryModule(string name)
+    {
+        if (auto host = name in modules) return *host;
+        enforce(name == "math" || name == "algorithm" || name == "string" || name == "random",
+            "Unknown standard library module: " ~ name);
+        auto handle = newModule(name);
+        try
+        {
+            if (name == "random")
+            {
+                import dua.stdlib.random : installRandomLibrary;
+                installRandomLibrary(this, handle);
+            }
+            else
+            {
+                if (name == "string")
+                    foreach (symbol, value; globals.get("string").tableValue) handle.bind(symbol, value);
+                else
+                {
+                    import dua.stdlib.mathematics : extendedMathFunctions, installMathematicsModule;
+                    if (name == "math")
+                    {
+                        auto extensions = extendedMathFunctions();
+                        foreach (symbol, value; globals.get("math").tableValue)
+                            if ((symbol in extensions) is null) handle.bind(symbol, value);
+                    }
+                    installMathematicsModule(handle, name == "algorithm");
+                }
+            }
+        }
+        catch (Exception error) { modules.remove(name); throw error; }
+        return handle;
+    }
+
     /// Shared lookup for runtime and non-executing module analysis.
     ImportResolution resolveImport(string request, string importer = "", bool pathImport = false, string[string] overlays = null)
     {
@@ -147,6 +183,11 @@ mixin template ModuleImplementation()
         }
         auto result = resolveFileImport(request, importer, pathImport, effectiveModulePaths(),
             path => (path in overlays) !is null);
+        if (!result.key.length && !pathImport && ["math", "algorithm", "string", "random"].canFind(request))
+        {
+            standardLibraryModule(request);
+            return ImportResolution(request, importer, request, request, null, true, false);
+        }
         if(result.key.length)if(auto context=currentModuleContext())if(context.validateSource !is null)context.validateSource(result.sourceName);
         if (result.key.length && ((result.key in moduleSources) !is null || (result.key in modules) !is null))
             result.registered = true;
@@ -191,8 +232,12 @@ mixin template ModuleImplementation()
 
     /// Source discovery and exported declarations without script evaluation.
     ModuleAnalysis analyzeModule(string source, string sourceName = "", string[] hostClassTypes = null,
-        string[string] sourceOverlays = null)
+        string[string] sourceOverlays = null, ModuleContext context = null)
     {
+        if(context !is null){
+            auto scope_=enterModuleContext(context);scope(exit)leaveModuleContext(scope_);
+            return analyzeModuleState(source, sourceName, hostClassTypes, sourceOverlays);
+        }
         return analyzeModuleState(source, sourceName, hostClassTypes, sourceOverlays);
     }
 
@@ -207,6 +252,7 @@ mixin template ModuleImplementation()
         auto analyzer = moduleAnalyzer(false, overlays);
         try
         {
+            if(auto context=currentModuleContext())if(context.validateSource !is null && sourceName.length)context.validateSource(sourceName);
             auto key = previous !is null ? previous.key : sourceName.length ? canonicalModulePath(sourceName) : "";
             result.root = analyzer.bind(source, sourceName, key, previous);
             result.modules = analyzer.modules;
@@ -223,9 +269,10 @@ mixin template ModuleImplementation()
         return result;
     }
 
-    ImportPathCompletion[] importPathCompletions(string prefix, string sourceName, string[string] overlays = null)
+    ImportPathCompletion[] importPathCompletions(string prefix, string sourceName, string[string] overlays = null, ModuleContext context = null)
     {
-        return completeImportPaths(prefix, sourceName, overlays);
+        auto selected=context is null ? currentModuleContext() : context;
+        return completeImportPaths(prefix, sourceName, overlays, selected is null ? null : selected.validateSource);
     }
 
     /// Creates a fresh instance; import/require/loadModule still return the default.

@@ -35,11 +35,13 @@ struct ModuleExportInfo
     string[] baseTypes;
     string[] parameterTypes;
     bool[] parameterLazy;
+    bool[] parameterRef;
     bool variadic;
     bool nominalValue;
     string sourceName;
     size_t line, column;
     size_t requiredParameterCount = size_t.max; // 未知のホスト署名では個数を断定しません。
+    string[] parameterNames; // Tooling metadata; no expressions/default values are evaluated.
 }
 
 /// Parsed and bound source. Import discovery never executes user code.
@@ -228,6 +230,7 @@ final class ModuleAnalyzer
             }
             collectImports(statement.body, unit);
             if (statement.elseBranch !is null) collectImports([statement.elseBranch], unit);
+            if (statement.finallyBranch !is null) collectImports([statement.finallyBranch], unit);
             if (statement.init !is null) collectImports([statement.init], unit);
             foreach (branch; statement.switchCases) collectImports(branch.body, unit);
             visitStatementLambdas(statement, body => collectImports(body, unit));
@@ -368,6 +371,7 @@ final class ModuleAnalyzer
         bindExpression(statement.rangeEnd, unit);
         bindScope(statement.body, unit);
         bindStatement(statement.elseBranch, unit);
+        bindStatement(statement.finallyBranch, unit);
         bindStatement(statement.init, unit);
         bindStatement(statement.incrementStatement, unit);
         foreach (branch; statement.switchCases)
@@ -501,6 +505,8 @@ final class ModuleAnalyzer
             { info.kind = "function"; info.type = statement.returnType; info.displayType = statement.returnType;
                 info.parameterTypes = statement.parameterTypes; info.variadic = statement.variadic;
                 info.parameterLazy = statement.parameterLazy;
+                info.parameterRef = statement.parameterRef;
+                info.parameterNames = statement.parameters;
                 info.requiredParameterCount = dua.ast.requiredParameterCount(statement.parameters.length,
                     statement.parameterDefaults, statement.variadic); }
             else
@@ -528,6 +534,7 @@ final class ModuleAnalyzer
             if (statement.publicTypeName.length) unit.types ~= describe(statement, unit);
             collectTypeMetadata(statement.body, unit);
             if (statement.elseBranch !is null) collectTypeMetadata([statement.elseBranch], unit);
+            if (statement.finallyBranch !is null) collectTypeMetadata([statement.finallyBranch], unit);
             if (statement.init !is null) collectTypeMetadata([statement.init], unit);
             foreach (branch; statement.switchCases) collectTypeMetadata(branch.body, unit);
             visitStatementLambdas(statement, body => collectTypeMetadata(body, unit));

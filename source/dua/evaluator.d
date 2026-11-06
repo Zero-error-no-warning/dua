@@ -21,6 +21,26 @@ import std.exception : enforce;
 import std.format : format;
 import std.math : floor;
 
+// A reference retains its owning environment and resolves by name on each
+// access. No pointer into a growable map or expired call frame escapes.
+package(dua) final class ReferenceArgument : DeferredArgument
+{
+    Environment owner;
+    string name, type;
+    this(Environment owner, string name)
+    {
+        this.owner = owner; this.name = name; this.type = owner.bindingType(name);
+        auto value = owner.find(name);
+        enforce(value !is null, "Undefined reference argument: " ~ name);
+        if (value.kind == ValueKind.function_)
+            enforce(cast(DeferredArgument) value.functionValue is null
+                || cast(ReferenceArgument) value.functionValue !is null, "Cannot reference a lazy parameter");
+    }
+    override string resultType() const { return type; }
+    override Value invoke(Value[] args) { owner.validateModuleLifetime(); return owner.get(name); }
+    void assign(Value value) { owner.validateModuleLifetime(); owner.assign(name, value); }
+}
+
 package final class ScriptThrownException : SourceException
 {
     Value thrownValue;
@@ -116,6 +136,8 @@ struct EvaluatorContext
     package EvaluationStack!Value thisContextStack;
     package RunOptions currentRunOptions;
     package size_t executedSteps;
+    package size_t finallyDepth;
+    package Exception unwindingException;
 }
 
 final class Environment
@@ -314,6 +336,13 @@ final class Environment
 
     private static void assignBinding(Binding* binding, Value value)
     {
+        if (binding.value.kind == ValueKind.function_)
+            if (auto reference = cast(ReferenceArgument) binding.value.functionValue)
+            {
+                if (binding.validator !is null) value = binding.validator(value);
+                reference.assign(value);
+                return;
+            }
         enforce(binding.value.kind != ValueKind.function_ || cast(DeferredArgument)binding.value.functionValue is null,
             "Cannot assign to a lazy parameter" );
         if (binding.validator !is null) value = binding.validator(value);
@@ -564,7 +593,7 @@ mixin template EvaluatorImplementation()
                         string elementType, keyType;
                         if (splitContainerType(resolveContainerType(declaredType), elementType, keyType)
                             || hasLiteralConstraint(declaredType) || hasNonNullConstraint(declaredType)
-                            || hasContainerConstraint(declaredType))
+                            || hasContainerConstraint(declaredType) || hasFloatingPromotion(declaredType))
                             declarationEnvironment.define(name, value, containerValidator(declaredType));
                         else
                             declarationEnvironment.define(name, value);
@@ -590,35 +619,7 @@ mixin template EvaluatorImplementation()
                     result.lastValue = Value.nullValue();
                     break;
                 case Statement.Kind.try_:
-                    try
-                    {
-                        result = executeStatements(statement.body, new Environment(environment, layoutFor(statement)));
-                    }
-                    catch (Exception error)
-                    {
-                        if (cast(ExecutionLimitException) error !is null)
-                        {
-                            throw error;
-                        }
-                        Value original = Value.nullValue();
-                        string kind = "RuntimeError";
-                        if (auto thrown = cast(ScriptThrownException) error)
-                        {
-                            original = thrown.thrownValue;
-                            kind = "ScriptError";
-                        }
-                        Value[] frames;
-                        auto trace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack : evaluatorContext.callStack.view;
-                        foreach (frame; trace) frames ~= Value.from(frame);
-                        Value[string] errorInfo;
-                        errorInfo["kind"] = Value.from(kind);
-                        errorInfo["message"] = Value.from(error.msg);
-                        errorInfo["value"] = original;
-                        errorInfo["stack"] = Value.from(frames);
-                        auto catchEnvironment = new Environment(environment, catchLayoutFor(statement));
-                        catchEnvironment.define(statement.name, Value.from(errorInfo));
-                        result = executeStatements(statement.elseBranch.body, catchEnvironment);
-                    }
+                    result = executeTryStatement(statement, environment);
                     break;
                 case Statement.Kind.assign:
                     if (statement.assignmentOperator.length)
@@ -663,7 +664,7 @@ mixin template EvaluatorImplementation()
                     auto callable = Value.fromFunction(new ScriptCallable(statement.name, this, environment,
                         statement.parameters, statement.variadic, statement.body,
                         statement.parameterTypes, statement.returnType, layoutFor(statement), statement.line, statement.column,
-                        statement.parameterDefaults, statement.parameterLazy));
+                        statement.parameterDefaults, statement.parameterLazy, statement.parameterRef));
                     environment.define(statement.name, callable);
                     result.lastValue = callable;
                     if (statement.isExported)
@@ -753,14 +754,18 @@ mixin template EvaluatorImplementation()
                     break;
                 case Statement.Kind.foreach_:
                     auto iterable = evaluate(statement.iterable, environment);
+                    enforce(!statement.reverseIteration || statement.rangeEnd !is null || iterable.kind == ValueKind.array,
+                        "foreach_reverse expects an array or an integer range");
                     if (statement.rangeEnd !is null)
                     {
                         // 境界を開始時に一度だけ評価し、配列を確保せず上端非包含で進めます。
                         auto end = evaluate(statement.rangeEnd, environment);
                         enforce(iterable.kind == ValueKind.integer && end.kind == ValueKind.integer,
                             "Range foreach bounds must be integers");
-                        foreach (index; iterable.integerValue .. end.integerValue)
+                        auto cursor = statement.reverseIteration ? end.integerValue : iterable.integerValue;
+                        while (statement.reverseIteration ? cursor > iterable.integerValue : cursor < end.integerValue)
                         {
+                            auto index = statement.reverseIteration ? --cursor : cursor++;
                             auto itemEnvironment = new Environment(environment, layoutFor(statement));
                             itemEnvironment.define(statement.iteratorName, Value.from(index));
                             result = executeStatement(statement.body[0], itemEnvironment);
@@ -771,8 +776,10 @@ mixin template EvaluatorImplementation()
                     }
                     else if (iterable.kind == ValueKind.array)
                     {
-                        foreach (index, item; iterable.arrayValue)
+                        foreach (offset; 0 .. iterable.arrayValue.length)
                         {
+                            auto index = statement.reverseIteration ? iterable.arrayValue.length - 1 - offset : offset;
+                            auto item = iterable.arrayValue[index];
                             auto itemEnvironment = new Environment(environment, layoutFor(statement));
                             if (statement.iteratorSecondName.length == 0)
                             {
@@ -954,8 +961,11 @@ mixin template EvaluatorImplementation()
                 return target;
             case Expression.Kind.get:
                 auto property = cast(GetExpression) target;
-                auto container = evaluate(property.target, environment);
-                resolved = new GetExpression(new LiteralExpression(container), property.memberName);
+                Expression writeback;
+                auto container = resolvePropertyReceiver(property, environment, writeback);
+                auto frozen = new GetExpression(new LiteralExpression(container), property.memberName);
+                frozen.arrayLengthTarget = writeback;
+                resolved = frozen;
                 resolved.line = target.line;
                 resolved.column = target.column;
                 current = evaluate(resolved, environment);
@@ -965,6 +975,7 @@ mixin template EvaluatorImplementation()
                 enforce(!indexed.isSlice, "Slice cannot be an assignment target");
                 enforce(indexed.indices.length == 1, "Index assignment requires a single index");
                 auto container = evaluate(indexed.target, environment);
+                enforce(container.kind != ValueKind.string_, "String elements are immutable");
                 if(container.isNativeAggregate)
                     if(auto setter=container.findMember("opIndexAssign"))
                         enforce(setter.kind!=ValueKind.function_,"Native indexed compound assignment is not supported");
@@ -986,6 +997,17 @@ mixin template EvaluatorImplementation()
         return resolved;
     }
 
+    // lengthは配列の値でなくハンドルを更新するため、取得と書戻しで同じ場所を使います。
+    private Value resolvePropertyReceiver(GetExpression get, Environment environment, out Expression writeback)
+    {
+        writeback = get.arrayLengthTarget;
+        Value receiver;
+        if (get.memberName == "length" && writeback is null && isAssignmentLocation(get.target))
+            writeback = resolveCompoundTarget(get.target, environment, receiver);
+        else receiver = evaluate(get.target, environment);
+        return receiver;
+    }
+
     private void assignTarget(Expression target, Value value, Environment environment, bool simpleAssignment=true)
     {
         try
@@ -998,10 +1020,16 @@ mixin template EvaluatorImplementation()
                     return;
                 case Expression.Kind.get:
                     auto get = cast(GetExpression) target;
-                    auto container = evaluate(get.target, environment);
+                    Expression writeback;
+                    auto container = resolvePropertyReceiver(get, environment, writeback);
                     enforce(container.kind != ValueKind.null_, "Cannot assign member '" ~ get.memberName ~ "' on null");
-                    enforce(container.kind != ValueKind.array || get.memberName != "length",
-                        "Array length is read-only");
+                    if (container.kind == ValueKind.array && get.memberName == "length")
+                    {
+                        enforce(writeback !is null, "Array length requires an assignable array");
+                        auto resized = resizeScriptArray(container, value);
+                        assignTarget(writeback, resized, environment);
+                        return;
+                    }
                     enforce(container.isFieldAggregate,
                         "Property assignment currently supports tables/reflected structs/classes");
                     value = container.validateFieldAssignment(get.memberName, value);
@@ -1030,6 +1058,7 @@ mixin template EvaluatorImplementation()
                     auto container = evaluate(indexed.target, environment);
                     enforce(container.kind != ValueKind.null_, "Cannot index untyped null");
                     enforce(container.kind != ValueKind.null_, "Cannot index untyped null");
+                    enforce(container.kind != ValueKind.string_, "String elements are immutable");
                     enforce(!indexed.isSlice, "Slice cannot be an assignment target");
                     enforce(indexed.indices.length == 1, "Index assignment requires a single index");
                     // A compound target already resolved its index to a literal and measured length once.
@@ -1106,6 +1135,84 @@ mixin template EvaluatorImplementation()
         }
     }
 
+    private void executeFinally(Statement block, Environment environment, Exception pending = null)
+    {
+        auto limits = evaluatorContext.currentRunOptions.limits;
+        auto steps = evaluatorContext.executedSteps;
+        auto trace = evaluatorContext.lastErrorStack;
+        bool limited = cast(ExecutionLimitException) pending !is null;
+        if (limited)
+        {
+            // Cleanup cannot bypass a limit or run forever after the main
+            // budget is exhausted. Preserve the original limit classification.
+            evaluatorContext.executedSteps = 0;
+            evaluatorContext.currentRunOptions.limits.maxSteps = 1024;
+            evaluatorContext.currentRunOptions.limits.maxCallDepth = evaluatorContext.callStack.length + 16;
+        }
+        scope(exit) if (limited)
+        {
+            auto cleanupSteps = evaluatorContext.executedSteps;
+            evaluatorContext.currentRunOptions.limits = limits;
+            evaluatorContext.executedSteps = cleanupSteps > size_t.max - steps ? size_t.max : steps + cleanupSteps;
+            evaluatorContext.lastErrorStack = trace;
+        }
+        ++evaluatorContext.finallyDepth;
+        scope(exit) --evaluatorContext.finallyDepth;
+        auto result = executeStatements(block.body, new Environment(environment, layoutFor(block)));
+        enforce(!result.returned && !result.broke && !result.continued, "Control flow cannot leave finally");
+    }
+
+    private ExecutionResult executeTryStatement(Statement statement, Environment environment)
+    {
+        ExecutionResult result; Exception pending;
+        try
+        {
+
+                    try
+                    {
+                        result = executeStatements(statement.body, new Environment(environment, layoutFor(statement)));
+                    }
+                    catch (Exception error)
+                    {
+                        if (cast(ExecutionLimitException) error !is null || statement.elseBranch is null)
+                        {
+                            throw error;
+                        }
+                        Value original = Value.nullValue();
+                        string kind = "RuntimeError";
+                        if (auto thrown = cast(ScriptThrownException) error)
+                        {
+                            original = thrown.thrownValue;
+                            kind = "ScriptError";
+                        }
+                        Value[] frames;
+                        auto trace = evaluatorContext.lastErrorStack.length > 0 ? evaluatorContext.lastErrorStack : evaluatorContext.callStack.view;
+                        foreach (frame; trace) frames ~= Value.from(frame);
+                        Value[string] errorInfo;
+                        errorInfo["kind"] = Value.from(kind);
+                        errorInfo["message"] = Value.from(error.msg);
+                        errorInfo["value"] = original;
+                        errorInfo["stack"] = Value.from(frames);
+                        auto catchEnvironment = new Environment(environment, catchLayoutFor(statement));
+                        catchEnvironment.define(statement.name, Value.from(errorInfo));
+                        result = executeStatements(statement.elseBranch.body, catchEnvironment);
+                    }
+        }
+        catch (Exception error) { pending = error; }
+        if (statement.finallyBranch !is null)
+        {
+            try executeFinally(statement.finallyBranch, environment, pending);
+            catch (Exception cleanup)
+            {
+                if (cast(ExecutionLimitException) pending !is null) throw pending;
+                if (pending !is null && cleanup !is pending) cleanup.next = pending;
+                throw cleanup;
+            }
+        }
+        if (pending !is null) throw pending;
+        return result;
+    }
+
     private Value evaluate(Expression expression, Environment environment)
     {
         try
@@ -1160,38 +1267,7 @@ mixin template EvaluatorImplementation()
                             assert(0);
                     }
                 case Expression.Kind.binary:
-                    auto binary = cast(BinaryExpression) expression;
-                    if (binary.operatorSymbol == "is")
-                    {
-                        return Value.from(valueIsType(
-                            evaluate(binary.left, environment), (cast(VariableExpression) binary.right).name));
-                    }
-                    if (binary.operatorSymbol == "&&")
-                    {
-                        auto left = evaluate(binary.left, environment);
-                        if (!left.truthy())
-                        {
-                            return Value.from(false);
-                        }
-
-                        auto right = evaluate(binary.right, environment);
-                        return Value.from(right.truthy());
-                    }
-
-                    if (binary.operatorSymbol == "||")
-                    {
-                        auto left = evaluate(binary.left, environment);
-                        if (left.truthy())
-                        {
-                            return Value.from(true);
-                        }
-
-                        auto right = evaluate(binary.right, environment);
-                        return Value.from(right.truthy());
-                    }
-
-                    return evaluateBinary(binary.operatorSymbol,
-                        evaluate(binary.left, environment), evaluate(binary.right, environment));
+                    return evaluateBinaryExpression(cast(BinaryExpression) expression, environment);
                 case Expression.Kind.ternary:
                     auto ternary = cast(TernaryExpression) expression;
                     return evaluate(ternary.condition, environment).truthy()
@@ -1200,7 +1276,7 @@ mixin template EvaluatorImplementation()
                 case Expression.Kind.call:
                     auto call = cast(CallExpression) expression;
                     auto caller = callSite(call);
-                    return evaluateCall(call.callee, call.arguments, environment, caller);
+                    return evaluateCall(call.callee, call.arguments, environment, caller, call.argumentNames);
                 case Expression.Kind.array:
                     auto array = cast(ArrayExpression) expression;
                     Value[] items;
@@ -1271,65 +1347,9 @@ mixin template EvaluatorImplementation()
                     return Value.fromFunction(new ScriptCallable("anonymous", this, environment,
                         functionExpression.parameters, functionExpression.variadic, functionExpression.body,
                         functionExpression.parameterTypes, functionExpression.returnType, layoutFor(functionExpression),
-                        functionExpression.line, functionExpression.column, functionExpression.parameterDefaults, functionExpression.parameterLazy));
+                        functionExpression.line, functionExpression.column, functionExpression.parameterDefaults, functionExpression.parameterLazy, functionExpression.parameterRef));
                 case Expression.Kind.get:
-                    auto get = cast(GetExpression) expression;
-                    auto container = evaluate(get.target, environment);
-                    enforce(container.kind != ValueKind.null_, "Cannot access member '" ~ get.memberName ~ "' on null");
-                    if (container.kind == ValueKind.array && get.memberName == "length")
-                        return Value.from(cast(long) container.arrayValue.length);
-                    if (container.kind == ValueKind.associativeArray
-                        && (get.memberName == "keys" || get.memberName == "values" || get.memberName == "length"))
-                        return associativeProperty(container, get.memberName);
-                    if (container.isFieldAggregate)
-                    {
-                        Value getter;
-                        if (container.lookupPropertyGetter(get.memberName, getter))
-                        {
-                            auto refreshed = invokeFunctionValueWithThis(getter, [], container, callSite(get));
-                            auto property = container.findMember(get.memberName);
-                            if (!container.isClassReference && (property is null || property.kind != ValueKind.function_))
-                            {
-                                container.refreshMember(get.memberName, refreshed);
-                            }
-                            return refreshed;
-                        }
-                        if (auto value = container.findMember(get.memberName))
-                        {
-                            if (container.moduleOwner is null && value.kind == ValueKind.function_
-                                && value.functionValue.acceptsArity(0))
-                            {
-                                return invokeFunctionValueWithThis(*value, [], container, callSite(get));
-                            }
-                            return value.withReceiver(container);
-                        }
-                        Value resolved;
-                        if (resolveTableIndex(container, get.memberName, resolved))
-                        {
-                            return resolved;
-                        }
-                    }
-                    // メンバーと __index を優先し、受け手だけで呼べる UFCS を
-                    // 既存の引数なしメンバーと同じ arity 判定で評価します。
-                    if (!get.withMember) if (auto functionValue = resolveUfcs(get.memberName, environment))
-                    {
-                        auto callable = functionValue.functionValue;
-                        // raw bindNative のように引数数が不明な関数は、
-                        // 必須引数の不足を避けるため明示呼び出しに残します。
-                        auto knownArity = callable.expectedArity() != size_t.max
-                            || callable.minimumArity() != 0 || callable.maximumArity() != size_t.max
-                            || (cast(ScriptCallable)callable) !is null
-                            || (cast(ReflectedCallable)callable) !is null
-                            || (cast(OverloadedReflectedCallable)callable) !is null;
-                        if (knownArity && callable.acceptsArity(1))
-                            return invokeFunctionValue(*functionValue, [container], callSite(get));
-                    }
-                    if (container.kind == ValueKind.associativeArray)
-                        return associativeProperty(container, get.memberName);
-                    enforce(container.isFieldAggregate,
-                        "Property access currently supports tables/reflected structs/classes or callable UFCS");
-                    enforce(false, format("Unknown property '%s'", get.memberName));
-                    assert(0);
+                    return evaluateGetExpression(cast(GetExpression) expression, environment);
                 case Expression.Kind.index:
                     auto indexed = cast(IndexExpression) expression;
                     auto container = evaluate(indexed.target, environment);
@@ -1356,17 +1376,7 @@ mixin template EvaluatorImplementation()
                         auto lowerBound = cast(size_t) start;
                         auto upperBound = cast(size_t) finish;
                         enforce(upperBound <= container.arrayValue.length, "Slice end out of range");
-                        Value[] sliced;
-                        if (lowerBound < upperBound)
-                        {
-                            sliced = container.arrayValue[lowerBound .. upperBound].dup;
-                        }
-                        auto result = container.isNullContainer ? Value.nullArray(container.arrayElementType)
-                            : Value.fromOwnedArray(sliced, container.arrayElementType);
-                        if (container.arrayValidation !is null)
-                            foreach (types; container.arrayValidation.localTypes)
-                                result = prepareUnionArray(result, types);
-                        return result;
+                        return container.slicedArrayHandle(lowerBound, upperBound);
                     }
                     auto indices = evaluateExpressionList(indexed.indices, environment);
                     return readIndex(container, indices, callSite(indexed));
@@ -1390,6 +1400,17 @@ mixin template EvaluatorImplementation()
         }
         enforce(indices.length == 1, "Indexing requires a single index unless opIndex is defined");
         auto index = indices[0];
+        if (container.kind == ValueKind.string_)
+        {
+            // D string indexes UTF-8 code units, not decoded characters. Dua has
+            // no char scalar, so expose the unsigned byte as an integer.
+            enforce(index.kind == ValueKind.integer || index.kind == ValueKind.boolean,
+                "String index expects an integer");
+            auto position = index.kind == ValueKind.boolean ? cast(long) index.booleanValue : index.toInt();
+            enforce(position >= 0 && cast(ulong) position < container.stringValue.length,
+                "String index out of range");
+            return Value.from(cast(int) cast(ubyte) container.stringValue[cast(size_t) position]);
+        }
         if (container.kind == ValueKind.associativeArray)
         {
             index = checkedAssociativeKey(container, index);
@@ -1410,7 +1431,7 @@ mixin template EvaluatorImplementation()
             if (resolveTableIndex(container, key, resolved)) return resolved;
             return Value.nullValue();
         }
-        enforce(false, "Indexing currently supports arrays and tables");
+        enforce(false, "Indexing currently supports arrays, strings and tables");
         assert(0);
     }
 
@@ -1468,6 +1489,109 @@ mixin template EvaluatorImplementation()
                 enforce(result <= long.max, "Result exceeds Dua's signed 64-bit integer storage");
             return Value.from(cast(long) result);
         }
+    }
+
+    // Separate expression frames keep ordinary recursive calls small.
+    private Value evaluateBinaryExpression(BinaryExpression binary, Environment environment)
+    {
+        if (binary.operatorSymbol == "is")
+        {
+            return Value.from(valueIsType(
+                evaluate(binary.left, environment), (cast(VariableExpression) binary.right).name));
+        }
+        if (binary.operatorSymbol == "??")
+        {
+            auto left = evaluate(binary.left, environment);
+            return left.isNullReference ? evaluate(binary.right, environment) : left;
+        }
+        if (binary.operatorSymbol == "&&")
+        {
+            auto left = evaluate(binary.left, environment);
+            if (!left.truthy())
+            {
+                return Value.from(false);
+            }
+
+            auto right = evaluate(binary.right, environment);
+            return Value.from(right.truthy());
+        }
+
+        if (binary.operatorSymbol == "||")
+        {
+            auto left = evaluate(binary.left, environment);
+            if (left.truthy())
+            {
+                return Value.from(true);
+            }
+
+            auto right = evaluate(binary.right, environment);
+            return Value.from(right.truthy());
+        }
+
+        return evaluateBinary(binary.operatorSymbol,
+            evaluate(binary.left, environment), evaluate(binary.right, environment));
+    }
+
+    // Separate expression frames keep ordinary recursive calls small.
+    private Value evaluateGetExpression(GetExpression get, Environment environment)
+    {
+        auto container = evaluate(get.target, environment);
+        if (get.nullConditional && container.isNullReference) return Value.nullValue();
+        enforce(container.kind != ValueKind.null_, "Cannot access member '" ~ get.memberName ~ "' on null");
+        if ((container.kind == ValueKind.array || container.kind == ValueKind.string_) && get.memberName == "length")
+            return Value.from(measuredLength(container));
+        if (container.kind == ValueKind.associativeArray
+            && (get.memberName == "keys" || get.memberName == "values" || get.memberName == "length"))
+            return associativeProperty(container, get.memberName);
+        if (container.isFieldAggregate)
+        {
+            Value getter;
+            if (container.lookupPropertyGetter(get.memberName, getter))
+            {
+                auto refreshed = invokeFunctionValueWithThis(getter, [], container, callSite(get));
+                auto property = container.findMember(get.memberName);
+                if (!container.isClassReference && (property is null || property.kind != ValueKind.function_))
+                {
+                    container.refreshMember(get.memberName, refreshed);
+                }
+                return refreshed;
+            }
+            if (auto value = container.findMember(get.memberName))
+            {
+                if (container.moduleOwner is null && value.kind == ValueKind.function_
+                    && value.functionValue.acceptsArity(0))
+                {
+                    return invokeFunctionValueWithThis(*value, [], container, callSite(get));
+                }
+                return value.withReceiver(container);
+            }
+            Value resolved;
+            if (resolveTableIndex(container, get.memberName, resolved))
+            {
+                return resolved;
+            }
+        }
+        // メンバーと __index を優先し、受け手だけで呼べる UFCS を
+        // 既存の引数なしメンバーと同じ arity 判定で評価します。
+        if (!get.withMember) if (auto functionValue = resolveUfcs(get.memberName, environment))
+        {
+            auto callable = functionValue.functionValue;
+            // raw bindNative のように引数数が不明な関数は、
+            // 必須引数の不足を避けるため明示呼び出しに残します。
+            auto knownArity = callable.expectedArity() != size_t.max
+                || callable.minimumArity() != 0 || callable.maximumArity() != size_t.max
+                || (cast(ScriptCallable)callable) !is null
+                || (cast(ReflectedCallable)callable) !is null
+                || (cast(OverloadedReflectedCallable)callable) !is null;
+            if (knownArity && callable.acceptsArity(1))
+                return invokeFunctionValue(*functionValue, [container], callSite(get));
+        }
+        if (container.kind == ValueKind.associativeArray)
+            return associativeProperty(container, get.memberName);
+        enforce(container.isFieldAggregate,
+            "Property access currently supports tables/reflected structs/classes or callable UFCS");
+        enforce(false, format("Unknown property '%s'", get.memberName));
+        assert(0);
     }
 
     private Value castValue(Value value, string targetType, bool checkedConversion = false, size_t depth = 0)
@@ -1606,7 +1730,9 @@ mixin template EvaluatorImplementation()
                             enforce(valueMatchesType(element, left.arrayElementType),
                                 typeMismatchMessage(left.arrayElementType, "Array element expected " ~ left.arrayElementType));
                         }
-                    return Value.fromOwnedArray(combined, left.arrayElementType);
+                    auto result = Value.fromOwnedArray(combined, left.arrayElementType);
+                    result.arrayDefaultType = left.arrayDefaultType;
+                    return result;
                 }
                 return Value.from(stringify(left) ~ stringify(right));
             case operatorCode("+"):
@@ -1729,7 +1855,83 @@ mixin template EvaluatorImplementation()
         return value.kind==ValueKind.null_ ? "" : argumentType(value);
     }
 
-    private Value[] callArguments(Value callee, Expression[] expressions, Environment environment, size_t offset=0)
+    private Value referenceCallArgument(Expression expression, Environment environment)
+    {
+        auto variable = cast(VariableExpression) expression;
+        enforce(variable !is null, "ref arguments currently require a variable");
+        return Value.fromFunction(new ReferenceArgument(environment, variable.name));
+    }
+
+    private void bindReferenceParameter(Environment environment, string name, Value value, string type)
+    {
+        auto reference = value.kind == ValueKind.function_ ? cast(ReferenceArgument) value.functionValue : null;
+        enforce(reference !is null, "Expected a ref argument for parameter: " ~ name);
+        enforce(resolveContainerType(reference.type) == resolveContainerType(type),
+            "ref argument type must match exactly: " ~ type ~ " (got " ~ reference.type ~ ")");
+        environment.define(name, value, (Value next) {
+            auto prepared = prepareContainerValue(next, type);
+            enforce(valueMatchesType(prepared, type), "ref assignment expected " ~ type);
+            return prepared;
+        });
+        environment.declareType(name, type);
+    }
+
+    private struct NamedArgumentPlan { size_t[] positions; size_t length; }
+
+    private NamedArgumentPlan namedArgumentPlan(Value callee, string[] names, size_t offset)
+    {
+        auto function_ = callee.kind == ValueKind.function_ ? cast(ScriptCallable) callee.functionValue : null;
+        enforce(function_ !is null, "Named arguments currently require a Dua function");
+        auto fixed = function_.variadic ? function_.parameters.length - 1 : function_.parameters.length;
+        enforce(offset <= fixed, "Invalid named UFCS receiver");
+        NamedArgumentPlan result;
+        result.length = fixed - offset;
+        bool[size_t] assigned;
+        size_t positional = offset;
+        foreach (name; names)
+        {
+            size_t position;
+            if (!name.length) position = positional++;
+            else
+            {
+                position = size_t.max;
+                foreach (index, parameter; function_.parameters)
+                    if (parameter == name)
+                    {
+                        enforce(position == size_t.max, "Ambiguous parameter name: " ~ name);
+                        position = index;
+                    }
+                enforce(position != size_t.max, "Unknown named argument: " ~ name);
+                enforce(position >= offset && position < fixed, "Cannot name the receiver or variadic parameter: " ~ name);
+            }
+            enforce(function_.variadic || position < fixed, "Too many arguments");
+            enforce((position in assigned) is null, "Parameter supplied more than once");
+            assigned[position] = true;
+            result.positions ~= position - offset;
+            if (position - offset >= result.length) result.length = position - offset + 1;
+        }
+        return result;
+    }
+
+    private Value[] namedCallArguments(Value callee, Expression[] expressions, string[] names,
+        Environment environment, size_t offset)
+    {
+        auto plan = namedArgumentPlan(callee, names, offset);
+        auto values = new Value[plan.length];
+        foreach (ref value; values) value = omittedArgumentValue();
+        foreach (index, expression; expressions)
+        {
+            auto position = plan.positions[index];
+            values[position] = callee.functionValue.refParameter(position + offset)
+                ? referenceCallArgument(expression, environment)
+                : callee.functionValue.lazyParameter(position + offset)
+                ? Value.fromFunction(new ExpressionArgument(this, environment, expression))
+                : evaluate(expression, environment);
+        }
+        return values;
+    }
+
+    private Value[] callArguments(Value callee, Expression[] expressions, Environment environment, size_t offset=0, string[] names=null)
     {
         if (callee.isFieldAggregate)
         {
@@ -1739,22 +1941,25 @@ mixin template EvaluatorImplementation()
                 if (lookupMetamethod(callee,"__call",method)) { callee=method; ++offset; }
             }
         }
+        if (names.length) return namedCallArguments(callee, expressions, names, environment, offset);
         Value[] args;
         foreach(index, expression;expressions)
-            args ~= callee.kind==ValueKind.function_ && callee.functionValue.lazyParameter(index+offset)
+            args ~= callee.kind==ValueKind.function_ && callee.functionValue.refParameter(index+offset)
+                ? referenceCallArgument(expression,environment)
+                : callee.kind==ValueKind.function_ && callee.functionValue.lazyParameter(index+offset)
                 ? Value.fromFunction(new ExpressionArgument(this,environment,expression))
                 : evaluate(expression,environment);
         return args;
     }
 
     private Value evaluateCall(Expression calleeExpression, Expression[] expressions, Environment environment,
-        CallSite caller)
+        CallSite caller, string[] names = null)
     {
         if (calleeExpression.kind == Expression.Kind.get)
         {
             auto get = cast(GetExpression) calleeExpression;
             // UFCSの先頭引数もlazyならreceiver式を先に実行してはいけません。
-            if(!get.withMember) if(auto ufcs=resolveUfcs(get.memberName,environment))
+            if(!get.nullConditional && !get.withMember) if(auto ufcs=resolveUfcs(get.memberName,environment))
             {
                 if(ufcs.functionValue.lazyParameter(0)) {
                     auto known=unevaluatedCallable(get.target,environment);
@@ -1765,24 +1970,25 @@ mixin template EvaluatorImplementation()
                         enforce(known.isFieldAggregate || ["int","long","uint","ulong","float","double","bool","string","array"].canFind(type),
                             "Cannot resolve lazy UFCS receiver without evaluation; use an explicit function call");
                         Value[] args=[Value.fromFunction(new ExpressionArgument(this,environment,get.target))];
-                        args~=callArguments(*ufcs,expressions,environment,1);
+                        args~=callArguments(*ufcs,expressions,environment,1,names);
                         return invokeFunctionValue(*ufcs,args,caller);
                     }
                 }
             }
             auto receiver = evaluate(get.target, environment);
+            if (get.nullConditional && receiver.isNullReference) return Value.nullValue();
             Value callee;
             size_t offset;
             if (receiver.isFieldAggregate)
                 if (auto method=receiver.findMember(get.memberName)) callee=*method;
             if (callee.kind==ValueKind.null_ && !get.withMember)
                 if (auto ufcs=resolveUfcs(get.memberName,environment)) {callee=*ufcs;offset=1;}
-            auto args=callArguments(callee,expressions,environment,offset);
+            auto args=callArguments(callee,expressions,environment,offset,names);
             return callMethodOrUfcs(receiver, get.memberName, args, environment, caller, !get.withMember);
         }
 
         auto callee=evaluate(calleeExpression,environment);
-        return invokeCallableValue(callee,callArguments(callee,expressions,environment),caller);
+        return invokeCallableValue(callee,callArguments(callee,expressions,environment,0,names),caller);
     }
 
     private Value invokeCallableValue(Value callee, Value[] args, CallSite caller)
@@ -1998,7 +2204,7 @@ mixin template EvaluatorImplementation()
 
     private Value delegate(Value) containerValidator(string declaredType)
     {
-        if (hasLiteralConstraint(declaredType) || hasNonNullConstraint(declaredType) || hasContainerConstraint(declaredType))
+        if (hasLiteralConstraint(declaredType) || hasNonNullConstraint(declaredType) || hasContainerConstraint(declaredType) || hasFloatingPromotion(declaredType))
             return (Value next) {
                 auto prepared = prepareContainerValue(next, declaredType);
                 enforce(valueMatchesType(prepared, declaredType),

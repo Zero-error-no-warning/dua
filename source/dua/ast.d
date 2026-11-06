@@ -106,16 +106,19 @@ final class Statement : AstNode
     string[] parameters;
     string[] parameterTypes;
     bool[] parameterLazy;
+    bool[] parameterRef;
     Expression[] parameterDefaults; // 省略時に呼出しごと評価する式。既定値なしはnull。
     bool variadic;
     Statement[] body;
     Statement elseBranch;
+    Statement finallyBranch;
     Statement init;
     Statement incrementStatement;
     Expression condition;
     string iteratorName;
     string iteratorSecondName;
     Expression iterable;
+    bool reverseIteration;
     Expression rangeEnd; // foreach の上端。null なら従来のコレクション反復。
     SwitchCase[] switchCases;
 
@@ -235,6 +238,7 @@ final class CallExpression : Expression
 {
     Expression callee;
     Expression[] arguments;
+    string[] argumentNames; // Empty array for the original positional call path.
     this(Expression callee, Expression[] arguments)
     {
         super(Kind.call);
@@ -283,6 +287,7 @@ final class FunctionExpression : Expression
     string[] parameters;
     string[] parameterTypes;
     bool[] parameterLazy;
+    bool[] parameterRef;
     Expression[] parameterDefaults; // 省略時に呼出しごと評価する式。既定値なしはnull。
     bool variadic;
     Statement[] body;
@@ -298,8 +303,27 @@ final class FunctionExpression : Expression
     }
 }
 
+package(dua) bool isAssignmentLocation(Expression target)
+{
+    if (target is null || hasNullConditionalAccess(target)) return false;
+    if (target.kind == Expression.Kind.variable || target.kind == Expression.Kind.get) return true;
+    auto index = cast(IndexExpression) target;
+    return index !is null && !index.isSlice && index.indices.length == 1;
+}
+
+package(dua) bool hasNullConditionalAccess(Expression expression)
+{
+    if (auto get = cast(GetExpression) expression)
+        return get.nullConditional || hasNullConditionalAccess(get.target);
+    if (auto index = cast(IndexExpression) expression) return hasNullConditionalAccess(index.target);
+    if (auto call = cast(CallExpression) expression) return hasNullConditionalAccess(call.callee);
+    return false;
+}
+
 final class GetExpression : Expression
 {
+    package(dua) Expression arrayLengthTarget; // 評価済みの配列ハンドルの書戻し先。解析ASTには設定しません。
+    bool nullConditional;
     bool withMember; // 先頭ドットは外側のUFCSへfallbackしない。
     Expression target;
     string memberName;

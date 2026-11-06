@@ -46,6 +46,7 @@ function analyzeSource(executable, source, options = {}) {
   const input = { protocolVersion: 1, operation: 'analyze', source, sourceName: options.sourceName || '',
     modulePaths: options.modulePaths || [], hostClassTypes: options.hostClassTypes || [],
     hostModules: options.hostModules || [], overlays: options.overlays || [] };
+  if (options.sourceBoundary) input.sourceBoundary = options.sourceBoundary;
   if (typeof options.importPathPrefix === 'string') input.importPathPrefix = options.importPathPrefix;
   return request(executable, JSON.stringify(input), [], true);
 }

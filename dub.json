@@ -23,6 +23,13 @@
 			"targetType":"library"
 		},
 		{
+			"name":"example",
+			"targetType":"executable",
+			"mainSourceFile":"source/app.d",
+			"targetPath":".dub/examples",
+			"targetName":"dua-example"
+		},
+		{
 			"name":"vscode-check",
 			"targetType":"executable",
 			"mainSourceFile":"tools/vscode-check/main.d",

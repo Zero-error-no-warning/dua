@@ -20,13 +20,13 @@ unittest
             && length(values) == values.length && len(values) == values.length
             && values.length() == 3 && values[0] == 40;
     }).truthy());
-    assert(!engine.runSafe("auto a = [1]; a.length = 2;").ok);
-    assert(!engine.runSafe("auto a = [1]; a.length += 1;").ok);
+    assert(engine.run("int[] a = [1]; a.length = 2; return a == [1, 0];").truthy());
+    assert(engine.run("int[] a = [1]; a.length += 1; return a == [1, 0];").truthy());
     assert(!engine.runSafe("return [1].missing;").ok);
     assert(engine.run("return {length = 42}.length;").toInt() == 42);
     assert(engine.check("int[] a = [1]; int n = a.length;").length == 0);
     assert(engine.check("int[] a = [1]; string n = a.length;").length == 1);
-    assert(engine.check("int[] a = [1]; a.length = 2;").length == 1);
+    assert(engine.check("int[] a = [1]; a.length = 2;").length == 0);
 }
 
 unittest

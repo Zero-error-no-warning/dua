@@ -1,5 +1,6 @@
 'use strict';
 const { scanQuotedString, decodeStringContent } = require('./stringSyntax');
+const standardFunctions = require('./standardFunctions');
 const fs = require('node:fs');
 const path = require('node:path');
 const {readType,withoutNullExclusion,splitContainer}=require('./typeSyntax');
@@ -110,7 +111,8 @@ function callValue(base) {
 }
 function indexValue(base,catalog) {
   if (!base) return null;
-  const types = (base.types || []).flatMap(type => {const container=splitContainer(withoutNullExclusion(type));
+  const types = (base.types || []).flatMap(type => {if(withoutNullExclusion(type)==='string')return ['int'];
+    const container=splitContainer(withoutNullExclusion(type));
     return container ? [container.element] : typeInfo(type,catalog)?.elementTypes || [];});
   return combine([base.element,types.length ? {types,assets:null} : null]);
 }
@@ -137,7 +139,8 @@ function propertyValue(base,name,catalog,environment,explicit) {
   const entries=base?.entries || (base?.entry ? [base.entry] : []);
   const module=entries.some(entry=>entry.kind==='module');
   const array=base && ('element' in base || base.types?.some(type=>withoutNullExclusion(type).endsWith('[]')));
-  if (!module && array && name==='length') return {types:['int'],assets:null};
+  const string=base?.types?.length && base.types.every(type=>withoutNullExclusion(type)==='string');
+  if (!module && (array || string) && name==='length') return {types:['int'],assets:null};
   if (!module && base?.associative && ['length','keys','values'].includes(name)) {
     return name==='length' ? {types:['int'],assets:null} : {types:[],assets:null,element:name==='keys'?base.keys:base.element};
   }
@@ -151,7 +154,7 @@ function propertyValue(base,name,catalog,environment,explicit) {
   }
   // Table/host fields and __index can hide UFCS. Only sealed built-in receivers are inferred here.
   if (!base || module || base.typeObject || !(array || base.associative || base.types?.length && base.types.every(type=>scalarTypes.has(withoutNullExclusion(type))))) return null;
-  const callable=environment.get(name) || entryValue(catalog.symbols[name],name);
+  const callable=environment.get(name) || entryValue(catalog.symbols[name] || standardFunctions[name],name);
   const signatures=signaturesFor(callable).filter(signature=> {
     if (!Array.isArray(signature.parameters) || !signature.parameters.length) return false;
     if (!explicit && !acceptsArity(signature,1)) return false;
@@ -211,8 +214,8 @@ function resolveExpression(input, environment, catalog, context = {}) {
       let end = index, name = first.text;
       while (input[end]?.text === '.' && input[end + 1]?.kind === 'identifier') {name += '.' + input[end + 1].text;end += 2;}
       if (input[end]?.text === '{' && catalog.symbols[name]?.kind === 'type') {
-        value=entryValue(catalog.symbols[name],name); index=end;
-      } else value = environment.get(first.text) || entryValue(catalog.symbols[first.text]
+        value=entryValue(catalog.symbols[name] || standardFunctions[name],name); index=end;
+      } else value = environment.get(first.text) || entryValue(catalog.symbols[first.text] || standardFunctions[first.text]
         || (Object.keys(catalog.symbols).some(key => key.startsWith(first.text + '.')) ? { kind: 'module' } : null), first.text);
     }
     else return null;
@@ -220,7 +223,7 @@ function resolveExpression(input, environment, catalog, context = {}) {
       const next = input[index];
       if (next.text === '.' && input[index + 1]?.kind === 'identifier') {
         index += 2; value = strictWithMember ? memberValue(value,input[index-1].text,catalog)
-          : propertyValue(value,input[index-1].text,catalog,environment,input[index]?.text==='(');
+          : propertyValue(value,input[index-1].text,catalog,environment,input[index]?.text==='(' || context.callTarget && index===input.length);
       } else if (next.text === '(') {
         const start = ++index;
         let depth = 1;
@@ -244,14 +247,15 @@ function resolveExpression(input, environment, catalog, context = {}) {
       } else if (next.text === '[' && input[index + 1]?.kind === 'string' && input[index + 2]?.text === ']') {
         value = indexValue(value,catalog) || memberValue(value, input[index + 1].value, catalog); index += 3;
       } else if (next.text === '[') {
-        let depth = 1; index++;
+        let depth = 1, slice = false; index++;
         while (index < input.length && depth) {
+          if (depth===1 && input[index].text==='.' && input[index+1]?.text==='.') slice=true;
           if (input[index].text === '[') depth++;
           if (input[index].text === ']') depth--;
           index++;
         }
         if (depth) return null;
-        value = indexValue(value,catalog);
+        value = slice && value?.types?.some(type=>withoutNullExclusion(type)==='string') ? null : indexValue(value,catalog);
       } else break;
     }
     return value;
@@ -275,7 +279,7 @@ function environmentAt(input, catalog, initial = new Map(), context = {}) {
       if (')]}'.includes(p)) depth++;
       if ('([{'.includes(p)) { if (!depth) break; depth--; }
       if (!depth && [';', '{', '}'].includes(p)) break;
-      if (!depth && ['if', 'else', 'while', 'for', 'foreach', 'case'].includes(p)) return true;
+      if (!depth && ['if', 'else', 'while', 'for', 'foreach', 'foreach_reverse', 'case'].includes(p)) return true;
     }
     return false;
   }
@@ -294,11 +298,12 @@ function environmentAt(input, catalog, initial = new Map(), context = {}) {
         let open = close, depth = 1;
         while (--open >= 0 && depth) { if (input[open].text === ')') depth++; if (input[open].text === '(') depth--; }
         open++;
-        if (!['if', 'while', 'for', 'foreach', 'switch', 'catch', 'with'].includes(input[open - 1]?.text)) {
+        if (!['if', 'while', 'for', 'foreach', 'foreach_reverse', 'switch', 'catch', 'with'].includes(input[open - 1]?.text)) {
           for (let p of splitArguments(input.slice(open + 1, close))) {
             const equal = p.findIndex(t => t.text === '=');
             if (equal >= 0) p = p.slice(0, equal);
-            if (p[0]?.text === 'lazy') p = p.slice(1);
+            const refType=p[0]?.text==='ref' ? readType(p,1,name=>name) : null;
+            if (p[0]?.text==='lazy' || refType && p[refType.next]?.kind==='identifier') p=p.slice(1);
             const name = p.at(-1), type = p.slice(0, -1).map(t => t.text).join('');
             const resolved = catalogTypeName(type, catalog);
             if (name?.kind === 'identifier') set(name.text, resolved ? declaredValue(resolved) : {types:[],assets:null}, true);
@@ -310,7 +315,10 @@ function environmentAt(input, catalog, initial = new Map(), context = {}) {
     if (t.text === '}') { if (scopes.length > 1) scopes.pop(); continue; }
     if (t.text === 'import' && input[i + 1]?.kind === 'identifier') {
       const name = input[i + 1].text, alias = input[i + 2]?.text === 'as' ? input[i + 3]?.text : name;
-      if (alias) set(alias, entryValue(catalog.symbols[name] || { kind: 'module' }, name), true);
+      if (alias) {
+        const bound = catalog.symbols[alias]?.kind === 'module' ? alias : name;
+        set(alias, entryValue(catalog.symbols[bound] || {kind:'module'},bound),true);
+      }
     }
     let name, expression, declaration = false, declaredType;
     if (t.kind === 'identifier' || t.text==='(') {
@@ -328,15 +336,18 @@ function environmentAt(input, catalog, initial = new Map(), context = {}) {
             const variadic=declaration.slice(-3).every(token=>token.text==='.') && declaration.length>=4;
             if(variadic)declaration=declaration.slice(0,-3);
             const lazy=declaration[0]?.text === 'lazy';
-            if(lazy)declaration=declaration.slice(1);
+            const refType=declaration[0]?.text==='ref' ? readType(declaration,1,name=>name) : null;
+            const reference=!!refType && declaration[refType.next]?.kind==='identifier';
+            if(lazy || reference)declaration=declaration.slice(1);
             const name=declaration.at(-1);
             const rawType=declaration.slice(0,-1).map(token=>token.text).join('');
             const type=catalogTypeName(rawType,catalog);
             return name?.kind==='identifier' && (type || !rawType || rawType==='auto')
-              ? {name:name.text,type:type || 'any',optional:equal>=0,variadic,lazy} : null;
+              ? {name:name.text,type:type || 'any',displayType:rawType || 'any',optional:equal>=0,variadic,lazy,reference} : null;
           });
-          if(parameters.every(Boolean))set(input[next].text,entryValue({kind:'function',signatures:[{returnType:resolved || 'any',parameters}]},input[next].text),true);
+          if(parameters.every(Boolean))set(input[next].text,entryValue({kind:'function',signatures:[{returnType:resolved || 'any',displayReturnType:input.slice(i,next).map(token=>token.text).join('').replace('delegate(',' delegate('),parameters}]},input[next].text),true);
           else set(input[next].text,entryValue({kind:'function'},input[next].text),true);
+          if (scopes.length===1 && context.declarations) context.declarations.set(input[next].text,lookup.get(input[next].text));
           i=close;continue;
         }
       }
@@ -395,7 +406,7 @@ function receiverTokens(input) {
   return input.slice(start);
 }
 function detail(label, entry) {
-  return (entry.signatures || []).map(s => `${label}(${(s.parameters || []).map(p => `${p.lazy ? 'lazy ' : ''}${p.displayType || p.type} ${p.name}${p.optional ? ' = …' : ''}${p.variadic ? '...' : ''}`).join(', ')}) → ${entry.displayType || s.returnType}`).join('\n') || `${label}${entry.type ? ': ' + (entry.displayType || entry.type) : ''}`;
+  return (entry.signatures || []).map(s => `${label}(${(s.parameters || []).map(p => `${p.lazy ? 'lazy ' : p.reference ? 'ref ' : ''}${p.displayType || p.type} ${p.name}${p.optional ? ' = …' : ''}${p.variadic ? '...' : ''}`).join(', ')}) → ${entry.displayType || s.returnType}`).join('\n') || `${label}${entry.type ? ': ' + (entry.displayType || entry.type) : ''}`;
 }
 
 // 完成前の式でも、括弧・引数・文境界を越えてwith対象を漏らさない。
@@ -446,6 +457,13 @@ function apiCompletions(source, offset, catalog, context = {}) {
     const fullEnv=environmentAt(input.slice(0,partial?-2:-1),catalog,context.initial,context);
     const scoped=withCompletionReceiver(input,input.length-(partial?2:1),fullEnv,catalog,context);
     const value = scoped ? scoped.value : resolveExpression(receiver, env, catalog, context);
+    if (!value?.typeObject && value?.types?.length && value.types.every(type=>withoutNullExclusion(type)==='string')) {
+      entries.set('length',{kind:'property',type:'int'});
+      for(const name of Object.keys(standardFunctions)) {
+        const method=propertyValue(value,name,catalog,env,true);
+        if(method?.entry)entries.set(name,{...method.entry,kind:'method'});
+      }
+    }
     if (value?.symbol) {
       const prefix = value.symbol + '.';
       for (const [key, entry] of Object.entries(catalog.symbols)) {
@@ -486,7 +504,7 @@ function cleanEntry(value, depth = 0) {
   return entry;
 }
 function loadCatalog(root, metadataFiles = ['.dua-completion.json']) {
-  const result = { symbols: Object.create(null), types: Object.create(null), assets: [], contexts: [], stringArguments: [], assetLoaders: [], root };
+  const result = { symbols: Object.create(null), types: Object.create(null), assets: [], contexts: [], stringArguments: [], assetLoaders: [], projectContexts: [], root };
   for (const filename of Array.isArray(metadataFiles) ? metadataFiles : []) {
     if (typeof filename !== 'string') continue;
     const absolute = path.resolve(root, filename);
@@ -513,6 +531,7 @@ function loadCatalog(root, metadataFiles = ['.dua-completion.json']) {
       const data = cached.data;
       Object.assign(result.symbols, data.symbols); Object.assign(result.types, data.types);
       result.origin = data.origin || filename;
+      if (data.projectContext) result.projectContexts.push(data.projectContext);
       for (const key of ['assets', 'contexts', 'stringArguments', 'assetLoaders']) if (Array.isArray(data[key])) result[key].push(...data[key]);
     } catch { /* A missing/partially replaced catalog must not break language features. */ }
   }

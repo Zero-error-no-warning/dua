@@ -11,12 +11,33 @@ import std.algorithm : canFind;
 import std.format : format;
 import std.json : JSONValue, parseJSON;
 
+private bool staticIntegerType(string type)
+{
+    return ["byte", "ubyte", "short", "ushort", "int", "uint", "long", "ulong"].canFind(type);
+}
+
+private bool mayBeReverseArray(string type, ref string[string] variables, size_t depth = 0)
+{
+    if (depth >= 64) return true;
+    type = resolveStaticType(type, variables);
+    string inner, element, key;
+    if (splitNonNullType(type, inner)) return mayBeReverseArray(inner, variables, depth + 1);
+    if (type == "any" || type == "array") return true;
+    if (splitContainerType(type, element, key)) return !key.length;
+    if (auto alternatives = "#union_" ~ type in variables)
+        foreach (candidate; parseJSON(*alternatives).array)
+            if (mayBeReverseArray(candidate.str, variables, depth + 1)) return true;
+    return false;
+}
+
 private struct StaticFunctionInfo
 {
     string[] parameterTypes;
     string returnType;
     bool variadic;
     size_t requiredArguments = size_t.max;
+    string[] parameterNames;
+    bool[] parameterRef;
 }
 
 /// Check the already-bound graph, without executing module initializers/loaders.
@@ -48,6 +69,7 @@ package(dua) CheckDiagnostic[] checkModuleGraph(ModuleAnalysis analysis, string[
             }
             definitions(statement.body);
             if (statement.elseBranch !is null) definitions([statement.elseBranch]);
+            if (statement.finallyBranch !is null) definitions([statement.finallyBranch]);
             foreach (branch; statement.switchCases) definitions(branch.body);
         }
     }
@@ -92,7 +114,7 @@ package(dua) CheckDiagnostic[] checkModuleGraph(ModuleAnalysis analysis, string[
             {
                 auto name = aliasName ~ "." ~ export_.name;
                 if (export_.kind == "function")
-                    functions[name] = StaticFunctionInfo(export_.parameterTypes, export_.type, export_.variadic, export_.requiredParameterCount);
+                    functions[name] = StaticFunctionInfo(export_.parameterTypes, export_.type, export_.variadic, export_.requiredParameterCount, export_.parameterNames, export_.parameterRef);
                 else if (export_.kind == "variable") variables["#member_" ~ name] =
                     export_.nominalValue ? "@named:" ~ export_.type : export_.type;
                 else if (export_.kind == "type")
@@ -210,7 +232,7 @@ private void checkStatements(Statement[] statements, ref string[string] variable
             foreach (type; statement.parameterTypes) parameterTypes ~= resolveStaticType(type, variables);
             functions[statement.name] = StaticFunctionInfo(
                 parameterTypes, resolveStaticType(statement.returnType, variables), statement.variadic,
-                requiredParameterCount(statement.parameters.length, statement.parameterDefaults, statement.variadic));
+                requiredParameterCount(statement.parameters.length, statement.parameterDefaults, statement.variadic), statement.parameters, statement.parameterRef);
         }
     }
     foreach (statement; statements)
@@ -267,6 +289,10 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                     else if (target.kind == Expression.Kind.index)
                     {
                         auto expected = inferExpressionType(target, variables, functions, diagnostics);
+                        auto indexed = cast(IndexExpression) target;
+                        auto container = resolveStaticType(inferExpressionType(indexed.target, variables, functions, diagnostics), variables);
+                        if (isResolvedStringType(container))
+                            diagnostics ~= CheckDiagnostic(target.line, target.column, "String elements are immutable");
                         checkNullLiteralContext(expression, expected, variables, diagnostics);
                         if (!staticTypesCompatible(actual, expected, variables))
                             diagnostics ~= CheckDiagnostic(target.line, target.column,
@@ -302,9 +328,21 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                                     typeMismatchMessage(*field, variables, "Field '" ~ get.memberName ~ "' expects " ~ *field));
                         }
                         string element, key;
-                        if (get.memberName == "length" && (container == "array"
-                            || (splitContainerType(container, element, key) && !key.length)))
-                            diagnostics ~= CheckDiagnostic(target.line, target.column, "Array length is read-only");
+                        auto lengthType = resolveStaticType(container, variables);
+                        if (get.memberName == "length" && (isResolvedStringType(lengthType)))
+                            diagnostics ~= CheckDiagnostic(target.line, target.column, "String length is read-only");
+                        if (get.memberName == "length" && (owner == "array"
+                            || (splitContainerType(owner, element, key) && !key.length)))
+                        {
+                            auto lengthValueType = resolveStaticType(actual, variables);
+                            if (lengthValueType != "any" && !staticIntegerType(lengthValueType))
+                                diagnostics ~= CheckDiagnostic(target.line, target.column, "Array length must be an integer");
+                            if (!isAssignmentLocation(get.target))
+                                diagnostics ~= CheckDiagnostic(target.line, target.column, "Array length requires an assignable array");
+                        }
+                        if (get.memberName == "length" && (owner == "associativeArray"
+                            || (splitContainerType(owner, element, key) && key.length)))
+                            diagnostics ~= CheckDiagnostic(target.line, target.column, "Associative array length is read-only");
                     }
                 }
                 break;
@@ -344,8 +382,21 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                 if (statement.incrementStatement !is null)
                     checkStatements([statement.incrementStatement], loopVariables, functions, diagnostics, expectedReturnType);
                 break;
+            case Statement.Kind.switch_:
+                inferExpressionType(statement.expression, variables, functions, diagnostics);
+                foreach (branch; statement.switchCases)
+                {
+                    // case式は外側の環境で評価し、本体は実行時と同じ独立スコープで検査します。
+                    // 到達性では絞らず、未選択のcase/defaultも事前診断の対象にします。
+                    if (!branch.isDefault)
+                        inferExpressionType(branch.pattern, variables, functions, diagnostics);
+                    auto branchVariables = variables.dup;
+                    auto branchFunctions = functions.dup;
+                    checkStatements(branch.body, branchVariables, branchFunctions, diagnostics, expectedReturnType);
+                }
+                break;
             case Statement.Kind.if_, Statement.Kind.while_,
-                 Statement.Kind.foreach_, Statement.Kind.switch_:
+                 Statement.Kind.foreach_:
                 if (statement.condition !is null)
                     inferExpressionType(statement.condition, variables, functions, diagnostics);
                 foreach (child; statement.body)
@@ -355,11 +406,16 @@ private void checkStatements(Statement[] statements, ref string[string] variable
                     {
                         auto iterableType = inferExpressionType(statement.iterable, variables, functions, diagnostics);
                         string element, key;
+                        iterableType = resolveStaticType(iterableType, variables);
+                        string nonNullIterable;
+                        if (splitNonNullType(iterableType, nonNullIterable)) iterableType = nonNullIterable;
+                        if (statement.reverseIteration && statement.rangeEnd is null && !mayBeReverseArray(iterableType, variables))
+                            addDiagnostic(diagnostics, statement, "foreach_reverse expects an array or an integer range");
                         if (statement.rangeEnd !is null)
                         {
-                            auto endType = inferExpressionType(statement.rangeEnd, variables, functions, diagnostics);
-                            if ((iterableType != "int" && iterableType != "any")
-                                || (endType != "int" && endType != "any"))
+                            auto endType = resolveStaticType(inferExpressionType(statement.rangeEnd, variables, functions, diagnostics), variables);
+                            if ((!staticIntegerType(iterableType) && iterableType != "any")
+                                || (!staticIntegerType(endType) && endType != "any"))
                                 addDiagnostic(diagnostics, statement, "Range foreach bounds must be integers");
                             nestedVariables[statement.iteratorName] = "int";
                         }
@@ -382,9 +438,17 @@ private void checkStatements(Statement[] statements, ref string[string] variable
             case Statement.Kind.try_:
                 auto tryVariables = variables.dup;
                 checkStatements(statement.body, tryVariables, functions, diagnostics, expectedReturnType);
-                auto catchVariables = variables.dup;
-                catchVariables[statement.name] = "table";
-                checkStatements(statement.elseBranch.body, catchVariables, functions, diagnostics, expectedReturnType);
+                if (statement.elseBranch !is null)
+                {
+                    auto catchVariables = variables.dup;
+                    catchVariables[statement.name] = "table";
+                    checkStatements(statement.elseBranch.body, catchVariables, functions, diagnostics, expectedReturnType);
+                }
+                if (statement.finallyBranch !is null)
+                {
+                    auto finalVariables = variables.dup;
+                    checkStatements(statement.finallyBranch.body, finalVariables, functions, diagnostics, expectedReturnType);
+                }
                 break;
             case Statement.Kind.expression:
                 inferExpressionType(statement.expression, variables, functions, diagnostics);
@@ -688,6 +752,7 @@ private string inferExpressionType(Expression expression, ref string[string] var
             if (["==", "!=", "<", "<=", ">", ">=", "&&", "||", "is"].canFind((cast(BinaryExpression) expression).operatorSymbol))
                 return "bool";
             auto op = (cast(BinaryExpression) expression).operatorSymbol;
+            if (op == "??") return left == "null" ? right : left == right ? left : "any";
             if (op == "~")
             {
                 // Unionが配列か文字列かは動的値で決まるため、連結結果は実行時に検査します。
@@ -718,6 +783,39 @@ private string inferExpressionType(Expression expression, ref string[string] var
             auto right = inferExpressionType((cast(TernaryExpression) expression).whenFalse, variables, functions, diagnostics);
             return middle == right ? middle : "any";
         case Expression.Kind.call:
+            auto call = cast(CallExpression) expression;
+            auto standardName = qualifiedExpressionName(call.callee);
+            auto standardArgs = call.arguments;
+            if (auto member = cast(GetExpression) call.callee)
+            {
+                standardName = "";
+                if (["count", "charAt"].canFind(member.memberName))
+                {
+                    auto receiver = resolveStaticType(inferExpressionType(member.target, variables, functions, diagnostics), variables);
+                    if (isResolvedStringType(receiver))
+                    {
+                        standardName = member.memberName;
+                        standardArgs = [member.target] ~ call.arguments;
+                    }
+                }
+            }
+            if (["count", "charAt"].canFind(standardName)
+                && (standardName in functions) is null && (standardName in variables) is null)
+            {
+                auto expectedCount = standardName == "count" ? 1 : 2;
+                if (standardArgs.length != expectedCount)
+                    diagnostics ~= CheckDiagnostic(expression.line, expression.column,
+                        format("%s expects %s arguments but got %s", standardName, expectedCount, standardArgs.length));
+                foreach (i, arg; standardArgs)
+                {
+                    auto actual = resolveStaticType(inferExpressionType(arg, variables, functions, diagnostics), variables);
+                    bool valid = i == 0 ? (actual == "any" || isResolvedStringType(actual))
+                        : ["any", "bool", "byte", "ubyte", "short", "ushort", "int", "uint", "long", "ulong"].canFind(actual);
+                    if (!valid) diagnostics ~= CheckDiagnostic(arg.line, arg.column,
+                        standardName ~ (i == 0 ? " expects a string" : " index expects an integer"));
+                }
+                return standardName == "count" ? "int" : "string";
+            }
             if (qualifiedExpressionName((cast(CallExpression) expression).callee).length)
             {
                 auto calledName = qualifiedExpressionName((cast(CallExpression) expression).callee);
@@ -735,13 +833,54 @@ private string inferExpressionType(Expression expression, ref string[string] var
                             format("Function '%s' expects %s to %s arguments but got %s", calledName,
                                 functionInfo.requiredArguments,
                                 functionInfo.variadic ? "unlimited" : format("%s", functionInfo.parameterTypes.length), supplied));
+                    size_t[] positions;
+                    if (call.argumentNames.length)
+                    {
+                        auto fixed = functionInfo.parameterTypes.length - (functionInfo.variadic ? 1 : 0);
+                        auto assigned = new bool[fixed];
+                        size_t positional;
+                        foreach (name; call.argumentNames)
+                        {
+                            size_t position;
+                            if (!name.length) position = positional++;
+                            else
+                            {
+                                position = size_t.max;
+                                foreach (i, parameter; functionInfo.parameterNames)
+                                    if (name == parameter) position = i;
+                                if (position == size_t.max || position >= fixed)
+                                    diagnostics ~= CheckDiagnostic(expression.line, expression.column,
+                                        "Unknown or unsupported named argument: " ~ name);
+                            }
+                            if (position < fixed)
+                            {
+                                if (assigned[position]) diagnostics ~= CheckDiagnostic(expression.line, expression.column,
+                                    "Parameter supplied more than once");
+                                assigned[position] = true;
+                            }
+                            positions ~= position;
+                        }
+                        if (functionInfo.requiredArguments != size_t.max)
+                            foreach (i; 0 .. functionInfo.requiredArguments)
+                                if (i < assigned.length && !assigned[i])
+                                    diagnostics ~= CheckDiagnostic(expression.line, expression.column, "Missing required named argument");
+                    }
                     foreach (index, argument; (cast(CallExpression) expression).arguments)
                     {
                         auto actual = inferExpressionType(argument, variables, functions, diagnostics);
+                        auto suppliedIndex = positions.length ? positions[index] : index;
                         auto parameterIndex = functionInfo.variadic && functionInfo.parameterTypes.length
-                            && index >= functionInfo.parameterTypes.length - 1 ? functionInfo.parameterTypes.length - 1 : index;
-                        if (parameterIndex < functionInfo.parameterTypes.length
-                            && !staticTypesCompatible(boundaryActual(argument, actual), functionInfo.parameterTypes[parameterIndex], variables))
+                            && suppliedIndex >= functionInfo.parameterTypes.length - 1 && suppliedIndex != size_t.max
+                            ? functionInfo.parameterTypes.length - 1 : suppliedIndex;
+                        if (parameterIndex < functionInfo.parameterRef.length && functionInfo.parameterRef[parameterIndex]
+                            && argument.kind != Expression.Kind.variable)
+                            diagnostics ~= CheckDiagnostic(argument.line, argument.column, "ref arguments currently require a variable");
+                        bool reference = parameterIndex < functionInfo.parameterRef.length && functionInfo.parameterRef[parameterIndex];
+                        bool compatible = parameterIndex >= functionInfo.parameterTypes.length
+                            || (reference
+                                ? actual == "any" || resolveStaticType(actual, variables) == resolveStaticType(functionInfo.parameterTypes[parameterIndex], variables)
+                                : staticTypesCompatible(boundaryActual(argument, actual), functionInfo.parameterTypes[parameterIndex], variables));
+                        if (!compatible)
                             diagnostics ~= CheckDiagnostic(argument.line, argument.column,
                                 typeMismatchMessage(functionInfo.parameterTypes[parameterIndex], variables, format("Argument %s to '%s' expects %s but has type %s",
                                     index + 1, calledName,
@@ -756,6 +895,24 @@ private string inferExpressionType(Expression expression, ref string[string] var
         case Expression.Kind.index:
             auto indexExpression = cast(IndexExpression) expression;
             auto container = inferExpressionType(indexExpression.target, variables, functions, diagnostics);
+            auto resolvedContainer = resolveStaticType(container, variables);
+            if (isResolvedStringType(resolvedContainer))
+            {
+                if (indexExpression.isSlice)
+                {
+                    diagnostics ~= CheckDiagnostic(expression.line, expression.column, "String slicing is not supported");
+                    return "any";
+                }
+                if (indexExpression.indices.length != 1)
+                    diagnostics ~= CheckDiagnostic(expression.line, expression.column, "String indexing requires a single index");
+                foreach (index; indexExpression.indices)
+                {
+                    auto actual = resolveStaticType(inferExpressionType(index, variables, functions, diagnostics), variables);
+                    if (!["any", "bool", "byte", "ubyte", "short", "ushort", "int", "uint", "long", "ulong"].canFind(actual))
+                        diagnostics ~= CheckDiagnostic(index.line, index.column, "String index expects an integer but has type " ~ actual);
+                }
+                return "int";
+            }
             string element, key;
             if (indexExpression.isSlice)
                 return container == "array" || (splitContainerType(container, element, key) && !key.length)
@@ -799,12 +956,14 @@ private string inferExpressionType(Expression expression, ref string[string] var
                 return "any";
             }
             string element, key;
-            if (get.memberName == "length" && (targetType == "array"
-                || splitContainerType(targetType, element, key)))
+            auto lengthType = resolveStaticType(targetType, variables);
+            if (get.memberName == "length" && (targetType == "array" || isResolvedStringType(lengthType) || splitContainerType(targetType, element, key)))
                 return "int";
             // table/ホスト値は動的メンバーが UFCS を隠せるため any を維持します。
             // メンバーを持たない値だけ、受け手一つで呼べる既知の関数を推論します。
             auto receiverType = resolveStaticType(targetType, variables);
+            if (get.memberName == "count" && (isResolvedStringType(receiverType))
+                && ("count" in functions) is null && ("count" in variables) is null) return "int";
             if (["int", "double", "bool", "string", "array", "associativeArray", "null"].canFind(receiverType)
                 || splitContainerType(receiverType, element, key))
             {
@@ -835,6 +994,12 @@ private bool mayUseBinaryOverload(string type, ref string[string] variables)
         && !splitContainerType(type, element, key) && !canFind(type, " delegate(");
 }
 
+private bool isResolvedStringType(string type)
+{
+    string inner;
+    if (splitNonNullType(type, inner)) type = inner;
+    return type == "string" || isStringLiteralType(type);
+}
 private string resolveStaticType(string name, ref string[string] variables, size_t depth = 0)
 {
     if (depth >= 64) return "any";
@@ -946,8 +1111,10 @@ private bool staticTypesCompatible(string actual, string expected, ref string[st
     if (actual == "null" && !isBuiltinTypeName(expected)
         && ("#class_" ~ expected in variables) !is null) return true;
     if (["byte", "ubyte", "short", "ushort", "uint", "long", "ulong"].canFind(expected))
-        return actual == "int";
-    if (expected == "float" || expected == "real") return actual == "double";
+        return actual == expected || actual == "int";
+    if (expected == "float" || expected == "real" || expected == "double")
+        return actual == expected || actual == "double"
+            || ["byte", "ubyte", "short", "ushort", "int", "uint", "long", "ulong"].canFind(actual);
     string element, key;
     if (splitContainerType(expected, element, key))
         return actual == expected || actual == (key.length ? "associativeArray" : "array")

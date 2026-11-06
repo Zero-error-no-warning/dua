@@ -1,16 +1,20 @@
 module dua.stdlib.core;
 
 import dua.evaluator : ScriptThrownException;
+import dua.execution : ExecutionLimitException;
 import dua.binding : NativeCallable, NativeFunction;
-import dua.stdlib.json : encodeJson;
-import dua.value : Value, ValueKind;
+import dua.stdlib.json : encodeJson, decodeJson;
+import dua.stdlib.text : splitText, joinText;
+import dua.stdlib.collections : sortedValues;
+import dua.value : Value, ValueKind, makeReflectedCallable;
+import dua.stdlib.unicode : countCodePoints, codePointAt;
 import std.algorithm : canFind;
 import std.conv : to;
 import std.datetime.systime : Clock;
 import std.exception : enforce;
 import std.file : exists, readText;
 import std.format : format;
-import std.math : floor;
+import std.math : floor, isFinite;
 import std.string : replace;
 import std.uni : toLower, toUpper;
 import std.utf : byDchar;
@@ -22,6 +26,8 @@ package(dua) struct StdlibContext
 {
     void delegate(string, StdlibNativeFunction) bindNative;
     void delegate(string, Value) bind;
+    void delegate(string, Value) bindFallback;
+    void delegate() step;
     string delegate(Value) stringify;
     Value delegate(scope const(Value)[]) typeOfValue;
     Value delegate(scope const(Value)[]) measureLengthValue;
@@ -120,6 +126,10 @@ package(dua) void installStandardLibraries(StdlibContext context)
             auto result = context.invokeFunctionValue(cast(Value) args[0], callArgs);
             return Value.from([Value.from(true), result]);
         }
+        catch (ExecutionLimitException error)
+        {
+            throw error;
+        }
         catch (Exception error)
         {
             return Value.from([Value.from(false), Value.from(error.msg)]);
@@ -139,6 +149,10 @@ package(dua) void installStandardLibraries(StdlibContext context)
             auto result = context.invokeFunctionValue(cast(Value) args[0], callArgs);
             return Value.from([Value.from(true), result]);
         }
+        catch (ExecutionLimitException error)
+        {
+            throw error;
+        }
         catch (Exception error)
         {
             auto handled = context.invokeFunctionValue(cast(Value) args[1], [Value.from(error.msg)]);
@@ -151,6 +165,31 @@ package(dua) void installStandardLibraries(StdlibContext context)
     context.bindNative("filter", (scope const(Value)[] args) {
         return context.filterValue(args);
     });
+
+    context.bindFallback("sorted", Value.fromFunction(new NativeCallable("sorted", (scope const(Value)[] args) {
+        enforce(args.length == 1 || args.length == 2, "sorted(array[, comparator]) expects one or two arguments");
+        if (args.length == 2) enforce(args[1].kind == ValueKind.function_, "sorted comparator must be a function");
+        return sortedValues(cast(Value) args[0], args.length == 2 ? cast(Value) args[1] : Value.init,
+            context.invokeFunctionValue, context.step);
+    })));
+
+    context.bindFallback("reduce", Value.fromFunction(new NativeCallable("reduce", (scope const(Value)[] args) {
+        enforce(args.length == 3, "reduce(array, initial, callback) expects three arguments");
+        enforce(args[0].kind == ValueKind.array, "reduce first argument must be an array");
+        enforce(args[2].kind == ValueKind.function_, "reduce callback must be a function");
+        auto accumulator = (cast(Value) args[1]).valueCopy();
+        auto callback = cast(Value) args[2];
+        foreach (item; args[0].arrayValue)
+        {
+            context.step();
+            accumulator = context.invokeFunctionValue(callback, [accumulator, cast(Value) item]);
+        }
+        return accumulator.valueCopy();
+    })));
+
+    // Known arities let UFCS read text.count and call text.charAt(index).
+    context.bindFallback("count", Value.fromFunction(makeReflectedCallable("count", &countCodePoints)));
+    context.bindFallback("charAt", Value.fromFunction(makeReflectedCallable("charAt", &codePointAt)));
 
     Value[string] stringLib;
     stringLib["len"] = Value.fromFunction(new NativeCallable("string.len", (scope const(Value)[] args) {
@@ -177,6 +216,19 @@ package(dua) void installStandardLibraries(StdlibContext context)
         enforce(args.length == 3, "string.replace(value, from, to) expects three arguments");
         return Value.from(args[0].toHostString().replace(args[1].toHostString(), args[2].toHostString()));
     }));
+    stringLib["split"] = Value.fromFunction(new NativeCallable("string.split", (scope const(Value)[] args) {
+        enforce(args.length == 2, "string.split(text, separator) expects two arguments");
+        return splitText(cast(Value) args[0], cast(Value) args[1]);
+    }));
+    stringLib["join"] = Value.fromFunction(new NativeCallable("string.join", (scope const(Value)[] args) {
+        enforce(args.length == 2, "string.join(parts, separator) expects two arguments");
+        return joinText(cast(Value) args[0], cast(Value) args[1]);
+    }));
+    import dua.stdlib.formatting : formatDua;
+    stringLib["format"] = Value.fromFunction(new NativeCallable("string.format", (scope const(Value)[] args) {
+        enforce(args.length > 0 && args[0].kind == ValueKind.string_, "string.format requires a format string");
+        return Value.from(formatDua(args[0].stringValue, args[1 .. $]));
+    }));
     context.bind("string", Value.from(stringLib));
 
     Value[string] mathLib;
@@ -187,7 +239,16 @@ package(dua) void installStandardLibraries(StdlibContext context)
     }));
     mathLib["floor"] = Value.fromFunction(new NativeCallable("math.floor", (scope const(Value)[] args) {
         enforce(args.length == 1, "math.floor(value) expects one argument");
-        return Value.from(cast(long) floor(args[0].toFloat()));
+        // Integers already are whole numbers; keep all 64 bits instead of
+        // rounding through double (which loses precision above 2^53).
+        if (args[0].kind == ValueKind.integer) return Value.from(args[0].integerValue);
+        auto rounded = floor(args[0].toFloat());
+        // long.max rounds up when represented as double; use an exclusive 2^63
+        // upper bound so a host floating-to-integer cast never overflows.
+        enforce(rounded.isFinite && rounded >= cast(double) long.min
+            && rounded < -cast(double) long.min,
+            "math.floor result is outside the integer range");
+        return Value.from(cast(long) rounded);
     }));
     mathLib["min"] = Value.fromFunction(new NativeCallable("math.min", (scope const(Value)[] args) {
         enforce(args.length >= 1, "math.min(value, ...) expects at least one argument");
@@ -215,6 +276,8 @@ package(dua) void installStandardLibraries(StdlibContext context)
         }
         return Value.from(maximum);
     }));
+    import dua.stdlib.mathematics : extendedMathFunctions;
+    foreach (name, value; extendedMathFunctions()) mathLib[name] = value;
     context.bind("math", Value.from(mathLib));
 
     Value[string] tableLib;
@@ -276,6 +339,16 @@ package(dua) void installStandardLibraries(StdlibContext context)
         }
         return Value.from(count);
     }));
+    utf8Lib["chars"] = Value.fromFunction(new NativeCallable("utf8.chars", (scope const(Value)[] args) {
+        enforce(args.length == 1 && args[0].kind == ValueKind.string_, "utf8.chars(text) expects one string");
+        Value[] characters;
+        foreach (character; byDchar(args[0].stringValue))
+        {
+            context.step();
+            characters ~= Value.from(character.to!string);
+        }
+        return Value.fromOwnedArray(characters, "string");
+    }));
     context.bind("utf8", Value.from(utf8Lib));
 
     Value[string] debugLib;
@@ -301,6 +374,11 @@ package(dua) void installStandardLibraries(StdlibContext context)
     jsonLib["encode"] = Value.fromFunction(new NativeCallable("json.encode", (scope const(Value)[] args) {
         enforce(args.length == 1, "json.encode(value) expects one argument");
         return Value.from(encodeJson(args[0]));
+    }));
+    jsonLib["decode"] = Value.fromFunction(new NativeCallable("json.decode", (scope const(Value)[] args) {
+        enforce(args.length == 1, "json.decode(text) expects one argument");
+        enforce(args[0].kind == ValueKind.string_, "json.decode expects a string");
+        return decodeJson(args[0].stringValue);
     }));
     context.bind("json", Value.from(jsonLib));
     context.bind("_ENV", Value.fromFunction(new NativeCallable("_ENV", (scope const(Value)[] args) {

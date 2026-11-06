@@ -30,14 +30,16 @@ Dua は、**D 言語アプリケーションへ組み込み可能な軽量スク
 ### 1. ビルド
 
 ```bash
-dub build --compiler=ldc2
+dub build --compiler=dmd
 ```
 
 ### 2. 実行
 
 ```bash
-dub run --compiler=ldc2
+dub run --config=example --compiler=dmd
 ```
+
+既定構成はライブラリです。`example` 構成は `source/app.d` の埋め込みサンプルを実行し、生成物は `.dub/examples` に置きます。LDC を使う場合は `--compiler=ldc2` に変更できます。
 
 ### 3. 最小埋め込み例
 
@@ -73,7 +75,7 @@ void main()
 - [埋め込み API リファレンス](docs/embedding-api-ja.md) — `ScriptEngine` / `Value` / reflection / 安全な実行
 - [デフォルト引数](docs/default-arguments-ja.md) — 末尾の複数既定値、呼出し時評価、スコープと可変値
 - [2つの with](docs/with-ja.md) — 型の共通メタテーブルと先頭ドットの字句対象
-- [今後の変更候補](docs/future-changes-ja.md) — 未決定の機能案と調査記録（実装予定ではありません）
+- [今後の変更候補（プロジェクト共通）](../docs/future-changes-ja.md) — 未決定の機能案と調査記録（実装予定ではありません）
 
 HTML版は外部依存のない単体ファイルです。原稿を更新したら `node docs/build-reference.mjs` で再生成できます。
 
@@ -95,7 +97,7 @@ HTML版は外部依存のない単体ファイルです。原稿を更新した�
 ## 開発者向け
 
 ```bash
-dub test --compiler=ldc2
+dub test --compiler=dmd
 ```
 
 CI を導入する場合も、まずこの 2 コマンド（`build` / `test`）を通す運用を推奨します。

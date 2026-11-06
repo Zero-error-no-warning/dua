@@ -154,7 +154,7 @@ unittest
         mapped[0].value = 14;
         filtered[0].value = 15;
         spread[0].reference.value = 99;
-        return original[0].value == 1 && spread[0].value == 11
+        return original[0].value == 12 && spread[0].value == 11
             && sliced[0].value == 12 && joined[0].value == 13
             && mapped[0].value == 14 && filtered[0].value == 15
             && original[1].reference.value == 99 && joined[2].value == 1;

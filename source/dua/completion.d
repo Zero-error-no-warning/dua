@@ -11,7 +11,7 @@ final class CompletionRegistry
     private JSONValue[string] symbols;
     private JSONValue[string] types;
     private JSONValue[][CallableValue] signatures;
-    private bool[string] pending;
+    private JSONValue[string] pending;
 
     void registerType(T)()
     {
@@ -24,12 +24,16 @@ final class CompletionRegistry
 
     void overload(alias declaration)(string path)
     {
-        auto entry = pending.get(path, false) ? symbols[path] : JSONValue(["kind": JSONValue("function")]);
+        auto entry = pending.get(path, JSONValue(["kind": JSONValue("function")]));
         auto values = "signatures" in entry.object ? entry["signatures"].array : null;
         values ~= hostCompletionSignature!declaration();
         entry["signatures"] = JSONValue(values);
-        symbols[path] = entry;
-        pending[path] = true;
+        pending[path] = entry;
+    }
+
+    package(dua) void discardPending(string path)
+    {
+        pending.remove(path);
     }
 
     void typed(T)(string path)
@@ -66,7 +70,7 @@ final class CompletionRegistry
     void value(string path, Value value, size_t depth = 0)
     {
         // Metadata and bridge-only bindings must never become user suggestions.
-        auto entry = pending.get(path, false) ? symbols[path] : JSONValue(["kind": JSONValue("variable")]);
+        auto entry = pending.get(path, JSONValue(["kind": JSONValue("variable")]));
         pending.remove(path);
         foreach (key; symbols.keys) if (key.startsWith(path ~ ".")) symbols.remove(key);
         if (value.kind == ValueKind.function_)
@@ -104,10 +108,29 @@ final class CompletionRegistry
         {
             bool hidden;
             foreach (piece; splitPath(path)) if (piece.startsWith("__")) hidden = true;
-            if (!hidden) visible[path] = entry;
+            if (!hidden) visible[path] = copyMetadata(entry);
         }
         return JSONValue(["schemaVersion": JSONValue(1),
-            "symbols": JSONValue(visible), "types": JSONValue(types)]);
+            "symbols": JSONValue(visible), "types": copyMetadata(JSONValue(types))]);
+    }
+
+    // JSONValue copies share arrays and objects. Export a recursively detached
+    // snapshot so editor consumers cannot alter the registry or other exports.
+    private JSONValue copyMetadata(JSONValue value)
+    {
+        if (value.type == JSONType.object)
+        {
+            JSONValue[string] result;
+            foreach (key, child; value.object) result[key] = copyMetadata(child);
+            return JSONValue(result);
+        }
+        if (value.type == JSONType.array)
+        {
+            JSONValue[] result;
+            foreach (child; value.array) result ~= copyMetadata(child);
+            return JSONValue(result);
+        }
+        return value;
     }
 
     private string[] splitPath(string path)

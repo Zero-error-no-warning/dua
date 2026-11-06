@@ -1,4 +1,6 @@
 module dua.runtime;
+
+import std.json : parseJSON;
 public import dua.evaluator : ModuleContext;
 import core.thread : Fiber;
 
@@ -6,6 +8,10 @@ import dua.ast;
 import dua.attributes;
 public import dua.binding;
 import dua.coroutine;
+import dua.coroutineExecution;
+import dua.coroutineExpressions;
+import dua.coroutineCalls;
+import dua.coroutineInterop;
 import dua.evaluator;
 import dua.scope_layout;
 import dua.scope_planner;
@@ -287,6 +293,13 @@ final class ModuleHandle
 
     void bind(string name, Value value)
     {
+        try environment.define(name, value);
+        catch (Exception error)
+        {
+            if (engine.completionRegistry_ !is null)
+                engine.completionRegistry_.discardPending(completionPath(name));
+            throw error;
+        }
         if (engine.completionRegistry_ !is null)
             engine.completionRegistry_.value(completionPath(name), value);
         if (value.isFieldAggregate)
@@ -295,7 +308,6 @@ final class ModuleHandle
         if (value.isClassReference)
             foreach (type; value.typeChain)
                 engine.nativeClassTypes[type.toHostString()] = true;
-        environment.define(name, value);
         if (visibility == ModuleVisibility.explicitExports)
             moduleValue.tableValue[name] = value.valueCopy();
     }
@@ -834,8 +846,24 @@ private final class CheckedLazyArgument : DeferredArgument
         return value;
     }
 }
+private final class OmittedArgument : CallableValue
+{
+    this() { super("omitted argument"); }
+    override Value invoke(Value[] args) { throw new Exception("Cannot invoke an omitted argument"); }
+}
+private Value omittedArgumentValue() { return Value.fromFunction(new OmittedArgument); }
+private bool isOmittedArgument(Value value) {
+    return value.kind == ValueKind.function_ && cast(OmittedArgument) value.functionValue !is null;
+}
+private bool hasOmittedArguments(Value[] args) {
+    foreach (value; args) if (isOmittedArgument(value)) return true;
+    return false;
+}
+
 final class ScriptCallable : CallableValue
 {
+    package(dua) ScriptEngine coroutineEngine(){return engine;}
+    package(dua) ModuleContext coroutineContext(){return moduleContext;}
     private ScriptEngine engine;
     private Environment closure;
     private ModuleContext moduleContext;
@@ -846,6 +874,7 @@ final class ScriptCallable : CallableValue
     private string[] parameterTypes;
     private Expression[] parameterDefaults;
     private bool[] parameterLazy;
+    private bool[] parameterRef;
     private size_t requiredArguments;
     private string returnType;
     private string sourceName;
@@ -863,7 +892,7 @@ final class ScriptCallable : CallableValue
 
     package(dua) this(string name, ScriptEngine engine, Environment closure, string[] parameters,
         bool variadic, Statement[] body, string[] parameterTypes, string returnType, ScopeLayout scopeLayout,
-        size_t declarationLine = 0, size_t declarationColumn = 0, Expression[] parameterDefaults = null, bool[] parameterLazy = null)
+        size_t declarationLine = 0, size_t declarationColumn = 0, Expression[] parameterDefaults = null, bool[] parameterLazy = null, bool[] parameterRef = null)
     {
         super(name);
         this.engine = engine;
@@ -875,6 +904,7 @@ final class ScriptCallable : CallableValue
         this.parameterTypes = parameterTypes.dup;
         this.parameterDefaults = parameterDefaults.dup;
         this.parameterLazy = parameterLazy.dup;
+        this.parameterRef = parameterRef.dup;
         if (this.parameterDefaults.length)
             foreach (index, parameter; this.parameters)
                 if (canFind(this.parameters[0 .. index], parameter)) { repeatedParameterNames = true; break; }
@@ -889,6 +919,7 @@ final class ScriptCallable : CallableValue
         this.scopeLayout = scopeLayout is null ? planScope(this.body, ["this"] ~ this.parameters) : scopeLayout;
     }
 
+    override bool refParameter(size_t index) const { return index < parameterRef.length && parameterRef[index]; }
     override bool lazyParameter(size_t index) const {
         return index < parameterLazy.length && parameterLazy[index];
     }
@@ -946,7 +977,7 @@ final class ScriptCallable : CallableValue
         auto environment = new Environment(closure, scopeLayout);
         // 全指定なら既定式は実行しません。重複名の既存エラーは予約経路で維持します。
         if (parameterDefaults.length && (repeatedParameterNames
-            || suppliedCount < (variadic ? parameters.length - 1 : parameters.length)))
+            || suppliedCount < (variadic ? parameters.length - 1 : parameters.length) || hasOmittedArguments(args)))
         {
             // 自身/後続引数は外側の同名変数へfallbackせず、未初期化として拒否します。
             environment.pendingBindingLabel = "Parameter";
@@ -958,8 +989,13 @@ final class ScriptCallable : CallableValue
         }
         foreach (index, parameter; parameters)
         {
+            if (refParameter(index)) {
+                enforce(index < suppliedCount, "Missing required ref argument: " ~ parameter);
+                engine.bindReferenceParameter(environment, parameter, args[index], parameterTypes[index]);
+                continue;
+            }
             if (lazyParameter(index)) {
-                enforce(index < suppliedCount, "Lazy default arguments are not supported");
+                enforce(index < suppliedCount && !isOmittedArgument(args[index]), "Missing required lazy argument: " ~ parameter);
                 environment.define(parameter, Value.fromFunction(new CheckedLazyArgument(engine,args[index],parameterTypes[index])));
                 environment.declareType(parameter,parameterTypes[index]);
                 continue;
@@ -968,7 +1004,7 @@ final class ScriptCallable : CallableValue
             {
                 auto rest = Value.from(args[index .. $].dup);
                 if (index < parameterTypes.length && (engine.hasLiteralConstraint(parameterTypes[index])
-                    || engine.hasNonNullConstraint(parameterTypes[index]) || engine.hasContainerConstraint(parameterTypes[index])))
+                    || engine.hasNonNullConstraint(parameterTypes[index]) || engine.hasContainerConstraint(parameterTypes[index]) || engine.hasFloatingPromotion(parameterTypes[index])))
                 {
                     auto restType = parameterTypes[index] ~ "[]";
                     rest = engine.prepareContainerValue(rest, restType);
@@ -977,7 +1013,7 @@ final class ScriptCallable : CallableValue
                 else environment.define(parameter, rest);
                 break;
             }
-            if (index >= suppliedCount)
+            if (index >= suppliedCount || isOmittedArgument(args[index]))
             {
                 enforce(index < parameterDefaults.length && parameterDefaults[index] !is null,
                     "Missing required argument: " ~ parameter);
@@ -994,7 +1030,7 @@ final class ScriptCallable : CallableValue
             if (index < parameterTypes.length && (splitContainerType(
                 engine.resolveContainerType(parameterTypes[index]), elementType, keyType)
                 || engine.hasLiteralConstraint(parameterTypes[index]) || engine.hasNonNullConstraint(parameterTypes[index])
-                || engine.hasContainerConstraint(parameterTypes[index])))
+                || engine.hasContainerConstraint(parameterTypes[index]) || engine.hasFloatingPromotion(parameterTypes[index])))
                 environment.define(parameter, args[index], engine.containerValidator(parameterTypes[index]));
             else
                 environment.define(parameter, args[index]);
@@ -1036,10 +1072,14 @@ final class ScriptEngine
     private string[string] typeRegistryNames;
     mixin ModuleImplementation;
     mixin CoroutineImplementation;
+    mixin StacklessExecution;
+    mixin StacklessExpressions;
+    mixin StacklessCalls;
     private EvaluatorContext rootEvaluatorContext;
     // Scene側でFiberが明示破棄されても、辞書のhash計算で破棄済みobjectを呼びません。
     private EvaluatorContext*[void*] fiberEvaluatorContexts;
     private ref EvaluatorContext evaluatorContext(){
+        if(stacklessContext !is null && stacklessHostFiber==cast(void*)Fiber.getThis())return *stacklessContext;
         auto fiber=Fiber.getThis();
         if(fiber is null)return rootEvaluatorContext;
         auto identity=cast(void*)fiber;
@@ -1048,6 +1088,7 @@ final class ScriptEngine
         return **found;
     }
     private ref const(EvaluatorContext) evaluatorContext() const{
+        if(stacklessContext !is null && stacklessHostFiber==cast(void*)Fiber.getThis())return *stacklessContext;
         auto fiber=Fiber.getThis();
         if(fiber !is null)if(auto found=cast(void*)fiber in fiberEvaluatorContexts)return **found;
         return rootEvaluatorContext;
@@ -1069,6 +1110,7 @@ final class ScriptEngine
         }
     }
     ModuleContext currentModuleContext(){
+        if(stacklessContext !is null && stacklessHostFiber==cast(void*)Fiber.getThis())return stacklessContext.moduleContext;
         auto fiber=Fiber.getThis();
         if(fiber is null)return rootEvaluatorContext.moduleContext;
         // 単なる文脈照会では、終了間際のFiber用stateを再生成しません。
@@ -1078,6 +1120,7 @@ final class ScriptEngine
     private ModuleHandle globalModule_;
     private bool[string] nativeClassTypes;
     private bool[string] nativeTypeNames;
+    private Value delegate(size_t)[string] arrayDefaultFactories;
     private CompletionRegistry completionRegistry_;
     private bool completionMetadataOnly;
 
@@ -1097,6 +1140,18 @@ final class ScriptEngine
         if (completionRegistry_ !is null) completionRegistry_.typed!T(name);
     }
 
+    private void registerArrayDefault(T)(string name)
+    {
+        // コンストラクタを呼ばず、DのT.initを新しい値として反映します。
+        static if (__traits(compiles, { T value; auto reflected = Value.reflect(value); }))
+            arrayDefaultFactories[name] = (size_t depth) {
+                T value = T.init;
+                auto reflected = Value.reflect(value);
+                reflected.setTypeChain([Value.from(name)]);
+                return reflected;
+            };
+    }
+
     private void registerHostType(T, Seen...)()
     {
         // Callable aggregates can return or accept themselves, including cycles
@@ -1106,6 +1161,8 @@ final class ScriptEngine
             static if (isMaterializedHostRange!T)
                 registerHostType!(ForeachType!T, Seen, T)();
             static if (isAggregateType!T) nativeTypeNames[hostReflectedTypeName!T] = true;
+            static if (is(T == struct) && !isMaterializedHostRange!T)
+                registerArrayDefault!T(hostReflectedTypeName!T);
             static if (isAggregateType!T)
                 if (completionRegistry_ !is null) completionRegistry_.registerType!T();
             static if (is(T == class))
@@ -1127,7 +1184,10 @@ final class ScriptEngine
 
     this()
     {
-        globals = new Environment();
+        // New optional standard names live outside the user's global scope.
+        // Existing load("int count=...") and native bind("count",...) must keep
+        // working; duplicate user declarations still fail in their own scope.
+        globals = new Environment(new Environment());
         globalModule_ = new ModuleHandle(this, "<global>", globals, ModuleVisibility.global);
         moduleSearchPaths = ["?.dua", "?/init.dua"];
         installStandardLibraries(stdlibContext());
@@ -1140,6 +1200,8 @@ final class ScriptEngine
         StdlibContext context;
         context.bindNative = (name, callback) => bindNative(name, callback);
         context.bind = (name, value) => globals.define(name, value);
+        context.bindFallback = (name, value) => globals.parent.define(name, value);
+        context.step = () => consumeStep();
         context.stringify = (value) => stringify(value);
         context.typeOfValue = (args) => typeOfValue(args);
         context.measureLengthValue = (args) => measureLengthValue(args);
@@ -1169,7 +1231,24 @@ final class ScriptEngine
         return globalModule_.get(name);
     }
 
-    void bindType(T)(string name)
+    void bindType(T)(string name) if (isAggregateType!T)
+    {
+        bindTypeImpl!T(name, (string symbol, Value value) { bind(symbol, value); });
+    }
+
+    package(dua) Value bindFallbackType(T)(string name) if (isAggregateType!T)
+    {
+        Value result;
+        bool metadata = !globals.contains(name);
+        bindTypeImpl!T(name, (string symbol, Value value) {
+            globals.parent.define(symbol, value);
+            result = value;
+            if (metadata && completionRegistry_ !is null) completionRegistry_.value(symbol, value);
+        }, metadata);
+        return result;
+    }
+
+    private void bindTypeImpl(T)(string name, void delegate(string, Value) binder, bool recordMetadata = true)
         if (isAggregateType!T)
     {
         nativeTypeNames[name] = true;
@@ -1180,8 +1259,8 @@ final class ScriptEngine
             // declarations, since a zero-argument static property can run code.
             auto placeholder = Value.from(cast(Value[string]) null);
             placeholder.setTypeChain([Value.from(hostReflectedTypeName!T)]);
-            bind(name, placeholder);
-            completionRegistry_.typeBinding!T(name, placeholder);
+            binder(name, placeholder);
+            if (recordMetadata) completionRegistry_.typeBinding!T(name, placeholder);
             return;
         }
         static if (is(T == class))
@@ -1198,6 +1277,8 @@ final class ScriptEngine
                 typeChain ~= Value.from(Base.stringof);
             }
         }
+
+        static if (is(T == struct)) registerArrayDefault!T(name);
 
         ReflectedCallable[] reflectedConstructors;
         static if (__traits(compiles, __traits(getOverloads, T, "__ctor")))
@@ -1374,8 +1455,8 @@ final class ScriptEngine
         meta["__call"] = constructor;
         typeValue.tableValue["__meta"] = Value.from(meta);
 
-        bind(name, typeValue);
-        if (completionRegistry_ !is null) completionRegistry_.typeBinding!T(name, typeValue);
+        binder(name, typeValue);
+        if (recordMetadata && completionRegistry_ !is null) completionRegistry_.typeBinding!T(name, typeValue);
     }
 
     void bindNative(string name, NativeFunction callback)
@@ -1740,6 +1821,23 @@ final class ScriptEngine
             if (index < statement.memberDefaults.length && statement.memberDefaults[index] !is null)
                 defaults[name] = Value.fromFunction(new MemberDefaultCallable(this, evaluationEnvironment,
                     statement.memberDefaults[index], statement.publicTypeName ~ "." ~ name, types[index]));
+        // 通常の構築で必須引数を省略する規則は変更せず、配列拡張用の既定値だけを定義します。
+        arrayDefaultFactories[typeName] = (size_t depth) {
+            Value[string] entries;
+            foreach (index, fieldName; names)
+            {
+                auto factory = fieldName in defaults;
+                auto value = factory !is null ? invokeFunctionValue(*factory, []) : defaultArrayElement(types[index], depth + 1);
+                auto prepared = prepareContainerValue(value, types[index]);
+                enforce(valueMatchesType(prepared, types[index]), "Array default expected " ~ types[index]);
+                entries[fieldName] = prepared.valueCopy();
+            }
+            auto result = Value.fromStruct(entries);
+            result.inheritDeclaredMetatable(definitionValue);
+            result.setTypeChain(chain);
+            attachNonNullFields(result, Value.from(definition));
+            return result;
+        };
         auto constructor = Value.fromFunction(new NativeCallable(typeName, (scope const(Value)[] args) {
             auto tableForm = args.length == 1 && args[0].kind == ValueKind.table;
             enforce(tableForm || args.length <= names.length,
@@ -1851,6 +1949,83 @@ final class ScriptEngine
         return name;
     }
 
+    private Value defaultArrayElement(string typeName, size_t depth = 0)
+    {
+        enforce(depth < 64, "Cyclic or excessively nested array default type");
+        typeName = resolveContainerType(typeName);
+        if (!typeName.length) return Value.nullValue();
+        string inner;
+        if (splitNonNullType(typeName, inner))
+        {
+            auto value = defaultArrayElement(inner, depth + 1);
+            enforce(!value.isNullReference, "Array element type has no non-null default: " ~ typeName);
+            return value;
+        }
+        if (isStringLiteralType(typeName)) return Value.from(parseJSON(typeName).str);
+        switch (typeName)
+        {
+            case "byte", "ubyte", "short", "ushort", "int", "uint", "long", "ulong": return Value.from(0);
+            case "float", "double", "real": return Value.from(double.nan);
+            case "bool": return Value.from(false);
+            case "string": return Value.from("");
+            default: break;
+        }
+        if (typeAllowsNull(typeName)) return prepareContainerValue(Value.nullValue(), typeName);
+        if (auto factory = typeName in arrayDefaultFactories) return (*factory)(depth);
+        enforce(false, "Array element type has no unambiguous default: " ~ typeName);
+        assert(0);
+    }
+
+    private Value resizeScriptArray(Value original, Value requested)
+    {
+        enforce(requested.kind == ValueKind.integer, "Array length must be an integer");
+        enforce(requested.integerValue >= 0, "Array length must be non-negative");
+        enforce(cast(ulong) requested.integerValue <= size_t.max / Value.sizeof,
+            "Array length exceeds the addressable allocation size");
+        auto length = cast(size_t) requested.integerValue;
+        auto oldLength = original.arrayValue.length;
+        if (length == oldLength) return original;
+        Value[] elements;
+        if (length < oldLength) elements = original.arrayValue[0 .. length];
+        else
+        {
+            // 分岐を勝手に選ばない。縮小だけなら全体unionの既存の制約を維持できます。
+            enforce(original.arrayValidation is null || !original.arrayValidation.localTypes.length,
+                "Cannot grow an array with whole-array union constraints; use an explicitly typed array");
+            // 失敗途中でaliasの領域を書き換えないよう、拡張先は独立して準備します。
+            elements.length = length;
+            foreach (index; 0 .. oldLength) elements[index] = original.arrayValue[index].valueCopy();
+            foreach (index; oldLength .. length)
+            {
+                consumeStep();
+                auto value = defaultArrayElement(original.arrayElementType.length ? original.arrayElementType : original.arrayDefaultType);
+                if (original.arrayElementType.length)
+                    enforce(valueMatchesType(value, original.arrayElementType), "Array default expected " ~ original.arrayElementType);
+                elements[index] = value.valueCopy();
+            }
+        }
+        auto result = original.resizedArrayHandle(elements);
+        if (original.arrayValidation !is null)
+            foreach (types; original.arrayValidation.localTypes) result = prepareUnionArray(result, types);
+        return result;
+    }
+
+    // Only numeric promotion is implicit. Test the entire union before
+    // converting so int|double and double|int both preserve integer values.
+    private bool hasFloatingPromotion(string typeName, size_t depth = 0)
+    {
+        if (depth >= 64) return false;
+        typeName = resolveContainerType(typeName);
+        string inner;
+        if (splitNonNullType(typeName, inner)) return hasFloatingPromotion(inner, depth + 1);
+        if (typeName == "double" || typeName == "float" || typeName == "real") return true;
+        if (auto definition = findTypeDefinition(typeName))
+            if (!definition.tableValue["isTable"].truthy())
+                foreach (alternative; definition.tableValue["alternatives"].arrayValue)
+                    if (hasFloatingPromotion(alternative.toHostString(), depth + 1)) return true;
+        return false;
+    }
+
     private Value prepareContainerValue(Value value, string typeName)
     {
         typeName = resolveContainerType(typeName);
@@ -1860,6 +2035,9 @@ final class ScriptEngine
             enforce(!value.isNullReference, typeMismatchMessage(typeName, "Non-nullable type expected " ~ typeName ~ " but got null"));
             return prepareContainerValue(value, nonNullInner);
         }
+        if (value.kind == ValueKind.integer && hasFloatingPromotion(typeName)
+            && !valueMatchesType(value, typeName))
+            return Value.from(cast(double) value.integerValue);
         if (value.kind == ValueKind.null_)
         {
             auto target = nullContainerTarget(typeName);
@@ -2132,7 +2310,7 @@ final class ScriptEngine
         foreach (name, fieldType; definition.tableValue["fields"].tableValue)
         {
             auto type = fieldType.toHostString();
-            if (hasNonNullConstraint(type) || hasContainerConstraint(type))
+            if (hasNonNullConstraint(type) || hasContainerConstraint(type) || hasFloatingPromotion(type))
                 value.addFieldConstraint(name, type, containerValidator(type));
         }
     }
@@ -2624,8 +2802,17 @@ unittest
         return [left + 2, 2 + right];
     }).toScriptLiteral() == `[102, 202]`);
 
-    foreach (source; [`return left - 2;`, `return 2 - right;`,
-        `return generic + "nope";`, `return "nope" + generic;`])
+    // These types have no minus overload at all. The missing slots now reach
+    // the built-in numeric rejection instead of an empty native dispatcher.
+    assert(engine.getGlobal("left").findMember("opBinary-") is null);
+    assert(engine.getGlobal("right").findMember("opBinaryRight-") is null);
+    foreach (source; [`return left - 2;`, `return 2 - right;`])
+    {
+        auto unsupported = engine.runSafe(source);
+        assert(!unsupported.ok && unsupported.errorMessage.canFind("Expected number but got"));
+    }
+    // Existing overloads with incompatible operand types still report mismatch.
+    foreach (source; [`return generic + "nope";`, `return "nope" + generic;`])
     {
         auto mismatch = engine.runSafe(source);
         assert(!mismatch.ok);

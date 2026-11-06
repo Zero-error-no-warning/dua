@@ -7,7 +7,9 @@ test('completes declarations and standard library members', () => {
   const source = 'struct Vec { int x; }\nVec[] points = [];\nint add(int left, int right) { return left + right; }\nimport actor as Actor;\nforeach (index, value; points) {}\n';
   const labels = completions(source, source.length).map(item => item.label);
   for (const name of ['auto', 'double', 'iota', 'Vec', 'points', 'add', 'left', 'right', 'Actor', 'index', 'value']) assert.ok(labels.includes(name), name);
-  assert.deepEqual(completions('math.', 5).map(item => item.label), ['abs', 'floor', 'min', 'max']);
+  for(const name of ['abs','floor','min','max','sqrt','clamp','PI'])assert.ok(completions('math.',5).some(item=>item.label===name),name);
+  for(const [source,name] of [['json.','decode'],['utf8.','chars'],['string.','split'],['string.','join'],['string.','format']])
+    assert.ok(completions(source,source.length).some(item=>item.label===name),name);
   assert.ok(completions('package.lo', 10).some(item => item.label === 'loaded'));
   assert.deepEqual(completions('object.', 7), []);
 });

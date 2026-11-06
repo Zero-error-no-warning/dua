@@ -276,13 +276,14 @@ unittest
     enum prefix = `alias Fruit = "Apple" | "Orange"; alias Mixed = Fruit[] | int[]; `;
     accepts(prefix ~ q{
         Mixed values = ["Apple", "Orange"];
-        auto piece = values[0..1]; piece[0] = 1;
+        auto piece = values[0..1]; piece[0] = "Orange";
         Mixed single = ["Apple"];
         auto joined = single ~ []; joined[0] = 2;
-        return values[0] == "Apple" && values[1] == "Orange"
-            && piece[0] == 1 && single[0] == "Apple" && joined[0] == 2;
+        return values[0] == "Orange" && values[1] == "Orange"
+            && piece[0] == "Orange" && single[0] == "Apple" && joined[0] == 2;
     });
     rejects(prefix ~ `Mixed values = ["Apple", "Orange"]; auto piece = values[0..$]; piece[0] = 1;`, false);
+    rejects(prefix ~ `Mixed values = ["Apple", "Orange"]; auto piece = values[0..1]; piece[0] = 1;`, false);
     rejects(prefix ~ `Mixed values = ["Apple"]; auto joined = values ~ ["Orange"]; joined[0] = 1;`, false);
     rejects(prefix ~ q{
         alias Grid = Fruit[][] | int[][];

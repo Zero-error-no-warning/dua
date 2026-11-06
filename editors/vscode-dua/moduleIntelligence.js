@@ -110,11 +110,15 @@ function catalogWithImports(catalog, analysis, sourceName) {
     if (!target) continue;
     symbols[item.aliasName] = { kind: 'module' };
     for (const value of target.exports || []) {
+      // A native module's service summary may merge overloads. Keep its full reflected catalog.
+      const native = !item.pathImport && target.key===item.request && target.sourceName===item.request && !target.sourceText;
+      const reflected = native && catalog.symbols[`${item.request}.${value.name}`];
+      if (reflected) {symbols[`${item.aliasName}.${value.name}`] = reflected; continue;}
       symbols[`${item.aliasName}.${value.name}`] = {
         kind: value.kind, type: value.type, displayType: value.displayType || value.type, nominalValue: value.nominalValue === true, ...constructorEntry(value),
         documentation: value.kind === 'type' && types[value.type]?.tableConstruction ? '公開されたnamed table型' : value.kind === 'type' && !value.runtimeValue ? '公開された型alias（実行時の値・constructorなし）' : 'import先の公開宣言',
-        ...(value.kind === 'function' ? { signatures: [{ returnType: value.type,
-          parameters: (value.parameterTypes || []).map((type, index) => ({ type, displayType:displayType(type), name: `arg${index}`, lazy:value.parameterLazy?.[index] === true,
+        ...(value.kind === 'function' ? { signatures: [{ returnType: value.type, arityKnown:Number.isInteger(value.requiredParameterCount),
+          parameters: (value.parameterTypes || []).map((type, index) => ({ type, displayType:displayType(type), name: value.parameterNames?.[index] || `arg${index}`, lazy:value.parameterLazy?.[index] === true,
             ...(Number.isInteger(value.requiredParameterCount) && index >= value.requiredParameterCount ? {optional:true} : {}),
             variadic:value.variadic === true && index === value.parameterTypes.length-1 })) }] } : {})
       };

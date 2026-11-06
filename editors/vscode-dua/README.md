@@ -7,22 +7,32 @@ Duaスクリプト（`.dua`）向けのVS Code拡張です。
 - キーワード・型・標準関数と、編集中のファイルにある宣言名の入力補完
 - `math.`、`string.`、`json.` などの標準ライブラリのメンバー補完
 - プロジェクトが生成する JSON によるホスト API・型・メンバー補完（[生成方法と形式](HOST_COMPLETION.md)）
+- 関数呼び出しのシグネチャヒントと入力中の引数位置の表示
 - 関数・ループ・struct・importなどのスニペット
 - 入力中の構文エラー・事前型チェックの結果を波線と「問題」パネルに表示
 - コメント操作、括弧とダブルクォートの補完、リージョンの折りたたみ
 
 ## インストール（Windows x64）
 
-`dua-language-win32-x64-0.4.1.vsix` を用意し、VS Codeのコマンドパレットで **Extensions: Install from VSIX...** を実行して選択します。必要に応じて **Developer: Reload Window** を実行してください。
+`dua-language-win32-x64-0.6.10.vsix` を用意し、VS Codeのコマンドパレットで **Extensions: Install from VSIX...** を実行して選択します。必要に応じて **Developer: Reload Window** を実行してください。
 
 コマンドからインストールする場合は、リポジトリのルートで次を実行します。
 
 ```powershell
-code --install-extension .\editors\vscode-dua\dua-language-win32-x64-0.4.1.vsix
+code --install-extension .\editors\vscode-dua\dua-language-win32-x64-0.6.10.vsix
 ```
 
 Windows x64用VSIXには診断ツールを含むため、利用時にDコンパイラーやNode.jsを別途インストールする必要はありません。`.dua` を開けばDuaとして認識され、`Ctrl+Space` で補完候補を表示できます。ワークスペースが信頼済みの場合、診断は自動で有効になります。
 
+## 関数のシグネチャヒント（0.6.9）
+
+関数名の後の `(`、引数区切りの `,` で引数名・型・戻り値を表示します。手動では **Trigger Parameter Hints**（既定 `Ctrl+Shift+Space`）を使えます。入れ子の呼び出し、複数行、文字列・コメント内のカンマを区別し、入力中の引数を強調します。省略可能引数は `= …`、可変長引数は `...`、lazy引数は `lazy` と表示します。既定式を評価することはありません。
+
+ローカルの名前付き関数、明示されたdelegate型、import先の公開関数、標準関数、およびカタログに記録されたD側関数・メソッド・コンストラクタが対象です。importは診断と同じproject/scripts設定・境界を使い、開いている依存ファイルの未保存本文も参照します。D側のオーバーロードは全候補を表示し、引数位置に合う候補を選びます。引数の実行時の値からオーバーロードを確定する機能ではありません。
+
+署名を静的に取得できない動的な関数・メタテーブル・型なしの匿名関数、文字列補間内の呼び出しにはヒントを確定しません。明示delegate型で引数名がない場合は `arg0` などを表示します。未信頼ワークスペースや独自checkerでは、import解析を起動せずローカル宣言とカタログから取得できる範囲に限ります。構文が大きく未完成な場合は取得できないことがあります。
+
+同版のcheckerは、幅付き数値型の同型return/代入を誤って拒否した問題も修正します。異なる型の診断や実行時の値域検査は維持します。
 ## 使用例
 
 ```dua
@@ -161,8 +171,18 @@ table/struct の最上位宣言で共通metaを指定できます。with(target)
 
 ### ホストの添字代入とミニシーンの補完
 
-具体的なDホスト`opIndexAssign`を通常の単一添字代入から呼べます。構文は既存の添字代入のままです。[仕様と対象外](../../docs/native-index-assignment.md)を参照してください。ZsDのMiniStep/miniWhile/miniDoWhile/miniForeachやSceneの処理配列版は、更新した公開登録から生成するホストカタログに含まれます。構文・TextMateの新しいキーワード追加は不要です。実行ファイルに対応するソースでカタログを再生成してください。
+具体的なDホスト`opIndexAssign`を通常の単一添字代入から呼べます。構文は既存の添字代入のままです。[仕様と対象外](../../docs/native-index-assignment.md)を参照してください。ZsDのdelegate版doStep/miniSceneとScene.requireContinuousStepは、更新した公開登録から生成するホストカタログに含まれます。旧MiniStep構築APIは廃止し、Scene.miniWhile等のScene動作メソッドは維持します。構文・TextMateの新しいキーワード追加は不要です。実行ファイルに対応するソースでカタログを再生成してください。
 
 ### table / struct メンバー初期値（0.6.7）
 
 `int hp = 100;` のような型メンバーの既定式に対応します。named table生成の省略可能フィールド、import/spread/alias、structの末尾省略を診断・補完へ反映します。生成中の他メンバーは自動束縛しません。対応するゲーム実行処理系が必要で、拡張の更新だけでは旧EXEを対応させられません。
+
+### Project context
+
+ZsDからprojectを明示して生成したカタログは、素材基点とmodule基点を分け、project外・子project・リンク経由のimportを実行時と同じ条件で拒否します。補完・定義・診断は同じ解析要求を使います。projectファイルの変更後はカタログを再生成してください。単体文書のカタログにはこの境界を追加しません。
+
+既に開いているVS Codeウィンドウは、拡張更新後に未保存の内容を保ったうえで再読込してください。
+
+## 文字列（0.6.10）
+
+文字列の添字とlengthはUTF-8バイト単位です。count(text)はコードポイント数、charAt(text, index)は1コードポイントの文字列を返します。文字列のドット補完とシグネチャヒントにも対応します。詳細と不正UTF-8の扱いは docs/string-literals-ja.md を参照してください。

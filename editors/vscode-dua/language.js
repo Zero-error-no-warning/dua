@@ -2,7 +2,7 @@
 const {readType}=require('./typeSyntax');
 const {tokens}=require('./hostCompletion');
 
-const keywords = 'auto lazy delegate alias struct is cast try catch return if else while for foreach switch case default break continue yield true false null this import export as instance new table with'.split(' ');
+const keywords = 'auto lazy ref delegate alias struct is cast try catch finally return if else while for foreach foreach_reverse switch case default break continue yield true false null this import export as instance new table with'.split(' ');
 const types = 'any void bool byte ubyte short ushort int uint long ulong float double real string'.split(' ');
 const builtins = {
   error: ['error(value, level?)', 'スクリプトエラーを送出します。'],
@@ -10,6 +10,8 @@ const builtins = {
   typeinfo: ['typeinfo(value)', '値の型と型チェーンを取得します。'],
   length: ['length(value)', '文字列・配列・テーブルなどの長さを返します。'],
   len: ['len(value)', 'lengthの別名です。'],
+  count: ['count(text)', 'UTF-8文字列のUnicodeコードポイント数を返します（バイト数ではありません）。'],
+  charAt: ['charAt(text, index)', '0始まりのUnicodeコードポイントを1文字のstringで返します。結合文字は個別です。'],
   iota: ['iota(end) / iota(start, end, step?)', '終了値を含まない整数配列を生成します。'],
   rawget: ['rawget(table, key)', 'メタメソッドを使わずに値を取得します。'],
   rawset: ['rawset(table, key, value)', 'メタメソッドを使わずに値を設定します。'],
@@ -20,6 +22,8 @@ const builtins = {
   xpcall: ['xpcall(callback, errHandler, args...)', 'エラーハンドラー付きの保護呼び出しです。'],
   map: ['map(collection, callback)', '各要素を変換します。'],
   filter: ['filter(collection, callback)', '条件に合う要素を選別します。'],
+  sorted: ['sorted(array, comparator?)', '元の配列を変更せず安定ソートした配列を返します。'],
+  reduce: ['reduce(array, initial, callback)', '左からcallback(accumulator, value)を適用します。'],
   require: ['require(name)', 'モジュールの既定の実体を読み込みます。'],
   addModulePath: ['addModulePath(pattern)', 'モジュール検索パターンを追加します。'],
   setModuleLoaders: ['setModuleLoaders(loaders)', 'モジュールローダーを設定します。'],
@@ -27,15 +31,17 @@ const builtins = {
   _ENV: ['_ENV(name)', 'グローバル値を名前で取得します。']
 };
 const libraries = {
-  string: { len: 'value', upper: 'value', lower: 'value', trim: 'value', contains: 'value, needle', replace: 'value, from, to' },
-  math: { abs: 'value', floor: 'value', min: 'value, args...', max: 'value, args...' },
+  string: { len: 'value', upper: 'value', lower: 'value', trim: 'value', contains: 'value, needle', replace: 'value, from, to', split: 'text, separator', join: 'parts, separator', format: 'format, args...' },
+  math: { abs: 'value', floor: 'value', min: 'value, args...', max: 'value, args...', exp: 'x', fmod: 'x, y', fmax: 'x, y', fmin: 'x, y', sqrt: 'x', log: 'x', sin: 'x', cos: 'x', tan: 'x', clamp: 'x, low, high' },
   table: { len: 'value', length: 'value', keys: 'value', map: 'value, callback', filter: 'value, callback' },
-  utf8: { len: 'value' },
+  utf8: { len: 'value', chars: 'text' },
+  algorithm: { clamp: 'x, low, high' },
+  random: { Random: 'seed?', uniform01: 'rng?', unpredictableSeed: '', seed: 'seed', uniform: 'low, high, boundaries?, rng?', choice: 'array, rng?', dice: 'weights..., rng?' },
   io: { exists: 'path', readFile: 'path' },
   os: { clock: '', getenv: 'name' },
   time: { nowUnix: '' },
   debug: { type: 'value', traceback: '' },
-  json: { encode: 'value' },
+  json: { encode: 'value', decode: 'text' },
   package: { require: 'name', addPath: 'pattern', addLoader: 'loader', clearLoaders: '' }
 };
 
@@ -63,7 +69,7 @@ function documentNames(source) {
   for (const match of text.matchAll(/\b(?:import\s+([A-Za-z_]\w*)(?:\.[A-Za-z_]\w*)*|as\s+([A-Za-z_]\w*))/g)) {
     names.set(match[2] || match[1], 'module');
   }
-  for (const match of text.matchAll(/\bforeach\s*\(\s*([A-Za-z_]\w*)(?:\s*,\s*([A-Za-z_]\w*))?\s*;/g)) {
+  for (const match of text.matchAll(/\b(?:foreach|foreach_reverse)\s*\(\s*([A-Za-z_]\w*)(?:\s*,\s*([A-Za-z_]\w*))?\s*;/g)) {
     names.set(match[1], 'iterator');
     if (match[2]) names.set(match[2], 'iterator');
   }
@@ -78,6 +84,7 @@ function completions(source, offset) {
     const lib = libraries[member[1]];
     if (!lib) return [];
     const items = Object.entries(lib).map(([label, args]) => ({ label, kind: 'function', detail: `${member[1]}.${label}(${args})` }));
+    if (member[1] === 'math') items.push({label:'PI',kind:'variable',detail:'円周率'});
     if (member[1] === 'package') items.push({ label: 'path', kind: 'variable', detail: 'モジュール検索パターン配列' }, { label: 'loaded', kind: 'variable', detail: '読み込み済みモジュール' });
     return items;
   }
